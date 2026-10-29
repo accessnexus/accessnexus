@@ -4,6 +4,31 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-10-29
+
+### Added
+
+- `rpc({ volatility: 'volatile' | 'stable' | 'immutable' })`. `immutable: true` still works as
+  an alias; a contradicting pair is reported as `RPC_VOLATILITY_CONFLICT`. Declare read-only
+  helpers used in RLS policies `'stable'` so Postgres can evaluate them once per query.
+- `rpc({ set })` and `trigger.custom({ set })`: function configuration such as
+  `{ row_security: 'off' }`, emitted as `SET key = 'value'` (keys validated as GUC names,
+  values quoted; `INVALID_FUNCTION_SET` otherwise). `search_path` stays pinned to
+  `pg_catalog, public`; a different `set.search_path` is ignored with a `SEARCH_PATH_PINNED`
+  warning.
+- `init --json` returns `hardenedFunctions`: every imported RPC or trigger function whose
+  `search_path` `generate` changes (from another value, or none, to `pg_catalog, public`).
+
+### Fixed
+
+- `init --db-url` no longer loses function volatility: `STABLE` / `IMMUTABLE` functions were
+  re-created as `VOLATILE` (an issue for helpers used inside RLS policies). They are imported
+  as `volatility`.
+- `init --db-url` keeps every `SET` option of a function or trigger function
+  (`pg_proc.proconfig`, e.g. `row_security = off`) instead of only `search_path`.
+- The `search_path` rewrite on import is no longer silent: each affected function gets a
+  `// NOTE:` comment in the generated schema and is listed in the init output.
+
 ## [0.1.1] - 2026-10-29
 
 ### Security

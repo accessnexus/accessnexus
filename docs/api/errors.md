@@ -184,6 +184,9 @@ Static checks run by `validate`, `generate`, `diff` and `push`. In Database mode
 
 | Code | Severity | Path | Meaning | Fix |
 | --- | --- | --- | --- | --- |
-| `INVALID_RPC` | error | `rpcs.<name>` | An entry of `rpcs` was not created with `rpc()`. | `rpcs: { name: rpc({ ... }) }`. |
+| `INVALID_RPC` | error | `rpcs.<name>` | An entry of `rpcs` was not created with `rpc()`, or its `volatility` is not `'volatile'` / `'stable'` / `'immutable'`. | `rpcs: { name: rpc({ ... }) }`. |
+| `RPC_VOLATILITY_CONFLICT` | error | `rpcs.<name>.volatility` | `immutable` contradicts `volatility` (e.g. `immutable: true, volatility: 'stable'`). | Keep only `volatility`. |
+| `INVALID_FUNCTION_SET` | error | `rpcs.<name>.set`, `<table>.triggers[<i>].set` | `set` is not an object, a key is not a configuration parameter name, or a value is not a string. | `set: { row_security: 'off' }`. |
+| `SEARCH_PATH_PINNED` | warning | `rpcs.<name>.set.search_path`, `<table>.triggers[<i>].set.search_path` | `set.search_path` differs from `pg_catalog, public`; generated functions always pin that value, so it is ignored. | Remove it and schema-qualify anything outside `public` in the body. |
 
 RPCs also produce `INVALID_IDENTIFIER` (name or argument name), `UNKNOWN_COLUMN_TYPE` (argument type), `INVALID_DEFAULT` (an argument default that is not a SQL string, or an argument without default after one with a default) and `UNWRAPPED_AUTH_CALL` (body).

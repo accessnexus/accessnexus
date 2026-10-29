@@ -103,7 +103,8 @@ export default defineSchema({
 
 ### Como as funções são traduzidas {#how-functions-are-translated}
 
-- Argumentos e tipo de retorno escalares: um `rpc({ args, returns, language, security, body })` completo. O `push` a recria com um `search_path` fixado; uma função definer perde o `EXECUTE` para `anon`, a menos que você adicione `allowAnon: true`.
+- Argumentos e tipo de retorno escalares: um `rpc({ args, returns, language, security, volatility, set, body })` completo. `STABLE` / `IMMUTABLE` são mantidos em `volatility`, e todo `SET` da função exceto `search_path` (`pg_proc.proconfig`, ex. `row_security = off`) em `set`. Uma função definer perde o `EXECUTE` para `anon`, a menos que você adicione `allowAnon: true`.
+- O `search_path` é endurecido: o `push` recria toda função importada (RPCs e funções de trigger) com `SET search_path = pg_catalog, public`. Uma função que tinha outro `search_path` (ex. `'public'`) ou nenhum ganha um comentário `// NOTE:` no schema, e o `init` a lista (na saída humana e em `hardenedFunctions: [{ kind, name, from, to }]` com `--json`). Confira se o corpo qualifica com o schema tudo que está fora de `public` (`auth.users`, `extensions.<fn>`).
 - `SETOF`, `TABLE(...)` ou tipos compostos: um marcador `rpc()` só com a assinatura. A função continua como está no banco.
 - Os defaults dos parâmetros são mantidos: `p_limit integer DEFAULT 20` vira `p_limit: { type: 'int', default: '20' }`, então o `CREATE OR REPLACE` bate com a função existente (o Postgres se recusa a substituir uma função removendo seus defaults).
 - Nomes com underscore no início (`_pix_crc16`) são válidos.
@@ -114,6 +115,7 @@ export default defineSchema({
 Cada trigger do usuário vira um `trigger.custom({ name, events, forEach, when, security, functionBody })` com o corpo da sua função (`pg_proc.prosrc`):
 
 - `BEFORE` / `AFTER`, `INSERT` / `UPDATE` / `DELETE`, `FOR EACH ROW` / `STATEMENT`, a condição `WHEN` e o `SECURITY DEFINER` são mantidos.
+- As opções `SET` da função também são mantidas (em `set`). A volatilidade não: funções de trigger são sempre criadas `VOLATILE`, o que tem o mesmo efeito para um trigger. O `search_path` é endurecido como nas RPCs.
 - `UPDATE OF col` num trigger de linha que só trata UPDATE vira `when: 'OLD.col IS DISTINCT FROM NEW.col'`; senão ele dispara em todo UPDATE e um `// WARNING:` avisa.
 - Não importados, com um comentário `// WARNING:` e o `CREATE TRIGGER` original: triggers que passam argumentos (`TG_ARGV`), triggers desabilitados, `INSTEAD OF` e os só de `TRUNCATE`, e funções que não são `plpgsql`. Um constraint trigger é importado como trigger comum, com um aviso.
 

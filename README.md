@@ -291,7 +291,7 @@ writes are `TO public` only for an explicit `policy.public()`.
   `lockColumns({ columns | except, unless?, name? })` (BEFORE UPDATE: API users cannot change
   those columns unless the SQL condition holds),
   `custom({ name, events, functionBody, when?, forEach?, security? })`.
-- **`rpc(config?)`** — `{ args? (name → type, or `{ type, default }` with a raw SQL default), returns?, body?, language? ('plpgsql'|'sql'), security? ('invoker'|'definer'), allowAnon?, immutable? }`. Marker-only `rpc()` for Database mode; add `body` for full SQL generation. Attach via `defineSchema(tables, { rpcs })`. Definer RPCs get `REVOKE EXECUTE ... FROM PUBLIC, anon` unless `allowAnon: true`.
+- **`rpc(config?)`** — `{ args? (name → type, or `{ type, default }` with a raw SQL default), returns?, body?, language? ('plpgsql'|'sql'), security? ('invoker'|'definer'), allowAnon?, volatility? ('volatile'|'stable'|'immutable'), immutable? (alias), set? (`{ row_security: 'off' }` → `SET` clauses; `search_path` stays pinned) }`. Marker-only `rpc()` for Database mode; add `body` for full SQL generation. Attach via `defineSchema(tables, { rpcs })`. Definer RPCs get `REVOKE EXECUTE ... FROM PUBLIC, anon` unless `allowAnon: true`.
 - **Columns** — scalar strings (`'uuid'`, `'text'`, `'int'`, `'jsonb'`, `'timestamptz'`,
   `'text[]'`, `'numeric(10,2)'`, …), enum via `` "enum('a','b')" ``, nullable by suffixing `?` (`'text?'`), or the
   object form `{ type, default, unique, check, references, onDelete }`. `default` and `check`

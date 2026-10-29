@@ -70,7 +70,9 @@ Only RPCs with a `body` end up in `rpcs.sql`.
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | See [Writing the body](#writing-the-body). |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | See [Invoker or definer](#invoker-or-definer). |
 | `allowAnon` | `boolean` | `false` | Definer RPCs only: also grant EXECUTE to `anon`. |
-| `immutable` | `boolean` | `false` | `true` emits `IMMUTABLE`, otherwise `VOLATILE`. There is no `STABLE` option. |
+| `volatility` | `'volatile' \| 'stable' \| 'immutable'` | `'volatile'` | Emitted as `VOLATILE` / `STABLE` / `IMMUTABLE`. A helper called from RLS policies should be `'stable'`: a `VOLATILE` one is re-evaluated for every row instead of once per query. |
+| `immutable` | `boolean` | `false` | Alias of `volatility: 'immutable'` (a conflicting `volatility` is `RPC_VOLATILITY_CONFLICT`). |
+| `set` | `Record<string, string>` | none | Function configuration, e.g. `{ row_security: 'off' }` → `SET row_security = 'off'`. Values are quoted; keys must be configuration parameter names. `search_path` stays pinned (see below). |
 
 RPC names follow the same rule as tables: lowercase snake_case (`INVALID_IDENTIFIER` otherwise). Unknown argument types fail with `UNKNOWN_COLUMN_TYPE`.
 
@@ -78,7 +80,7 @@ RPC names follow the same rule as tables: lowercase snake_case (`INVALID_IDENTIF
 
 - **`plpgsql`**: AccessNexus wraps the body in `BEGIN ... END;`. If your body starts with `DECLARE` or `BEGIN`, it is emitted as-is, so write the whole block yourself (needed for local variables).
 - **`sql`**: emitted verbatim. The last statement's result is the return value.
-- Every function gets `SET search_path = pg_catalog, public`. Anything outside those two schemas must be schema-qualified (`auth.uid()`, `auth.users`, `extensions.<fn>`).
+- Every function gets `SET search_path = pg_catalog, public`. Anything outside those two schemas must be schema-qualified (`auth.uid()`, `auth.users`, `extensions.<fn>`). A `search_path` in `set` cannot change it: `validate` warns `SEARCH_PATH_PINNED` and the pinned value is emitted.
 - `args` become plain SQL parameters. Prefix them (`p_org_id`) so they never shadow a column name.
 
 ```ts [accessnexus.schema.ts]

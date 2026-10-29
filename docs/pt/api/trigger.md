@@ -187,6 +187,7 @@ custom(options: {
   when?: string;
   forEach?: TriggerForEach;
   security?: 'invoker' | 'definer';
+  set?: Record<string, string>;
 }): CustomTrigger;
 
 type TriggerEvent =
@@ -204,6 +205,7 @@ type TriggerForEach = 'row' | 'statement';
 | `when` | `string` | `undefined` | Condição SQL emitida como `WHEN (<when>)`. |
 | `forEach` | `'row' \| 'statement'` | `'row'` | `FOR EACH ROW` ou `FOR EACH STATEMENT`. |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | `'definer'` adiciona `SECURITY DEFINER`: o corpo roda como o dono da função e ignora o RLS. |
+| `set` | `Record<string, string>` | `undefined` | Configuração da função, como em [`rpc`](/pt/api/rpc#options): `{ row_security: 'off' }` emite `SET row_security = 'off'`. O `search_path` continua fixado em `pg_catalog, public`. |
 
 Os eventos são agrupados por momento: `['before_insert', 'before_update']` vira `BEFORE INSERT OR UPDATE`. O corpo é envolvido como `BEGIN <functionBody> END;`, então não pode ter uma seção `DECLARE` própria.
 

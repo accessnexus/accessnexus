@@ -9,7 +9,9 @@ function rpc(config?: {
   body?: string;
   language?: RpcLanguage;
   security?: RpcSecurity;
-  immutable?: boolean;
+  volatility?: RpcVolatility;
+  immutable?: boolean; // alias de volatility: 'immutable'
+  set?: Record<string, string>;
   allowAnon?: boolean;
 }): RpcDef;
 ```
@@ -33,10 +35,16 @@ As RPCs vão no segundo argumento do [`defineSchema`](/pt/api/schema#defineschem
 | `body` | `string` | `undefined` | Corpo da função, sem o invólucro `CREATE FUNCTION`. Sem ele, nenhum SQL é gerado. |
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | `LANGUAGE`. |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | `SECURITY INVOKER` ou `SECURITY DEFINER`. |
-| `immutable` | `boolean` | `false` | `IMMUTABLE` em vez de `VOLATILE`. |
+| `volatility` | `'volatile' \| 'stable' \| 'immutable'` | `'volatile'` | `VOLATILE`, `STABLE` ou `IMMUTABLE`. Use `'stable'` em funções só de leitura chamadas dentro de policies RLS (veja abaixo). |
+| `immutable` | `boolean` | `false` | Alias de `volatility: 'immutable'`. Combinar com outra `volatility` é `RPC_VOLATILITY_CONFLICT`. |
+| `set` | `Record<string, string>` | `undefined` | Configuração da função: `{ row_security: 'off' }` emite `SET row_security = 'off'`. As chaves precisam ser nomes de parâmetros de configuração (`work_mem`, `myapp.tenant`); os valores são strings emitidas como um único literal entre aspas (senão, `INVALID_FUNCTION_SET`). O `search_path` não pode ser alterado: um valor diferente é ignorado com o aviso `SEARCH_PATH_PINNED`. |
 | `allowAnon` | `boolean` | `false` | Só com `security: 'definer'`: mantém o `EXECUTE` para `anon`. |
 
 Tipos de argumento desconhecidos são reportados como `UNKNOWN_COLUMN_TYPE`; um `auth.uid()` sem wrapper no body, como `UNWRAPPED_AUTH_CALL`.
+
+::: tip Volatilidade e RLS
+Uma função chamada dentro de uma policy (`policy.custom('is_member(org_id)')`) que é `VOLATILE` é avaliada de novo para cada linha, e o Postgres não consegue transformá-la em initPlan. Declare helpers só de leitura com `volatility: 'stable'` (ou `'immutable'` quando o resultado depende só dos argumentos) para que sejam avaliados uma vez por query.
+:::
 
 ::: warning
 Tipos enum (`"enum('a','b')"`) são aceitos pelo `validate` em `args` e `returns`, mas são emitidos literalmente na assinatura SQL, o que o Postgres rejeita. Use `'text'` e faça o cast dentro do body.
@@ -49,8 +57,9 @@ CREATE OR REPLACE FUNCTION <name>(<arg> <TYPE>, ...)
 RETURNS <TYPE>
 LANGUAGE <language>
 SECURITY <INVOKER|DEFINER>
-<VOLATILE|IMMUTABLE>
+<VOLATILE|STABLE|IMMUTABLE>
 SET search_path = pg_catalog, public
+SET <key> = '<value>'   -- um por entrada de `set`, em ordem de chave
 AS $$
 <body>
 $$;
@@ -124,12 +133,15 @@ interface RpcDef {
   readonly body?: string;
   readonly language?: RpcLanguage;
   readonly security?: RpcSecurity;
+  readonly volatility?: RpcVolatility;
   readonly immutable?: boolean;
+  readonly set?: Readonly<Record<string, string>>;
   readonly allowAnon?: boolean;
 }
 
 type RpcLanguage = 'plpgsql' | 'sql';
 type RpcSecurity = 'invoker' | 'definer';
+type RpcVolatility = 'volatile' | 'stable' | 'immutable';
 type RpcReturnType = ColumnType | 'void';
 ```
 

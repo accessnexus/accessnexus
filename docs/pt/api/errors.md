@@ -184,6 +184,9 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 
 | Código | Severidade | Path | Significado | Correção |
 | --- | --- | --- | --- | --- |
-| `INVALID_RPC` | error | `rpcs.<name>` | Uma entrada de `rpcs` não foi criada com `rpc()`. | `rpcs: { name: rpc({ ... }) }`. |
+| `INVALID_RPC` | error | `rpcs.<name>` | Uma entrada de `rpcs` não foi criada com `rpc()`, ou sua `volatility` não é `'volatile'` / `'stable'` / `'immutable'`. | `rpcs: { name: rpc({ ... }) }`. |
+| `RPC_VOLATILITY_CONFLICT` | error | `rpcs.<name>.volatility` | `immutable` contradiz `volatility` (ex. `immutable: true, volatility: 'stable'`). | Mantenha só `volatility`. |
+| `INVALID_FUNCTION_SET` | error | `rpcs.<name>.set`, `<table>.triggers[<i>].set` | `set` não é um objeto, uma chave não é nome de parâmetro de configuração, ou um valor não é string. | `set: { row_security: 'off' }`. |
+| `SEARCH_PATH_PINNED` | warning | `rpcs.<name>.set.search_path`, `<table>.triggers[<i>].set.search_path` | `set.search_path` difere de `pg_catalog, public`; funções geradas sempre fixam esse valor, então ele é ignorado. | Remova e qualifique com o schema tudo que está fora de `public` no corpo. |
 
 As RPCs também produzem `INVALID_IDENTIFIER` (nome ou nome de argumento), `UNKNOWN_COLUMN_TYPE` (tipo de argumento), `INVALID_DEFAULT` (um default de argumento que não é uma string SQL, ou um argumento sem default depois de um com default) e `UNWRAPPED_AUTH_CALL` (body).

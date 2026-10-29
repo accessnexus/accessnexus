@@ -70,7 +70,9 @@ Só as RPCs com `body` entram em `rpcs.sql`.
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | Veja [Escrevendo o corpo](#writing-the-body). |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | Veja [Invoker ou definer](#invoker-or-definer). |
 | `allowAnon` | `boolean` | `false` | Só para RPCs definer: também concede EXECUTE a `anon`. |
-| `immutable` | `boolean` | `false` | `true` emite `IMMUTABLE`; caso contrário, `VOLATILE`. Não há opção `STABLE`. |
+| `volatility` | `'volatile' \| 'stable' \| 'immutable'` | `'volatile'` | Emitido como `VOLATILE` / `STABLE` / `IMMUTABLE`. Um helper chamado em policies RLS deveria ser `'stable'`: um `VOLATILE` é reavaliado a cada linha em vez de uma vez por query. |
+| `immutable` | `boolean` | `false` | Alias de `volatility: 'immutable'` (uma `volatility` conflitante é `RPC_VOLATILITY_CONFLICT`). |
+| `set` | `Record<string, string>` | nenhum | Configuração da função, ex. `{ row_security: 'off' }` → `SET row_security = 'off'`. Os valores vão entre aspas; as chaves precisam ser nomes de parâmetros de configuração. O `search_path` continua fixado (veja abaixo). |
 
 Nomes de RPC seguem a mesma regra das tabelas: snake_case minúsculo (senão, `INVALID_IDENTIFIER`). Tipos de argumento desconhecidos falham com `UNKNOWN_COLUMN_TYPE`.
 
@@ -78,7 +80,7 @@ Nomes de RPC seguem a mesma regra das tabelas: snake_case minúsculo (senão, `I
 
 - **`plpgsql`**: o AccessNexus envolve o corpo em `BEGIN ... END;`. Se o seu corpo começa com `DECLARE` ou `BEGIN`, ele é emitido como está, então escreva o bloco inteiro você mesmo (necessário para variáveis locais).
 - **`sql`**: emitido literalmente. O resultado do último statement é o valor de retorno.
-- Toda função recebe `SET search_path = pg_catalog, public`. Qualquer coisa fora desses dois schemas precisa ser qualificada com o schema (`auth.uid()`, `auth.users`, `extensions.<fn>`).
+- Toda função recebe `SET search_path = pg_catalog, public`. Qualquer coisa fora desses dois schemas precisa ser qualificada com o schema (`auth.uid()`, `auth.users`, `extensions.<fn>`). Um `search_path` em `set` não muda isso: o `validate` avisa `SEARCH_PATH_PINNED` e o valor fixado é emitido.
 - `args` viram parâmetros SQL simples. Use um prefixo (`p_org_id`) para que nunca escondam o nome de uma coluna.
 
 ```ts [accessnexus.schema.ts]

@@ -103,7 +103,8 @@ export default defineSchema({
 
 ### How functions are translated
 
-- Scalar arguments and return type: a full `rpc({ args, returns, language, security, body })`. `push` re-creates it with a pinned `search_path`; a definer function loses `EXECUTE` for `anon` unless you add `allowAnon: true`.
+- Scalar arguments and return type: a full `rpc({ args, returns, language, security, volatility, set, body })`. `STABLE` / `IMMUTABLE` are kept as `volatility`, and every `SET` of the function other than `search_path` (`pg_proc.proconfig`, e.g. `row_security = off`) as `set`. A definer function loses `EXECUTE` for `anon` unless you add `allowAnon: true`.
+- `search_path` is hardened: `push` re-creates every imported function (RPCs and trigger functions) with `SET search_path = pg_catalog, public`. A function that had another `search_path` (e.g. `'public'`) or none gets a `// NOTE:` comment in the schema, and `init` lists it (human output, and `hardenedFunctions: [{ kind, name, from, to }]` with `--json`). Check that its body schema-qualifies anything outside `public` (`auth.users`, `extensions.<fn>`).
 - `SETOF`, `TABLE(...)` or composite types: a signature-only `rpc()` marker. The function stays as it is in the database.
 - Parameter defaults are kept: `p_limit integer DEFAULT 20` becomes `p_limit: { type: 'int', default: '20' }`, so `CREATE OR REPLACE` matches the existing function (Postgres refuses to replace a function and drop its defaults).
 - Names with a leading underscore (`_pix_crc16`) are valid.
@@ -113,7 +114,7 @@ export default defineSchema({
 
 Each user trigger becomes a `trigger.custom({ name, events, forEach, when, security, functionBody })` with the body of its function (`pg_proc.prosrc`):
 
-- `BEFORE` / `AFTER`, `INSERT` / `UPDATE` / `DELETE`, `FOR EACH ROW` / `STATEMENT`, the `WHEN` condition and `SECURITY DEFINER` are kept.
+- `BEFORE` / `AFTER`, `INSERT` / `UPDATE` / `DELETE`, `FOR EACH ROW` / `STATEMENT`, the `WHEN` condition, `SECURITY DEFINER` and the function's `SET` options (as `set`) are kept. The function's volatility is not: trigger functions are always created `VOLATILE`, which behaves the same for a trigger. Its `search_path` is hardened as for RPCs.
 - `UPDATE OF col` on a row trigger that only handles UPDATE becomes `when: 'OLD.col IS DISTINCT FROM NEW.col'`; otherwise it fires on every UPDATE and a `// WARNING:` says so.
 - Not imported, with a `// WARNING:` comment and the original `CREATE TRIGGER`: triggers that pass arguments (`TG_ARGV`), disabled triggers, `INSTEAD OF` and `TRUNCATE`-only triggers, and functions not written in `plpgsql`. A constraint trigger is imported as a regular one, with a warning.
 

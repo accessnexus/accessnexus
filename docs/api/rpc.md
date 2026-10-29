@@ -9,7 +9,9 @@ function rpc(config?: {
   body?: string;
   language?: RpcLanguage;
   security?: RpcSecurity;
-  immutable?: boolean;
+  volatility?: RpcVolatility;
+  immutable?: boolean; // alias of volatility: 'immutable'
+  set?: Record<string, string>;
   allowAnon?: boolean;
 }): RpcDef;
 ```
@@ -33,10 +35,16 @@ RPCs are passed in the second argument of [`defineSchema`](/api/schema#definesch
 | `body` | `string` | `undefined` | Function body without the `CREATE FUNCTION` wrapper. Without it no SQL is generated. |
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | `LANGUAGE`. |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | `SECURITY INVOKER` or `SECURITY DEFINER`. |
-| `immutable` | `boolean` | `false` | `IMMUTABLE` instead of `VOLATILE`. |
+| `volatility` | `'volatile' \| 'stable' \| 'immutable'` | `'volatile'` | `VOLATILE`, `STABLE` or `IMMUTABLE`. Use `'stable'` for read-only functions called from RLS policies (see below). |
+| `immutable` | `boolean` | `false` | Alias of `volatility: 'immutable'`. Combining it with a different `volatility` is `RPC_VOLATILITY_CONFLICT`. |
+| `set` | `Record<string, string>` | `undefined` | Function configuration: `{ row_security: 'off' }` emits `SET row_security = 'off'`. Keys must be configuration parameter names (`work_mem`, `myapp.tenant`), values are strings emitted as one quoted literal (`INVALID_FUNCTION_SET` otherwise). `search_path` cannot be changed: a different value is ignored with a `SEARCH_PATH_PINNED` warning. |
 | `allowAnon` | `boolean` | `false` | `security: 'definer'` only: keep `EXECUTE` for `anon`. |
 
 Unknown argument types are reported as `UNKNOWN_COLUMN_TYPE`; a bare `auth.uid()` in the body as `UNWRAPPED_AUTH_CALL`.
+
+::: tip Volatility and RLS
+A function called inside a policy (`policy.custom('is_member(org_id)')`) that is `VOLATILE` is evaluated again for every row, and Postgres cannot hoist it into an initPlan. Declare read-only helpers `volatility: 'stable'` (or `'immutable'` when the result depends only on the arguments) so they can be evaluated once per query.
+:::
 
 ::: warning
 Enum types (`"enum('a','b')"`) are accepted by `validate` for `args` and `returns` but are emitted literally into the SQL signature, which Postgres rejects. Use `'text'` and cast inside the body.
@@ -49,8 +57,9 @@ CREATE OR REPLACE FUNCTION <name>(<arg> <TYPE>, ...)
 RETURNS <TYPE>
 LANGUAGE <language>
 SECURITY <INVOKER|DEFINER>
-<VOLATILE|IMMUTABLE>
+<VOLATILE|STABLE|IMMUTABLE>
 SET search_path = pg_catalog, public
+SET <key> = '<value>'   -- one per `set` entry, sorted by key
 AS $$
 <body>
 $$;
@@ -124,12 +133,15 @@ interface RpcDef {
   readonly body?: string;
   readonly language?: RpcLanguage;
   readonly security?: RpcSecurity;
+  readonly volatility?: RpcVolatility;
   readonly immutable?: boolean;
+  readonly set?: Readonly<Record<string, string>>;
   readonly allowAnon?: boolean;
 }
 
 type RpcLanguage = 'plpgsql' | 'sql';
 type RpcSecurity = 'invoker' | 'definer';
+type RpcVolatility = 'volatile' | 'stable' | 'immutable';
 type RpcReturnType = ColumnType | 'void';
 ```
 

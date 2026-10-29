@@ -387,6 +387,13 @@ An argument is a type or `{ type, default }` with a raw SQL default
 (`args: { p_limit: { type: 'int', default: '20' } }` → `p_limit INTEGER DEFAULT 20`; callers may
 omit it, the client type marks it optional). After one argument with a default, every following
 one needs a default too (`INVALID_DEFAULT`).
+`volatility: 'volatile' | 'stable' | 'immutable'` (default volatile; `immutable: true` is an
+alias, a contradicting pair is `RPC_VOLATILITY_CONFLICT`). Declare read-only helpers used in
+RLS policies `'stable'`: a VOLATILE function in a policy is re-evaluated per row instead of
+once per query. `set: { row_security: 'off', work_mem: '64MB' }` emits `SET key = 'value'`
+(keys must be GUC names, values strings, `INVALID_FUNCTION_SET` otherwise). `search_path`
+is always pinned to `pg_catalog, public`; a different `set.search_path` is ignored
+(`SEARCH_PATH_PINNED` warning). `trigger.custom` accepts the same `set`.
 
 ```ts
 import { defineSchema, policy, rpc, table } from 'accessnexus';
@@ -556,9 +563,13 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   `--db-url` also imports exact column types (`numeric(10,2)`, enums as `enum(...)`, `text[]`
   / `int[]` / `uuid[]`), column defaults, composite primary keys (`compositePrimaryKey`),
   multi-column UNIQUE (as unique `indexes`), FKs to other schemas (`'auth.users.id'`) with their
-  `ON DELETE`, RPC parameter defaults, and user triggers as `trigger.custom` (timing, events,
-  `FOR EACH`, `WHEN`, `SECURITY DEFINER` kept; `UPDATE OF cols` becomes a WHEN on those columns
-  changing). What cannot be expressed is left as a `// WARNING:` comment in the schema, never
+  `ON DELETE`, RPC parameter defaults, RPC volatility (`volatility`) and function `SET` options
+  (`set`, from `pg_proc.proconfig`), and user triggers as `trigger.custom` (timing, events,
+  `FOR EACH`, `WHEN`, `SECURITY DEFINER`, `SET` options kept; `UPDATE OF cols` becomes a WHEN on
+  those columns changing; trigger functions are always VOLATILE). Every imported function is
+  re-created with `SET search_path = pg_catalog, public`: each one whose search_path changes
+  (another value such as `'public'`, or none) gets a `// NOTE:` comment and is listed in
+  `hardenedFunctions` (`--json`) — check its body schema-qualifies anything outside `public`. What cannot be expressed is left as a `// WARNING:` comment in the schema, never
   dropped silently: triggers with arguments, disabled, INSTEAD OF / TRUNCATE-only or non-plpgsql
   ones; array/other types with no AccessNexus equivalent (imported as `text`); generated columns;
   multi-column FKs. Imported triggers are recreated as `<prefix>_<table>_<name>`: after `push`
@@ -706,6 +717,9 @@ export interface InitResult {
   installed?: string[]; // packages installed by --install
   files: Array<{ path: string; action: 'created' | 'updated' | 'skipped' }>;
   agents: null | { agentsMd: 'created' | 'updated' | 'unchanged'; claudeMd: 'updated' | 'unchanged' | 'absent' };
+  // --db-url: imported functions whose search_path generate pins to 'pg_catalog, public'
+  // (from: the database value, null when it had none). name is `table.trigger` for triggers.
+  hardenedFunctions?: Array<{ kind: 'rpc' | 'trigger'; name: string; from: string | null; to: string }>;
   nextSteps?: string[];
 }
 
@@ -1090,6 +1104,8 @@ export default defineSchema({
   `INVALID_POLICY_RULE` (wrote `'public'` instead of `policy.public()`),
   `UNKNOWN_POLICY_OPERATION` (`read`/`create` used as policy keys), `EMPTY_COMBINATOR`,
   `MISSING_COLUMNS`, `AUDIT_TABLE_MISMATCH`, `RPC_IN_TABLES`, `INVALID_TRIGGER`,
+  `RPC_VOLATILITY_CONFLICT` (`immutable` contradicts `volatility`: keep only `volatility`),
+  `INVALID_FUNCTION_SET` (a `set` key that is not a GUC name, or a non-string value),
   `INVALID_REFERENCE`, `INVALID_IDENTIFIER`, `RESERVED_IDENTIFIER` (rename `order` → `orders`),
   `INVALID_PRIMARY_KEY` (`compositePrimaryKey` with fewer than two columns, together with
   `primaryKey`, or with `softDelete`),
