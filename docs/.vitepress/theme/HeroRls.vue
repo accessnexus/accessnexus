@@ -72,7 +72,7 @@ const resultLabel = computed(() => {
         <code><span class="kw">select</span> * <span class="kw">from</span> projects</code>
         <span class="rls-as">
           <span class="rls-as-label">{{ pt ? "como" : "as" }}</span>
-          <Transition name="swap" mode="out-in">
+          <Transition name="swap">
             <span :key="step" class="rls-viewer" :class="{ anon: !viewer.org }">{{ viewerLabel }}</span>
           </Transition>
         </span>
@@ -94,7 +94,7 @@ const resultLabel = computed(() => {
 
       <div class="rls-footer">
         <span class="rls-dot" :class="{ empty: count === 0 }" />
-        <Transition name="swap" mode="out-in">
+        <Transition name="swap">
           <span :key="step">{{ resultLabel }}</span>
         </Transition>
       </div>
@@ -173,6 +173,7 @@ const resultLabel = computed(() => {
 }
 
 .rls-as {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -246,6 +247,7 @@ const resultLabel = computed(() => {
 }
 
 .rls-footer {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -264,6 +266,10 @@ const resultLabel = computed(() => {
 
 .rls-dot.empty {
   background: #f59e0b;
+}
+
+.swap-leave-active {
+  position: absolute;
 }
 
 .swap-enter-active,

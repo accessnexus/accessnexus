@@ -55,3 +55,15 @@
     width: 440px;
   }
 }
+
+/* Landing page: full-bleed, no default home padding or doc styles. */
+.landing-page .VPHome {
+  padding-bottom: 0;
+  margin-bottom: 0;
+}
+
+.landing-page .VPHome .vp-doc,
+.landing-page .VPHome > div {
+  max-width: none;
+  padding: 0;
+}
