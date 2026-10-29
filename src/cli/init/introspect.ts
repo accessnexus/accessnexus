@@ -17,6 +17,37 @@ export interface IntrospectedColumn {
   is_nullable: 'YES' | 'NO';
   column_default: string | null;
   ordinal_position: number;
+  /** `format_type()` output, e.g. `numeric(10,2)` (direct DB introspection only). */
+  formatted_type?: string;
+  /** Labels of an enum column, in order (direct DB introspection only). */
+  enum_values?: string[];
+  /** `attidentity`: 'a' (ALWAYS), 'd' (BY DEFAULT) or '' (direct DB only). */
+  identity?: string;
+  /** A generated column (`GENERATED ALWAYS AS (...) STORED`); direct DB only. */
+  generated?: boolean;
+}
+
+/** A user trigger read from pg_trigger (direct DB introspection only). */
+export interface IntrospectedTrigger {
+  name: string;
+  /** pg_trigger.tgtype bit mask (ROW=1, BEFORE=2, INSERT=4, DELETE=8, UPDATE=16, TRUNCATE=32, INSTEAD=64). */
+  tgtype: number;
+  /** `pg_get_triggerdef()`, the CREATE TRIGGER statement as Postgres would dump it. */
+  definition: string;
+  /** Number of arguments passed to the function (TG_ARGV). */
+  nargs: number;
+  /** `UPDATE OF col, ...` columns (empty when none). */
+  updateColumns: string[];
+  /** Constraint trigger (CREATE CONSTRAINT TRIGGER). */
+  isConstraint: boolean;
+  /** pg_trigger.tgenabled: 'O' origin (enabled), 'D' disabled, 'R' replica, 'A' always. */
+  enabled: string;
+  functionName: string;
+  functionSchema: string;
+  language: string;
+  security: 'invoker' | 'definer';
+  /** pg_proc.prosrc of the trigger function. */
+  body: string;
 }
 
 export interface IntrospectedPolicy {
@@ -35,13 +66,25 @@ export interface IntrospectedTable {
   name: string;
   columns: IntrospectedColumn[];
   primaryKey?: string;
+  /** Primary key columns when the key spans several columns (direct DB only). */
+  compositePrimaryKey?: string[];
   foreignKeys: Array<{
     column: string;
     referencedTable: string;
     referencedColumn: string;
+    /** Schema of the referenced table when it is not `public` (e.g. `auth`). */
+    referencedSchema?: string;
+    /** `ON DELETE` action when it is not the default NO ACTION. */
+    onDelete?: 'cascade' | 'set null' | 'restrict';
   }>;
+  /** Multi-column foreign keys (not representable per column), as SQL text for a comment. */
+  compositeForeignKeys?: string[];
   uniqueColumns: string[];
+  /** Multi-column UNIQUE constraints (direct DB only). */
+  uniqueGroups?: string[][];
   policies: IntrospectedPolicy[];
+  /** User triggers (direct DB only). */
+  triggers?: IntrospectedTrigger[];
   /** Whether RLS is enabled on the table (only known with a direct DB connection). */
   rlsEnabled?: boolean;
 }
