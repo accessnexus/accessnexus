@@ -87,7 +87,8 @@ Foreign keys usam `ON DELETE NO ACTION` por padrão. Defina `onDelete: { column:
 | `PG_DRIVER_MISSING` | `npm install -D pg` |
 | `DB_CONNECTION_FAILED` | URL, senha ou rede errada. Use a string do Session pooler; bancos locais podem precisar de `?sslmode=disable`; timeout via `ACCESSNEXUS_DB_CONNECT_TIMEOUT` |
 | `PUSH_ROLE_NO_BYPASSRLS` | Nada foi aplicado. Conecte como `postgres`, ou rode `ALTER ROLE <role> BYPASSRLS` como superuser |
-| `PUSH_FAILED` | O Postgres rejeitou um arquivo (mensagem incluída). Esse arquivo sofreu rollback; os arquivos em `applied` continuam. Corrija o schema, rode o `generate` e faça o push de novo |
+| `FOREIGN_POLICIES` | Nada foi aplicado. Uma tabela gerenciada tem policies de RLS que o AccessNexus não gerou, e elas continuariam concedendo acesso. Revise, leve para o schema o que ainda importa e rode `push --replace-foreign-policies` |
+| `PUSH_FAILED` | O Postgres rejeitou um arquivo (mensagem incluída). O push inteiro sofreu rollback; nada dele fica aplicado. Corrija o schema, rode o `generate` e faça o push de novo |
 | `MIGRATION_DRIFT` | Restaure a migration aplicada, altere o schema, rode o `generate` |
 | `ADAPTER_NOT_FOUND`, `ADAPTER_AMBIGUOUS`, `ADAPTER_UNSUPPORTED`, `TARGET_NOT_FOUND` | Só existe o adapter `supabase` |
 | `TARGET_INVALID` | Adicione `adapter: 'supabase'` ao target |

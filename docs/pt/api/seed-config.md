@@ -143,7 +143,7 @@ Todas as chaves são opcionais. As que moldam o SQL são as [opções do Supabas
 | --- | --- | --- | --- |
 | `dbUrlEnv` | `string` | `undefined` | Nome da variável de ambiente com a URL do Postgres para `push` / `seed`. Verificada depois de `--url` e antes das variáveis de ambiente embutidas. `datasource: { url: { env: '<NAME>' } }` é aceito como grafia alternativa. |
 | `deterministic` | `boolean` | `false` | Omite a linha de cabeçalho `-- Generated at: <timestamp>` para que a saída seja estável byte a byte. |
-| `uuidGeneration` | `'v4' \| 'v7'` | `'v4'` | `'v7'`: primary keys uuid usam `accessnexus_uuidv7()` como padrão (ordenado por tempo), e a migration define essa função. |
+| `uuidGeneration` | `'v4' \| 'v7'` | `'v4'` | `'v7'`: primary keys uuid usam `public.accessnexus_uuidv7()` como padrão (ordenado por tempo), e a migration define essa função. |
 | `policyPrefix` | `string` | `'accessnexus'` | Igual a `naming.policyPrefix`, mas tem precedência sobre `naming.policyPrefix` e `--prefix`. Prefira `naming.policyPrefix`. |
 | `schemaName` | `string` | `'public'` | Schema usado no `search_path` das funções e para qualificar tabelas dentro das funções geradas. |
 | `idempotent` | `boolean` | `true` | Emite `DROP POLICY IF EXISTS` / `DROP TRIGGER IF EXISTS` antes de cada create. |

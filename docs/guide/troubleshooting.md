@@ -87,7 +87,8 @@ Foreign keys default to `ON DELETE NO ACTION`. Set `onDelete: { column: 'cascade
 | `PG_DRIVER_MISSING` | `npm install -D pg` |
 | `DB_CONNECTION_FAILED` | Wrong URL, password or network. Use the Session pooler string; local databases may need `?sslmode=disable`; timeout via `ACCESSNEXUS_DB_CONNECT_TIMEOUT` |
 | `PUSH_ROLE_NO_BYPASSRLS` | Nothing was applied. Connect as `postgres`, or `ALTER ROLE <role> BYPASSRLS` as a superuser |
-| `PUSH_FAILED` | Postgres rejected a file (message included). That file was rolled back; files in `applied` stay. Fix the schema, `generate`, push again |
+| `FOREIGN_POLICIES` | Nothing was applied. A managed table has RLS policies AccessNexus did not generate, which would keep granting access. Review them, port what is still needed into the schema, then `push --replace-foreign-policies` |
+| `PUSH_FAILED` | Postgres rejected a file (message included). The whole push was rolled back; nothing from it is applied. Fix the schema, `generate`, push again |
 | `MIGRATION_DRIFT` | Restore the applied migration, change the schema, `generate` |
 | `ADAPTER_NOT_FOUND`, `ADAPTER_AMBIGUOUS`, `ADAPTER_UNSUPPORTED`, `TARGET_NOT_FOUND` | Only the `supabase` adapter exists |
 | `TARGET_INVALID` | Add `adapter: 'supabase'` to the target |

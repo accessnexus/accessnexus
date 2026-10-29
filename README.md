@@ -52,7 +52,7 @@ From a single `accessnexus.schema.ts`:
   RPCs are kept off `anon` unless you opt in.
 - ✅ **Migrations** — versioned, timestamped DDL with a `.snapshot.json` (hash-based diffing).
 - ✅ **Typed SDK** — a client typed from your schema.
-- ✅ **UUIDv7** — optional time-ordered UUID PKs (`accessnexus_uuidv7()` helper).
+- ✅ **UUIDv7** — optional time-ordered UUID PKs (`public.accessnexus_uuidv7()` helper, a real RFC 9562 v7; not callable by `anon`).
 
 ## Two ways to define a schema
 
@@ -185,8 +185,12 @@ npx accessnexus push             # apply generated SQL to the database
 pending migrations that drop tables/columns or change column types unless you pass
 `--allow-destructive`. It runs as the `postgres` user of your connection string (a role with
 `BYPASSRLS`, which the generated `SECURITY DEFINER` helpers rely on; `push` checks this and
-fails with `PUSH_ROLE_NO_BYPASSRLS` otherwise). Seeds run only with
-`accessnexus seed` or `push --seed`.
+fails with `PUSH_ROLE_NO_BYPASSRLS` otherwise). The whole push runs in one transaction: if any
+file fails, nothing from that push stays applied. If a table the schema manages already has
+RLS policies AccessNexus did not generate (an existing project), `push` refuses with
+`FOREIGN_POLICIES` and lists them — Postgres ORs permissive policies, so they would keep
+granting access. Review them, then `push --replace-foreign-policies` drops them in the same
+transaction. Seeds run only with `accessnexus seed` or `push --seed`.
 
 ## Using the generated SDK
 
@@ -336,9 +340,10 @@ package is designed for that:
   tenant (`TENANT_PARENT_UNCHECKED`), and tables without policies or with RLS turned off —
   before anything reaches Postgres. Column names inside policies are checked here, not by
   TypeScript, so run `validate` after every schema edit.
-- **Guard rails on `push`**: stale generated SQL, data-losing migrations and a role without
-  `BYPASSRLS` are refused with a clear error code (`GENERATED_OUT_OF_DATE`,
-  `DESTRUCTIVE_MIGRATION`, `PUSH_ROLE_NO_BYPASSRLS`); `generate`/`diff` report `destructive`
+- **Guard rails on `push`**: stale generated SQL, data-losing migrations, foreign RLS
+  policies on managed tables and a role without `BYPASSRLS` are refused with a clear error
+  code (`GENERATED_OUT_OF_DATE`, `DESTRUCTIVE_MIGRATION`, `FOREIGN_POLICIES`,
+  `PUSH_ROLE_NO_BYPASSRLS`); a push is one transaction (all or nothing); `generate`/`diff` report `destructive`
   statements in `--json`.
 
 Typical agent loop:
@@ -379,7 +384,7 @@ generate / diff / validate:
   --check            diff only: exit 1 when generated files are out of date
 
 push / seed:
-  --url <db-url>        Database URL
+  --url <db-url>        Database URL (alias --db-url)
   --dry-run             Print the plan/SQL without executing
   --adapter <name>      Select adapter when several are configured
   --target <name>       Select a target from config.targets
@@ -387,6 +392,7 @@ push / seed:
 push only:
   --allow-destructive   Apply migrations that drop tables/columns or change column types
   --seed                Also run the seed after pushing
+  --replace-foreign-policies  Drop RLS policies on managed tables that AccessNexus did not generate
 seed only:
   --seed <path>         Seed file (default: config.seed or ./accessnexus.seed.ts)
 
@@ -398,7 +404,7 @@ init:
 
 Unknown commands/flags fail with a did-you-mean hint instead of being ignored.
 
-**`push`/`seed` database URL** resolves in this order: `--url` → the adapter's configured env
+**`push`/`seed` database URL** resolves in this order: `--url` (or its alias `--db-url`) → the adapter's configured env
 name (e.g. `dbUrlEnv`) → `ACCESSNEXUS_DB_URL` → `SUPABASE_DB_URL` → `DATABASE_URL`. `push` uses the
 `pg` driver, takes an advisory lock (and says so when it has to wait), tracks applied SQL in a
 `public.accessnexus_migrations` table (sha256 of the SQL with the timestamp header stripped),

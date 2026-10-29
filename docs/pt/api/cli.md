@@ -131,14 +131,15 @@ Aplica o SQL gerado no banco.
 
 | Flag | Tipo | Padrão | Descrição |
 | --- | --- | --- | --- |
-| `--url <db-url>` | string | veja [URL do banco](#database-url) | Connection string do Postgres. |
+| `--url <db-url>` | string | veja [URL do banco](#database-url) | Connection string do Postgres. Alias: `--db-url` (a flag que o `init` usa); passar as duas com valores diferentes gera `INVALID_FLAG_VALUE`. |
 | `--adapter <name>` | string | nenhum | Adapter a usar quando `config.adapters` lista vários. |
 | `--target <name>` | string | nenhum | Entrada de `config.targets`. |
-| `--dry-run` | boolean | `false` | Lista os arquivos e os statements destrutivos; não conecta. |
+| `--dry-run` | boolean | `false` | Lista os arquivos e os statements destrutivos. Com uma URL de banco, também conecta só para leitura e lista as policies estranhas (`foreignPolicies`, `wouldRefuse`); sem URL, `foreignPolicies` é `null`. Nunca escreve. |
 | `--output <dir>` | string | `./generated` | Lê o SQL das pastas dentro de `<dir>`. |
 | `--prefix <name>` | string | `accessnexus` | Prefixo dos nomes de policies (usado na verificação de defasagem). |
 | `--schema <path>` | string | `config.schema` ou `./accessnexus.schema.ts` | Arquivo de schema (usado na verificação de defasagem). |
 | `--allow-destructive` | boolean | `false` | Aplica migrations pendentes que removem tabelas/colunas, removem tipos, fazem truncate ou mudam tipos de coluna. |
+| `--replace-foreign-policies` | boolean | `false` | Remove as policies de RLS das tabelas gerenciadas que o AccessNexus não gerou, dentro da transação do push (veja a etapa 7). |
 | `--seed` | boolean | `false` | Roda também o seed depois do push. |
 | `--allow-remote-seed` | boolean | `false` | Com `--seed`: permite rodar seed num banco Supabase hospedado. |
 
@@ -147,21 +148,23 @@ Etapas, em ordem:
 1. Coleta os arquivos `.sql` (recursivamente, ordenados por caminho) das pastas migrations, policies, triggers e rpcs. Nenhum: `NOTHING_TO_PUSH`.
 2. Sem `--dry-run`: exige uma URL de banco (`DB_URL_MISSING`) e o driver `pg` (`PG_DRIVER_MISSING`).
 3. Regera o SQL em memória e compara com os arquivos: qualquer diferença gera `GENERATED_OUT_OF_DATE` (também com `--dry-run`).
-4. O `--dry-run` para aqui.
+4. O `--dry-run` para aqui (depois de uma verificação só de leitura das policies estranhas, quando há URL de banco).
 5. Conecta (`DB_CONNECTION_FAILED`). Se algum arquivo contém `SECURITY DEFINER`, a role precisa ignorar o RLS (`PUSH_ROLE_NO_BYPASSRLS`).
-6. Obtém um advisory lock (espera, com um aviso, se outro push estiver com ele). Cria `public.accessnexus_migrations` (RLS habilitado e forçado), a extensão `pgcrypto` e uma função de compatibilidade `public.uuid_generate_v7()`, se não existirem.
-7. Se uma migration ainda não aplicada contém um statement destrutivo e `--allow-destructive` não foi passado: `DESTRUCTIVE_MIGRATION`, nada é aplicado.
-8. Aplica os arquivos na ordem migrations, policies, triggers, rpcs; cada arquivo na sua própria transação. Checksum: SHA-256 do SQL sem a linha `-- Generated at:`.
+6. Obtém um advisory lock (espera, com um aviso, se outro push estiver com ele) e abre (`BEGIN`) uma única transação para tudo o que vem abaixo. Cria `public.accessnexus_migrations` (RLS habilitado e forçado), se não existir.
+7. Lê `pg_policies` de cada tabela que o schema gerencia. Uma policy cujo nome não é um dos que o AccessNexus gera (`<prefix>_<table>_<op>`) é estranha: o Postgres combina policies permissivas com OR, então ela continuaria concedendo acesso ao lado das geradas. Sem `--replace-foreign-policies`: `FOREIGN_POLICIES` (a mensagem e `foreignPolicies` listam tabela + policy), nada é aplicado. Com a flag: elas são removidas (`droppedPolicies`) dentro da transação.
+8. Se uma migration ainda não aplicada contém um statement destrutivo e `--allow-destructive` não foi passado: `DESTRUCTIVE_MIGRATION`, nada é aplicado.
+9. Aplica os arquivos na ordem migrations, policies, triggers, rpcs, registrando cada um em `accessnexus_migrations`. Checksum: SHA-256 do SQL sem a linha `-- Generated at:`.
    - inalterado e já aplicado: pulado (`already_applied`);
    - uma migration aplicada cujo conteúdo mudou: `MIGRATION_DRIFT`;
    - um arquivo de policy, trigger ou RPC alterado: reaplicado;
-   - erro de SQL: esse arquivo sofre rollback, `PUSH_FAILED`; os arquivos já em `applied` continuam aplicados.
-9. Com `--seed`: roda o seed (veja `seed`). Arquivo de seed ausente gera `SEED_NOT_FOUND`; um seed que falha mantém o push e reporta o error code do seed.
+   - erro de SQL: `PUSH_FAILED` (`failed` indica o arquivo).
+10. `COMMIT`. Qualquer erro antes disso desfaz o push inteiro: não sobra nenhuma migration, policy, trigger, RPC, registro de controle nem remoção de policy desse push (`applied` é `[]`, `rolledBack` lista os arquivos que tinham rodado). O advisory lock é liberado nos dois casos.
+11. Com `--seed`: roda o seed (veja `seed`). Arquivo de seed ausente gera `SEED_NOT_FOUND`; um seed que falha mantém o push e reporta o error code do seed.
 
 SSL: forçado (sem verificar o certificado) quando a URL tem `sslmode=require|verify-ca|verify-full`, ou o host contém `supabase.co` / `supabase.in`, a menos que a URL tenha `sslmode=disable`.
 
 ::: warning
-O `push` é o único comando que altera o banco. Veja a prévia com `--dry-run`. O `--allow-destructive` apaga dados; use só quando a perda for intencional e houver backup. Um rename se faz no schema, não como remover + adicionar.
+O `push` é o único comando que altera o banco. Veja a prévia com `--dry-run`. O Postgres não deixa usar, na mesma transação, um valor de enum adicionado por `ALTER TYPE ... ADD VALUE`: se um push adiciona um valor de enum e também o usa (num default, numa policy ou numa RPC), faça o push da mudança do enum primeiro e depois o resto. O `--allow-destructive` apaga dados; use só quando a perda for intencional e houver backup. Um rename se faz no schema, não como remover + adicionar.
 :::
 
 ## seed
@@ -170,7 +173,7 @@ Gera o SQL de seed a partir do arquivo de seed e o executa numa única transaç�
 
 | Flag | Tipo | Padrão | Descrição |
 | --- | --- | --- | --- |
-| `--url <db-url>` | string | veja [URL do banco](#database-url) | Connection string do Postgres. |
+| `--url <db-url>` | string | veja [URL do banco](#database-url) | Connection string do Postgres. Alias: `--db-url` (a flag que o `init` usa); passar as duas com valores diferentes gera `INVALID_FLAG_VALUE`. |
 | `--adapter <name>` | string | nenhum | Adapter a usar quando há vários configurados. |
 | `--target <name>` | string | nenhum | Entrada de `config.targets`. |
 | `--dry-run` | boolean | `false` | Imprime o SQL; não conecta. |
@@ -199,7 +202,7 @@ Todos aceitam `--json`.
 
 `push` e `seed` usam o primeiro valor não vazio entre:
 
-1. `--url`
+1. `--url` (ou o alias `--db-url`)
 2. a variável de ambiente indicada por `adapterOptions.dbUrlEnv` do target ou adapter selecionado (ou `adapterOptions.datasource.url.env`)
 3. `ACCESSNEXUS_DB_URL`
 4. `SUPABASE_DB_URL`
@@ -314,7 +317,10 @@ interface PushResult {
   target: string | null;
   plan: Array<{ category: 'migrations' | 'policies' | 'triggers' | 'rpcs'; files: string[] }>;
   destructive?: DestructiveStatement[];                   // --dry-run only: all migration files
+  foreignPolicies?: ForeignPolicy[] | null;               // --dry-run only: null = no database URL, not checked
+  wouldRefuse?: boolean;                                  // --dry-run only: foreign policies and no --replace-foreign-policies
   applied: string[];
+  droppedPolicies: ForeignPolicy[];                       // dropped by --replace-foreign-policies
   skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
   seed:
     | null                                                // no --seed (always null with --dry-run)
@@ -325,8 +331,16 @@ interface PushResult {
 //   NOTHING_TO_PUSH          dryRun, adapter, target, plan
 //   GENERATED_OUT_OF_DATE    dryRun, adapter, target, plan, stale: Array<{ path: string; status: string }>
 //   DESTRUCTIVE_MIGRATION    ...plan, applied, skipped, destructive
-//   MIGRATION_DRIFT, PUSH_FAILED, SEED_NOT_FOUND   ...plan, applied, skipped
+//   FOREIGN_POLICIES         ...plan, applied: [], skipped, foreignPolicies
+//   MIGRATION_DRIFT, PUSH_FAILED   ...plan, applied: [] (rolled back), skipped, rolledBack: string[]; PUSH_FAILED adds failed: string
+//   SEED_NOT_FOUND           ...plan, applied, skipped
 //   seed failure (any code)  ...plan, applied, skipped, seed: { path, status: 'failed', message }
+
+interface ForeignPolicy {
+  schema: string; table: string; policy: string;
+  command: string;      // SELECT | INSERT | UPDATE | DELETE | ALL
+  permissive: boolean;  // false = RESTRICTIVE
+}
 
 interface SeedResult {
   ok: true; command: 'seed'; version: string;

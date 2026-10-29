@@ -9,7 +9,7 @@ O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do q
 | Adapters | Só Supabase. | Use `adapter: 'supabase'` (o padrão). |
 | Modo Database | Gera RLS, triggers, RPCs e o SDK, mas não migrations DDL. | Mantenha suas próprias migrations para as tabelas. |
 | Migrations | Geradas a partir de diffs de snapshot; renomeações são detectadas por heurística. | Leia o `diff` antes do push; procure comentários `-- Destructive:`. |
-| `push` | Aplica os arquivos um a um, cada um na própria transação, e não numa transação única. | Uma falha deixa os arquivos anteriores aplicados (`applied[]`); corrija e rode o push de novo. |
+| `push` | Roda numa única transação, então uma migration não pode usar um valor de enum que um statement anterior do mesmo push adicionou (`ALTER TYPE ... ADD VALUE`; o Postgres proíbe). | Faça o push da mudança do enum primeiro, depois do código que usa o novo valor. |
 | Identificadores | Emitidos sem aspas: snake_case minúsculo, sem palavras reservadas. | Renomeie (`order` → `orders`). |
 | Colunas | RLS não consegue restringir quais colunas são lidas ou atualizadas. | `trigger.lockColumns` para escritas; uma tabela separada para leituras privadas. |
 | Foreign keys | `ON DELETE NO ACTION`, a menos que `onDelete` diga outra coisa. | Defina `onDelete`. |
@@ -20,6 +20,7 @@ O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do q
 | Seed | Só o mapa `references` no nível da tabela provisiona linhas em `auth.users`. | Declare as referências a usuários ali. |
 | `init --db-url` | Importa só o schema `public`; sem referências a outros schemas, chaves compostas, defaults, checks, índices, triggers ou `ON DELETE`. | Revise antes do primeiro `generate` ([Projetos existentes](/pt/guide/existing-project)). |
 | Verificação | O `validate` checa estrutura, não intenção; ele não simula acesso. | Teste suas policies com usuários reais. |
+| `diff` | Compara o schema com os arquivos gerados e o snapshot das migrations (`.snapshot.json`), não com o banco real. Mudanças feitas direto no banco (Studio, SQL à mão) ficam invisíveis para ele. | Rode `push --dry-run` contra o banco (ele reporta policies estranhas); um modo `diff --against-db` está planejado. |
 
 ## Roadmap {#roadmap}
 
@@ -29,6 +30,7 @@ O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do q
 | Adapter Firebase (Firestore Security Rules, Cloud Functions, SDK tipado) | Planejado, não disponível |
 | Teste de policies / simulação de acesso (provar que uma policy bloqueia o que deve, como gate de CI) | Planejado, não disponível |
 | Servidor MCP para coding agents | Planejado, não disponível |
+| `diff --against-db` (comparar o schema com o banco real, não só com o snapshot) | Planejado, não disponível |
 
 Itens planejados não têm data de lançamento. Acompanhe o [CHANGELOG](https://github.com/accessnexus/accessnexus/blob/main/CHANGELOG.md) para saber o que de fato foi lançado.
 

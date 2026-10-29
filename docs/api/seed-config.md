@@ -143,7 +143,7 @@ All keys are optional. The SQL-shaping keys are the [SupabaseAdapter options](/a
 | --- | --- | --- | --- |
 | `dbUrlEnv` | `string` | `undefined` | Name of the env var holding the Postgres URL for `push` / `seed`. Checked after `--url`, before the built-in env vars. `datasource: { url: { env: '<NAME>' } }` is accepted as an alternative spelling. |
 | `deterministic` | `boolean` | `false` | Omit the `-- Generated at: <timestamp>` header line so output is byte-stable. |
-| `uuidGeneration` | `'v4' \| 'v7'` | `'v4'` | `'v7'`: uuid primary keys default to `accessnexus_uuidv7()` (time-ordered), and the migration defines that function. |
+| `uuidGeneration` | `'v4' \| 'v7'` | `'v4'` | `'v7'`: uuid primary keys default to `public.accessnexus_uuidv7()` (time-ordered), and the migration defines that function. |
 | `policyPrefix` | `string` | `'accessnexus'` | Same as `naming.policyPrefix`, but takes precedence over both `naming.policyPrefix` and `--prefix`. Prefer `naming.policyPrefix`. |
 | `schemaName` | `string` | `'public'` | Schema used in function `search_path` and to qualify tables inside generated functions. |
 | `idempotent` | `boolean` | `true` | Emit `DROP POLICY IF EXISTS` / `DROP TRIGGER IF EXISTS` before each create. |

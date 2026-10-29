@@ -205,7 +205,7 @@ Escreva os valores dentro de `enum(...)`, entre aspas: `"enum('draft','published
 
 | Tipo da primary key | Sem `default` definido | Efeito |
 | --- | --- | --- |
-| `'uuid'` | `DEFAULT gen_random_uuid()` | `DEFAULT accessnexus_uuidv7()` quando `adapterOptions.uuidGeneration` é `'v7'` |
+| `'uuid'` | `DEFAULT gen_random_uuid()` | `DEFAULT public.accessnexus_uuidv7()` quando `adapterOptions.uuidGeneration` é `'v7'` |
 | `'bigint'` | `GENERATED ALWAYS AS IDENTITY` | |
 | outro | nenhum | |
 

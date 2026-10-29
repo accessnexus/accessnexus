@@ -102,8 +102,9 @@ O `push` executa estes passos, nesta ordem:
 | Conecta (timeout de 10 s; `ACCESSNEXUS_DB_CONNECT_TIMEOUT` para mudar) | `DB_CONNECTION_FAILED` |
 | Confere se o papel ignora o RLS quando o SQL tem helpers `SECURITY DEFINER` | `PUSH_ROLE_NO_BYPASSRLS` |
 | Pega o lock do push | Espera, e imprime um aviso em vez de travar em silêncio |
+| Abre uma única transação; recusa policies de RLS em tabelas gerenciadas que o AccessNexus não gerou, a menos que haja `--replace-foreign-policies` (aí as remove) | `FOREIGN_POLICIES` |
 | Recusa migrations pendentes que destroem dados, a menos que haja `--allow-destructive` | `DESTRUCTIVE_MIGRATION` |
-| Aplica os arquivos: migrations → policies → triggers → rpcs | `PUSH_FAILED` (aquele arquivo sofre rollback) |
+| Aplica os arquivos: migrations → policies → triggers → rpcs, e faz o commit | `PUSH_FAILED` (o push inteiro sofre rollback) |
 
 Nada é aplicado se qualquer checagem antes do último passo falhar. O `push --dry-run` para depois da checagem do schema: ele lista o plano e eventuais statements destrutivos sem conectar.
 
@@ -148,9 +149,9 @@ Arquivos de policy, trigger e RPC são idempotentes, então um arquivo alterado 
 
 O `push` pega um advisory lock do Postgres (`pg_try_advisory_lock(hashtext('accessnexus_push_lock'))`) antes de aplicar qualquer coisa e o libera no final. Dois pushes no mesmo banco nunca se intercalam: o segundo avisa que outro push está com o lock e espera por ele.
 
-### Não é uma transação única {#not-one-big-transaction}
+### Uma transação, tudo ou nada {#one-transaction-all-or-nothing}
 
-Cada arquivo roda na sua própria transação. Se o arquivo 3 de 5 falhar, os arquivos 1 e 2 continuam aplicados (eles aparecem em `applied` na saída JSON), o arquivo 3 sofre rollback e o próximo `push` continua dali depois que você corrigir a causa.
+O push inteiro roda numa única transação: a tabela de controle, as remoções de policies estranhas, migrations, policies, triggers e RPCs. Se o arquivo 3 de 5 falhar, os arquivos 1 e 2 também sofrem rollback (`applied` é `[]`, `rolledBack` lista os dois, `failed` indica o arquivo 3), então o banco nunca fica com um push pela metade. Corrija a causa e rode o push de novo. A única coisa que uma transação única não permite: usar um valor de enum adicionado (`ALTER TYPE ... ADD VALUE`) antes, no mesmo push. Faça o push da mudança do enum primeiro.
 
 ::: info Policies que o AccessNexus não criou
 As policies geradas se chamam `<prefix>_<table>_<operation>` (prefixo padrão `accessnexus`). O `push` só remove policies com esses nomes; policies criadas por outras ferramentas continuam lá. O Postgres combina policies permissivas com OR, então remova as policies antigas de forma deliberada quando as geradas já as cobrirem.

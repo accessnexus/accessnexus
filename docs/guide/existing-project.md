@@ -41,7 +41,7 @@ npx accessnexus init --yes --db-url "$SUPABASE_DB_URL"
 `--db-url` needs the `pg` driver (`PG_DRIVER_MISSING`) and fails with `DB_CONNECTION_FAILED` after 10 s when the host does not answer. With `--no-introspect`, `init` never connects.
 
 ::: warning Prefer `--db-url` over the REST import
-REST cannot read RLS. The imported tables then have no policies, so the first `push` turns RLS on for all of them. Existing database policies stay, but a table whose RLS was off becomes deny-all until you add policies or `enableRLS: false`.
+REST cannot read RLS. The imported tables then have no policies, so the first `push` turns RLS on for all of them. Existing database policies are reported as foreign (see below), and a table whose RLS was off becomes deny-all until you add policies or `enableRLS: false`.
 :::
 
 ## What is imported
@@ -120,26 +120,21 @@ Then run `npx accessnexus validate` until it is clean.
 
 ## The safe first push
 
+After `init`, the original policies are still in the database. Postgres ORs permissive policies, so an original policy would keep granting access next to the generated ones, whatever the schema says. `push` therefore never keeps them silently, and never drops them silently either: it reads `pg_policies` for every table the schema manages and refuses with `FOREIGN_POLICIES` while any policy there is not named `<prefix>_<table>_<op>`.
+
 1. `npx accessnexus generate`, then read what it wrote:
    - `__init.sql`: `CREATE TABLE IF NOT EXISTS` (no-op for existing tables), `CREATE INDEX IF NOT EXISTS` on foreign-key and policy columns (new indexes), enum types if missing.
    - `policies/*.sql`: `ENABLE` + `FORCE ROW LEVEL SECURITY` and policies named `<prefix>_<table>_<op>`.
    - `rpcs.sql`: `CREATE OR REPLACE` of the imported functions.
-2. `npx accessnexus push --dry-run`: the destructive list must be empty.
-3. `npx accessnexus push` on staging, test the app, then on production.
+2. `npx accessnexus push --dry-run --json` with the database URL set: `destructive` must be empty, and `foreignPolicies` lists every original policy on a managed table (`wouldRefuse: true`). The dry run only reads.
+3. Compare each listed policy with the rule `init` generated for it (each rule has a comment naming its source policy). Port anything still missing into `accessnexus.schema.ts`, then `generate` again.
+4. On staging: `npx accessnexus push --replace-foreign-policies`. In one transaction it drops the listed policies (`droppedPolicies` in `--json`), applies the migrations, the generated policies, triggers and RPCs, and records them. If anything fails, all of it is rolled back, including the drops: the database is left as it was.
+5. Test the app as real users (anon, signed in, other tenants). Then repeat steps 2 and 4 on production.
 
-After this push, both the original policies and the generated ones exist. `push` never drops policies it did not create, and Postgres ORs permissive policies, so the effective access is the union. Since the import never grants more, that union equals what you had.
+After this push, only the generated policies exist on the managed tables, so the schema is the source of truth.
 
 ::: danger Drop the originals only after review, and with consent
-Until the original policies are gone, the schema is not the source of truth: an old permissive policy keeps granting access whatever the schema says. Once the app works with the generated policies, list the originals and drop them deliberately:
-
-```sql
-SELECT tablename, policyname FROM pg_policies
-WHERE schemaname = 'public' AND policyname NOT LIKE 'accessnexus\_%';
-
-DROP POLICY "own notes" ON notes;
-```
-
-If an agent is driving, it must ask before dropping anything.
+`--replace-foreign-policies` deletes policies AccessNexus did not write. Pass it only after step 3. If an agent is driving, it must show the `FOREIGN_POLICIES` list and ask before passing the flag.
 :::
 
 ## Related

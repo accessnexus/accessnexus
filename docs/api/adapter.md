@@ -22,7 +22,7 @@ new SupabaseAdapter(options?: SupabaseAdapterOptions)
 | `idempotent` | `boolean` | `true` | Emit `DROP POLICY IF EXISTS` / `DROP TRIGGER IF EXISTS` before each create. |
 | `timestamps` | `boolean` | `true` | Emit the header comment block of each SQL file. |
 | `forceRLS` | `boolean` | `true` | Emit `FORCE ROW LEVEL SECURITY` after `ENABLE ROW LEVEL SECURITY`. |
-| `uuidGeneration` | `'v4' \| 'v7'` | `'v4'` | Default for `uuid` primary keys without a `default`: `gen_random_uuid()` or `accessnexus_uuidv7()`. With `'v7'` the migration also defines `accessnexus_uuidv7()`. |
+| `uuidGeneration` | `'v4' \| 'v7'` | `'v4'` | Default for `uuid` primary keys without a `default`: `gen_random_uuid()` or `public.accessnexus_uuidv7()`. With `'v7'` the migration also defines `public.accessnexus_uuidv7()` (RFC 9562 UUIDv7; EXECUTE revoked from `PUBLIC` and `anon`, granted to `authenticated` and `service_role`, and to `anon` only when a v7 table accepts anonymous inserts). |
 | `databaseTypes` | `string` | `'./database.types'` | Database mode only: import path of the Supabase `database.types` file, relative to the SDK output folder. |
 | `deterministic` | `boolean` | `false` | Omit the `-- Generated at: <timestamp>` header line. |
 
@@ -61,7 +61,7 @@ RLS for each table: `ENABLE` and `FORCE ROW LEVEL SECURITY`, membership helper f
 
 ### generateMigrations
 
-Full DDL from scratch: enum types, the optional `accessnexus_uuidv7()` function, `CREATE TABLE IF NOT EXISTS` in dependency order, then explicit and automatic indexes.
+Full DDL from scratch: enum types, the optional `public.accessnexus_uuidv7()` function, `CREATE TABLE IF NOT EXISTS` in dependency order, then explicit and automatic indexes.
 
 The CLI does not write this file as is: `generate` stores `<timestamp>__init.sql` on the first run and `<timestamp>__changes.sql` incremental migrations afterwards, tracked by `.snapshot.json`. That versioning is not part of the adapter API.
 

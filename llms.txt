@@ -62,7 +62,7 @@ empty folder `init --yes` first creates a minimal `package.json` (`"type": "modu
 - `generated/sdk/` (or `output.sdk`) — `types.ts` + `client.ts` (derived, never edit).
 - The client wrapper `init` writes next to them (`index.ts`, or `server.ts` + `browser.ts`
   on Next.js) is YOUR file: `generate` never touches it; edit env var names freely.
-- Database URL for push/seed: `--url`, else `adapterOptions.dbUrlEnv`, else
+- Database URL for push/seed: `--url` (alias `--db-url`, the flag `init` uses), else `adapterOptions.dbUrlEnv`, else
   `ACCESSNEXUS_DB_URL`, `SUPABASE_DB_URL`, `DATABASE_URL` (`.env` and `.env.local` are loaded).
   For Supabase use the "Session pooler" connection string (Dashboard → Connect).
 - `push`/`seed` need the `pg` driver (optional peer dependency): `npm install -D pg`.
@@ -455,13 +455,19 @@ export default defineConfig({
   adapterOptions: {
     dbUrlEnv: 'SUPABASE_DB_URL',        // env var push/seed read the DB URL from
     deterministic: true,                // omit the "Generated at" header line
-    uuidGeneration: 'v7',               // time-ordered uuid PKs via accessnexus_uuidv7()
+    uuidGeneration: 'v7',               // time-ordered uuid PKs via public.accessnexus_uuidv7()
   },
   targets: {                            // push/seed --target <name>
     staging: { adapter: 'supabase', adapterOptions: { dbUrlEnv: 'STAGING_DB_URL' } },
   },
 });
 ```
+
+`uuidGeneration: 'v7'`: migrations define `public.accessnexus_uuidv7()` (RFC 9562 UUIDv7: 48-bit
+millisecond timestamp, version 7, random tail) before the first table that uses it. EXECUTE is
+revoked from `PUBLIC` and `anon` (so PostgREST does not expose it to anonymous callers) and
+granted to `authenticated` and `service_role`; `anon` gets it only when a v7 table's insert
+policy lets anonymous users write. There is no `uuid_generate_v7()`.
 
 ## SupabaseAdapter (programmatic generation)
 
@@ -532,12 +538,14 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   applicable policy becomes `policy.none()`; a table whose RLS is off in the database gets an
   explicit `enableRLS: false` (with a comment) so `push` does not change it silently — remove
   it to lock the table. Over REST (no `--db-url`) RLS cannot be read: the imported tables
-  have no policies, so `push` turns RLS on for all of them — existing database policies stay
-  (push never drops policies it did not create), but a table whose RLS was off becomes
+  have no policies, so `push` turns RLS on for all of them, and a table whose RLS was off becomes
   deny-all until you add policies (or `enableRLS: false`). Review the imported rules (comments name the
-  source policy) and replace `policy.custom` with semantic builders where possible. `push`
-  never drops policies it did not create: Postgres ORs permissive policies, so once the
-  imported rules are reviewed, ask the user before dropping the original ones.
+  source policy) and replace `policy.custom` with semantic builders where possible. The
+  original database policies are still there after `init`: Postgres ORs permissive policies,
+  so they would keep granting access. `push` therefore refuses with `FOREIGN_POLICIES` while a
+  managed table has a policy not named `<prefix>_<table>_<op>`; once the imported rules are
+  reviewed, ask the user, then `push --replace-foreign-policies` drops them in the push
+  transaction.
 - `validate` — load + check the schema, write nothing. Flags: `--schema <path>`.
 - `generate` — write migrations, policies, triggers, RPCs and the SDK. Files that only differ
   in the `-- Generated at:` line are left untouched. Flags: `--schema`, `--output <dir>` (every
@@ -545,17 +553,24 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   preview into a scratch folder), `--sql-only`, `--sdk-only`, `--prefix <name>`.
 - `diff` — what `generate` would change; writes nothing. Same flags + `--check` (exit 1 when
   anything is out of date).
-- `push` — apply generated SQL in order migrations → policies → triggers → rpcs, each file in a
-  transaction, tracked in `public.accessnexus_migrations`. Re-running skips unchanged files and
+- `push` — apply generated SQL in order migrations → policies → triggers → rpcs, tracked in
+  `public.accessnexus_migrations`. The whole push (bookkeeping, foreign-policy drops and every
+  file) runs in ONE transaction under an advisory lock: if anything fails, nothing from that
+  push stays applied. (Exception: a migration that adds an enum value cannot use that value in
+  the same push — Postgres forbids it inside a transaction; push the enum change first.) Re-running skips unchanged files and
   re-applies changed policy/trigger/RPC files; editing an applied migration is refused. Before
   touching the database it checks that the generated SQL matches the schema
   (`GENERATED_OUT_OF_DATE`) and that no pending migration destroys data
   (`DESTRUCTIVE_MIGRATION`), and that the role bypasses RLS when the SQL has SECURITY DEFINER
-  helpers (`PUSH_ROLE_NO_BYPASSRLS`). Prints a notice instead of waiting silently when another
-  push holds the lock. Flags: `--url <db-url>`, `--dry-run` (lists files and destructive statements),
-  `--allow-destructive`, `--seed` (also run the seed), `--allow-remote-seed`, `--output`,
+  helpers (`PUSH_ROLE_NO_BYPASSRLS`). It reads `pg_policies` for every table the schema
+  manages and refuses (`FOREIGN_POLICIES`, nothing applied) while any policy there is not one
+  AccessNexus generates (`<prefix>_<table>_<op>`); `--replace-foreign-policies` drops them in the
+  same transaction. Prints a notice instead of waiting silently when another
+  push holds the lock. Flags: `--url <db-url>` (alias `--db-url`), `--dry-run` (lists files,
+  destructive statements and, when a database URL is set, foreign policies — read-only),
+  `--allow-destructive`, `--replace-foreign-policies`, `--seed` (also run the seed), `--allow-remote-seed`, `--output`,
   `--schema`, `--prefix`, `--adapter`, `--target`.
-- `seed` — upsert seed rows. Flags: `--seed <path>`, `--url`, `--dry-run` (prints the SQL),
+- `seed` — upsert seed rows. Flags: `--seed <path>`, `--url` (alias `--db-url`), `--dry-run` (prints the SQL),
   `--allow-remote-seed`, `--schema`, `--prefix`, `--adapter`, `--target`.
 - `help [command]`, `version` (also `--version`). With `--json` both print one object.
 
@@ -634,11 +649,22 @@ export interface PushResult {
   target: string | null;
   plan: Array<{ category: string; files: string[] }>;
   destructive?: DestructiveStatement[]; // --dry-run: in all migration files
+  foreignPolicies?: ForeignPolicy[] | null; // --dry-run: null when no database URL (not checked)
+  wouldRefuse?: boolean;                    // --dry-run: foreign policies found, no --replace-foreign-policies
   applied: string[];
+  droppedPolicies: ForeignPolicy[];         // --replace-foreign-policies
   skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
   seed: null | { path: string; status: 'applied' | 'skipped'; authUsers: number; durationMs?: number }; // only with --seed
   // on failure: error.code DESTRUCTIVE_MIGRATION adds destructive[]; GENERATED_OUT_OF_DATE adds
-  // stale: Array<{ path: string; status: string }>; a failed --seed keeps applied[] and seed.status 'failed'
+  // stale: Array<{ path: string; status: string }>; FOREIGN_POLICIES adds foreignPolicies[];
+  // PUSH_FAILED / MIGRATION_DRIFT: applied is [] (rolled back), rolledBack: string[] lists the files
+  // that had run, PUSH_FAILED adds failed: string; a failed --seed keeps applied[] and seed.status 'failed'
+}
+
+export interface ForeignPolicy {
+  schema: string; table: string; policy: string;
+  command: string;      // SELECT | INSERT | UPDATE | DELETE | ALL
+  permissive: boolean;  // false = RESTRICTIVE
 }
 
 export interface SeedResult {
@@ -1082,8 +1108,14 @@ export default defineSchema({
 - `DB_CONNECTION_FAILED` — wrong URL/password/network; for Supabase use the Session pooler
   string; local databases may need `?sslmode=disable`. A host that never answers fails after
   10 s (`ACCESSNEXUS_DB_CONNECT_TIMEOUT=<seconds>`).
-- `PUSH_FAILED` — Postgres rejected a file (message has the SQL error). That file was rolled
-  back; files in `applied` stay applied. Fix the schema, `generate`, `push` again.
+- `FOREIGN_POLICIES` — a table the schema manages has RLS policies AccessNexus did not
+  generate (listed in the message and `foreignPolicies`). Nothing was applied. Permissive
+  policies OR together, so they would keep granting access. Port any rule still needed into
+  the schema, ask the user, then `push --replace-foreign-policies` (drops them in the push
+  transaction).
+- `PUSH_FAILED` — Postgres rejected a file (message has the SQL error; `failed` names it). The
+  whole push was rolled back: nothing from it is applied (`applied` is `[]`, `rolledBack` lists
+  the files that had run). Fix the schema, `generate`, `push` again.
 - `MIGRATION_DRIFT` — an applied migration file was edited: restore it, change the schema,
   `generate` a new `__changes` migration.
 - `SEED_NOT_FOUND` / `SEED_EMPTY` / `SEED_FAILED` — create/fix `accessnexus.seed.ts`; seed after

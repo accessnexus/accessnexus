@@ -112,7 +112,7 @@ npx accessnexus push
 npx accessnexus push --url "$SUPABASE_DB_URL"
 ```
 
-`push` is the only command that changes the database. It applies the generated files in this order: migrations, policies, triggers, RPCs. Each file runs in its own transaction and is recorded in `public.accessnexus_migrations` with a checksum.
+`push` is the only command that changes the database. It applies the generated files in this order: migrations, policies, triggers, RPCs, and records each in `public.accessnexus_migrations` with a checksum. The whole push is one transaction: if any file fails (`PUSH_FAILED`), nothing from that push stays applied, including the bookkeeping rows.
 
 Before touching anything, it refuses to continue when:
 
@@ -121,17 +121,19 @@ Before touching anything, it refuses to continue when:
 | Nothing has been generated | `NOTHING_TO_PUSH` |
 | The generated SQL no longer matches the schema (you forgot `generate`) | `GENERATED_OUT_OF_DATE` |
 | The connected role cannot bypass RLS, and the SQL contains `SECURITY DEFINER` helpers | `PUSH_ROLE_NO_BYPASSRLS` |
+| A table the schema manages has RLS policies AccessNexus did not generate (not `<prefix>_<table>_<op>`); they would keep granting access | `FOREIGN_POLICIES` |
 | A pending migration drops a table or column, or changes a column type | `DESTRUCTIVE_MIGRATION` |
 
 On later runs, unchanged files are skipped, changed policy, trigger and RPC files are re-applied, and an applied migration that was edited is refused (`MIGRATION_DRIFT`). If another `push` holds the lock on the same database, it prints a notice and waits.
 
 | Flag | Effect |
 | --- | --- |
-| `--dry-run` | List the files and every destructive statement in the migrations. Needs no database URL or driver. Still refuses stale SQL. |
+| `--dry-run` | List the files and every destructive statement in the migrations. Needs no database URL or driver; when a URL is set it also lists foreign policies (read-only). Still refuses stale SQL. |
 | `--allow-destructive` | Apply migrations that drop tables or columns or change column types. |
+| `--replace-foreign-policies` | Drop the foreign policies `FOREIGN_POLICIES` listed, inside the push transaction. Only after reviewing them ([Existing project](/guide/existing-project#the-safe-first-push)). |
 | `--seed` | After a successful push, run the seed. |
 | `--allow-remote-seed` | With `--seed`: allow a hosted Supabase host. |
-| `--url <db-url>` | Database URL. |
+| `--url <db-url>` | Database URL. `--db-url` is an alias (the flag `init` uses). |
 | `--target <name>` | Use a target from `config.targets`. |
 
 ::: danger `--allow-destructive` deletes data

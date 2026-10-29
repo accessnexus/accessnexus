@@ -57,13 +57,14 @@ interface SchemaIssue {
 
 | Código | Comandos | Significado | Correção |
 | --- | --- | --- | --- |
-| `DB_URL_MISSING` | `push`, `seed` | Nenhuma URL de banco vinda de `--url`, `dbUrlEnv`, `ACCESSNEXUS_DB_URL`, `SUPABASE_DB_URL` ou `DATABASE_URL`. | Passe `--url` ou defina uma delas (shell, `.env`, `.env.local`). Use `--dry-run` para ver a prévia sem banco. |
+| `DB_URL_MISSING` | `push`, `seed` | Nenhuma URL de banco vinda de `--url` (alias `--db-url`), `dbUrlEnv`, `ACCESSNEXUS_DB_URL`, `SUPABASE_DB_URL` ou `DATABASE_URL`. | Passe `--url` ou defina uma delas (shell, `.env`, `.env.local`). Use `--dry-run` para ver a prévia sem banco. |
 | `PG_DRIVER_MISSING` | `push`, `seed`, `init --db-url` | A peer dependency opcional `pg` não está instalada (ou não exporta `Client`). | `npm install -D pg`. |
 | `DB_CONNECTION_FAILED` | `push`, `seed`, `init --db-url` | A conexão falhou ou estourou o tempo (10 s por padrão). | Confira URL, senha e rede. Supabase: string do "Session pooler". Local: `?sslmode=disable`. Timeout: `ACCESSNEXUS_DB_CONNECT_TIMEOUT=<seconds>`. |
 | `PUSH_ROLE_NO_BYPASSRLS` | `push` | O SQL contém helpers `SECURITY DEFINER`, mas a role conectada não ignora o RLS. Nada foi aplicado. | Conecte como `postgres`, ou rode `ALTER ROLE <role> BYPASSRLS` como superuser. |
 | `DESTRUCTIVE_MIGRATION` | `push` | Uma migration pendente remove tabela, coluna ou tipo, faz truncate ou muda o tipo de uma coluna. Nada foi aplicado; `destructive` lista os statements. | Se for um rename: renomeie no schema. Se a perda for intencional: faça backup e rode `push --allow-destructive`. |
-| `MIGRATION_DRIFT` | `push` | Um arquivo de migration já aplicado foi editado. | Restaure o arquivo, altere o schema e rode `generate` para gerar uma nova migration `__changes`. |
-| `PUSH_FAILED` | `push` | O Postgres rejeitou um arquivo (a mensagem traz o erro SQL). Esse arquivo sofreu rollback; os arquivos em `applied` continuam aplicados. | Corrija a causa no schema (ou no estado do banco), rode `generate` e `push` de novo. |
+| `FOREIGN_POLICIES` | `push` | Uma tabela que o schema gerencia tem policies de RLS cujo nome não é `<prefix>_<table>_<op>` (não foram geradas pelo AccessNexus). Policies permissivas se combinam com OR, então continuariam concedendo acesso. Nada foi aplicado; a mensagem e `foreignPolicies` listam tabela + policy. | Leve para o schema as regras que ainda importam, revise e rode `push --replace-foreign-policies` (remove as policies dentro da transação do push). Veja [Projeto existente](/pt/guide/existing-project). |
+| `MIGRATION_DRIFT` | `push` | Um arquivo de migration já aplicado foi editado. O push sofreu rollback. | Restaure o arquivo, altere o schema e rode `generate` para gerar uma nova migration `__changes`. |
+| `PUSH_FAILED` | `push` | O Postgres rejeitou um arquivo (a mensagem traz o erro SQL; `failed` indica qual). O push roda numa única transação, então tudo sofreu rollback: `applied` é `[]` e `rolledBack` lista os arquivos que tinham rodado. | Corrija a causa no schema (ou no estado do banco), rode `generate` e `push` de novo. |
 
 ### Adapter e target {#adapter-and-target}
 

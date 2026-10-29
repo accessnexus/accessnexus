@@ -41,7 +41,7 @@ O `init` procura um client existente em `src/` e na raiz do projeto: `lib/supaba
 `--db-url` precisa do driver `pg` (`PG_DRIVER_MISSING`) e falha com `DB_CONNECTION_FAILED` depois de 10 s quando o host não responde. Com `--no-introspect`, o `init` nunca conecta.
 
 ::: warning Prefira `--db-url` à importação via REST
-O REST não consegue ler o RLS. As tabelas importadas ficam sem policies, então o primeiro `push` liga o RLS em todas elas. As policies que já existem no banco continuam, mas uma tabela que estava com o RLS desligado vira deny-all até você adicionar policies ou `enableRLS: false`.
+O REST não consegue ler o RLS. As tabelas importadas ficam sem policies, então o primeiro `push` liga o RLS em todas elas. As policies que já existem no banco são reportadas como estranhas (veja abaixo), e uma tabela que estava com o RLS desligado vira deny-all até você adicionar policies ou `enableRLS: false`.
 :::
 
 ## O que é importado {#what-is-imported}
@@ -120,26 +120,21 @@ Depois rode `npx accessnexus validate` até ficar limpo.
 
 ## O primeiro push seguro {#the-safe-first-push}
 
+Depois do `init`, as policies originais continuam no banco. O Postgres combina policies permissivas com OR, então uma policy original continuaria concedendo acesso ao lado das geradas, diga o schema o que disser. Por isso o `push` nunca as mantém em silêncio, e também nunca as remove em silêncio: ele lê `pg_policies` de cada tabela que o schema gerencia e recusa com `FOREIGN_POLICIES` enquanto houver ali uma policy cujo nome não é `<prefix>_<table>_<op>`.
+
 1. `npx accessnexus generate`, e depois leia o que ele escreveu:
    - `__init.sql`: `CREATE TABLE IF NOT EXISTS` (não faz nada em tabelas existentes), `CREATE INDEX IF NOT EXISTS` nas colunas de foreign key e de policy (índices novos), tipos enum se faltarem.
    - `policies/*.sql`: `ENABLE` + `FORCE ROW LEVEL SECURITY` e policies com nome `<prefix>_<table>_<op>`.
    - `rpcs.sql`: `CREATE OR REPLACE` das funções importadas.
-2. `npx accessnexus push --dry-run`: a lista de statements destrutivos precisa estar vazia.
-3. `npx accessnexus push` em staging, teste o app, depois em produção.
+2. `npx accessnexus push --dry-run --json` com a URL do banco definida: `destructive` precisa estar vazio, e `foreignPolicies` lista cada policy original de uma tabela gerenciada (`wouldRefuse: true`). O dry run só lê.
+3. Compare cada policy listada com a regra que o `init` gerou para ela (cada regra tem um comentário com o nome da policy de origem). Leve para o `accessnexus.schema.ts` o que ainda faltar e rode o `generate` de novo.
+4. Em staging: `npx accessnexus push --replace-foreign-policies`. Numa única transação ele remove as policies listadas (`droppedPolicies` no `--json`), aplica as migrations, as policies geradas, os triggers e as RPCs, e registra tudo. Se algo falhar, tudo sofre rollback, inclusive as remoções: o banco fica como estava.
+5. Teste o app como usuários reais (anon, logado, outros tenants). Depois repita as etapas 2 e 4 em produção.
 
-Depois desse push, existem tanto as policies originais quanto as geradas. O `push` nunca remove policies que ele não criou, e o Postgres combina policies permissivas com OR, então o acesso efetivo é a união. Como a importação nunca concede mais, essa união é igual ao que você já tinha.
+Depois desse push, só as policies geradas existem nas tabelas gerenciadas, então o schema passa a ser a fonte da verdade.
 
 ::: danger Remova as originais só depois de revisar, e com consentimento
-Enquanto as policies originais não forem removidas, o schema não é a fonte da verdade: uma policy permissiva antiga continua concedendo acesso, diga o schema o que disser. Quando o app estiver funcionando com as policies geradas, liste as originais e remova-as de forma deliberada:
-
-```sql
-SELECT tablename, policyname FROM pg_policies
-WHERE schemaname = 'public' AND policyname NOT LIKE 'accessnexus\_%';
-
-DROP POLICY "own notes" ON notes;
-```
-
-Se um agente estiver no controle, ele precisa perguntar antes de remover qualquer coisa.
+O `--replace-foreign-policies` apaga policies que o AccessNexus não escreveu. Passe a flag só depois da etapa 3. Se um agente estiver no controle, ele precisa mostrar a lista do `FOREIGN_POLICIES` e perguntar antes de passar a flag.
 :::
 
 ## Veja também {#related}

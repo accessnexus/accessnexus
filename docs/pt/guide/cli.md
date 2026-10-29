@@ -112,7 +112,7 @@ npx accessnexus push
 npx accessnexus push --url "$SUPABASE_DB_URL"
 ```
 
-O `push` é o único comando que altera o banco. Ele aplica os arquivos gerados nesta ordem: migrations, policies, triggers, RPCs. Cada arquivo roda na própria transação e é registrado em `public.accessnexus_migrations` com um checksum.
+O `push` é o único comando que altera o banco. Ele aplica os arquivos gerados nesta ordem: migrations, policies, triggers, RPCs, e registra cada um em `public.accessnexus_migrations` com um checksum. O push inteiro é uma única transação: se qualquer arquivo falhar (`PUSH_FAILED`), nada desse push fica aplicado, nem os registros de controle.
 
 Antes de mexer em qualquer coisa, ele se recusa a continuar quando:
 
@@ -121,17 +121,19 @@ Antes de mexer em qualquer coisa, ele se recusa a continuar quando:
 | Nada foi gerado | `NOTHING_TO_PUSH` |
 | O SQL gerado não bate mais com o schema (você esqueceu o `generate`) | `GENERATED_OUT_OF_DATE` |
 | A role conectada não consegue ignorar o RLS, e o SQL contém helpers `SECURITY DEFINER` | `PUSH_ROLE_NO_BYPASSRLS` |
+| Uma tabela que o schema gerencia tem policies de RLS que o AccessNexus não gerou (fora do padrão `<prefix>_<table>_<op>`); elas continuariam concedendo acesso | `FOREIGN_POLICIES` |
 | Uma migration pendente remove uma tabela ou coluna, ou muda o tipo de uma coluna | `DESTRUCTIVE_MIGRATION` |
 
 Nas execuções seguintes, arquivos inalterados são pulados, arquivos de policy, trigger e RPC alterados são reaplicados, e uma migration já aplicada que foi editada é recusada (`MIGRATION_DRIFT`). Se outro `push` estiver segurando o lock no mesmo banco, ele imprime um aviso e espera.
 
 | Flag | Efeito |
 | --- | --- |
-| `--dry-run` | Lista os arquivos e todos os statements destrutivos nas migrations. Não precisa de URL de banco nem de driver. Ainda recusa SQL desatualizado. |
+| `--dry-run` | Lista os arquivos e todos os statements destrutivos nas migrations. Não precisa de URL de banco nem de driver; quando há URL, também lista as policies estranhas (só leitura). Ainda recusa SQL desatualizado. |
 | `--allow-destructive` | Aplica migrations que removem tabelas ou colunas ou mudam tipos de coluna. |
+| `--replace-foreign-policies` | Remove as policies estranhas listadas pelo `FOREIGN_POLICIES`, dentro da transação do push. Só depois de revisá-las ([Projeto existente](/pt/guide/existing-project#the-safe-first-push)). |
 | `--seed` | Depois de um push bem-sucedido, roda o seed. |
 | `--allow-remote-seed` | Com `--seed`: permite um host Supabase hospedado. |
-| `--url <db-url>` | URL do banco. |
+| `--url <db-url>` | URL do banco. `--db-url` é um alias (a flag que o `init` usa). |
 | `--target <name>` | Usa um target de `config.targets`. |
 
 ::: danger `--allow-destructive` apaga dados

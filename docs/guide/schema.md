@@ -125,7 +125,7 @@ Each enum column gets its own type, even when two columns list the same values. 
 | `uuid` | `DEFAULT gen_random_uuid()` |
 | `bigint` | `GENERATED ALWAYS AS IDENTITY` |
 
-For time-ordered UUIDs, set `adapterOptions.uuidGeneration: 'v7'` in `accessnexus.config.ts`: uuid primary keys then default to a generated `accessnexus_uuidv7()` helper. A table without `primaryKey` triggers the `NO_PRIMARY_KEY` warning; the SDK's `findById`, `update` and `delete` work by primary key.
+For time-ordered UUIDs, set `adapterOptions.uuidGeneration: 'v7'` in `accessnexus.config.ts`: uuid primary keys then default to a generated `public.accessnexus_uuidv7()` helper. A table without `primaryKey` triggers the `NO_PRIMARY_KEY` warning; the SDK's `findById`, `update` and `delete` work by primary key.
 
 ## References and `onDelete`
 

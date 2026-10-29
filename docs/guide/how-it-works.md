@@ -102,8 +102,9 @@ Renames are detected heuristically. A statement that drops a table or column, or
 | Connect (10 s timeout, `ACCESSNEXUS_DB_CONNECT_TIMEOUT` to change it) | `DB_CONNECTION_FAILED` |
 | Check that the role bypasses RLS when the SQL has `SECURITY DEFINER` helpers | `PUSH_ROLE_NO_BYPASSRLS` |
 | Take the push lock | Waits, and prints a notice instead of hanging silently |
+| Open one transaction; refuse RLS policies on managed tables that AccessNexus did not generate, unless `--replace-foreign-policies` (then drop them) | `FOREIGN_POLICIES` |
 | Refuse pending migrations that destroy data, unless `--allow-destructive` | `DESTRUCTIVE_MIGRATION` |
-| Apply files: migrations → policies → triggers → rpcs | `PUSH_FAILED` (that file is rolled back) |
+| Apply files: migrations → policies → triggers → rpcs, then commit | `PUSH_FAILED` (the whole push is rolled back) |
 
 Nothing is applied when any check before the last step fails. `push --dry-run` stops after the schema check: it lists the plan and any destructive statements without connecting.
 
@@ -148,9 +149,9 @@ Policy, trigger and RPC files are idempotent, so a changed file is simply applie
 
 `push` takes a Postgres advisory lock (`pg_try_advisory_lock(hashtext('accessnexus_push_lock'))`) before applying anything and releases it at the end. Two pushes against the same database never interleave: the second one prints that another push holds the lock and waits for it.
 
-### Not one big transaction
+### One transaction, all or nothing
 
-Each file runs in its own transaction. If file 3 of 5 fails, files 1 and 2 stay applied (they are listed in `applied` in the JSON output), file 3 is rolled back, and the next `push` resumes from there once you fix the cause.
+The whole push runs in one transaction: the bookkeeping table, foreign-policy drops, migrations, policies, triggers and RPCs. If file 3 of 5 fails, files 1 and 2 are rolled back too (`applied` is `[]`, `rolledBack` lists them, `failed` names file 3), so the database is never left half-pushed. Fix the cause and push again. The one thing a single transaction cannot do: use an enum value added (`ALTER TYPE ... ADD VALUE`) earlier in the same push. Push the enum change first.
 
 ::: info Policies AccessNexus did not create
 Generated policies are named `<prefix>_<table>_<operation>` (default prefix `accessnexus`). `push` only drops policies with those names; policies created by other tools stay in place. Postgres ORs permissive policies together, so remove old policies deliberately once the generated ones cover them.
