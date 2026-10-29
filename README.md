@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="AccessNexus" width="120">
+</p>
+
 # AccessNexus
 
 > **The missing schema layer for Supabase.** Define your schema and access rules in
