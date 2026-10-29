@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SupabaseAdapter } from '../adapters/supabase/adapter.js';
 import { AGENTS_BLOCK_START } from '../cli/init/agents.js';
 import { dbConnectTimeoutMs } from '../cli/db-timeout.js';
-import { assertRoleBypassesRls, runCli } from '../cli/run.js';
+import { assertRoleBypassesRls, findForeignPolicies, managedPolicyTargets, runCli } from '../cli/run.js';
 
 const SRC_INDEX = resolve(__dirname, '../index.ts').replaceAll('\\', '/');
 const ENV_KEYS = ['ACCESSNEXUS_DB_URL', 'SUPABASE_DB_URL', 'DATABASE_URL', 'DEBUG', 'NO_COLOR', 'FORCE_COLOR', 'ACCESSNEXUS_DB_CONNECT_TIMEOUT'];
@@ -420,6 +420,43 @@ export default defineConfig({
     expect(result.json.error.code).toBe('DB_URL_MISSING');
     expect(result.json.error.hint).toContain('SUPABASE_DB_URL');
     expect(result.json.error.hint).toContain('--url');
+  });
+
+  it('dry run without a database reports foreign policies as unchecked', async () => {
+    write('accessnexus.schema.ts', VALID_SCHEMA);
+    await run('generate', '--json');
+    const result = await run('push', '--dry-run', '--json');
+    expect(result.json).toMatchObject({ foreignPolicies: null, wouldRefuse: false, droppedPolicies: [] });
+  });
+
+  it('accepts --db-url as an alias of --url and rejects conflicting values', async () => {
+    write('accessnexus.schema.ts', VALID_SCHEMA);
+    await run('generate', '--json');
+    const alias = await run('push', '--db-url', 'postgres://user:s3cret@127.0.0.1:1/db?sslmode=disable', '--json');
+    expect(alias.json.error.code).toBe('DB_CONNECTION_FAILED');
+    const conflict = await run('push', '--db-url', 'postgres://a@127.0.0.1:1/a', '--url', 'postgres://b@127.0.0.1:1/b', '--json');
+    expect(conflict.code).toBe(1);
+    expect(conflict.json.error.code).toBe('INVALID_FLAG_VALUE');
+    const seed = await run('seed', '--help', '--json');
+    expect(JSON.stringify(seed.json)).toContain('db-url');
+  });
+
+  it('flags every policy on a managed table that is not <prefix>_<table>_<op>', async () => {
+    const targets = managedPolicyTargets({ notes: {} as any, 'app.items': {} as any }, 'accessnexus');
+    expect(targets.tables).toEqual([{ schema: 'public', table: 'notes' }, { schema: 'app', table: 'items' }]);
+    const rows = [
+      { schemaname: 'public', tablename: 'notes', policyname: 'accessnexus_notes_select', cmd: 'SELECT', permissive: 'PERMISSIVE' },
+      { schemaname: 'public', tablename: 'notes', policyname: 'Enable read access for all users', cmd: 'SELECT', permissive: 'PERMISSIVE' },
+      { schemaname: 'public', tablename: 'notes', policyname: 'accessnexus_other_select', cmd: 'ALL', permissive: 'RESTRICTIVE' },
+    ];
+    let params: unknown[] | undefined;
+    const client = { query: async (_sql: string, p?: unknown[]) => { params = p; return { rows }; } };
+    const foreign = await findForeignPolicies(client, targets);
+    expect(params).toEqual([['public', 'app'], ['notes', 'items']]);
+    expect(foreign).toEqual([
+      { schema: 'public', table: 'notes', policy: 'Enable read access for all users', command: 'SELECT', permissive: true },
+      { schema: 'public', table: 'notes', policy: 'accessnexus_other_select', command: 'ALL', permissive: false },
+    ]);
   });
 
   it('refuses to push SECURITY DEFINER helpers with a role that does not bypass RLS', async () => {

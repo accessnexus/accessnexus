@@ -62,6 +62,7 @@ const OUTPUT_FLAGS: FlagSpecs = {
 };
 const DB_FLAGS: FlagSpecs = {
   url: { kind: 'string', value: '<db-url>', description: 'Postgres URL (fallback: adapter dbUrlEnv, ACCESSNEXUS_DB_URL, SUPABASE_DB_URL, DATABASE_URL)' },
+  'db-url': { kind: 'string', value: '<db-url>', description: 'Alias of --url (same flag init uses)' },
   adapter: { kind: 'string', value: '<name>', description: 'Adapter to use when several are configured' },
   target: { kind: 'string', value: '<name>', description: 'Target from config.targets' },
   'dry-run': { kind: 'boolean', description: 'Show what would run without touching the database' },
@@ -110,6 +111,7 @@ export const COMMANDS: Readonly<Record<CommandName, { summary: string; flags: Fl
       prefix: OUTPUT_FLAGS.prefix,
       schema: SCHEMA_FLAG,
       'allow-destructive': { kind: 'boolean', description: 'Apply pending migrations that DROP tables/columns or change column types' },
+      'replace-foreign-policies': { kind: 'boolean', description: 'Drop RLS policies on managed tables that AccessNexus did not generate (same transaction)' },
       seed: { kind: 'boolean', description: 'Also run the seed (accessnexus.seed.ts / config.seed) after pushing' },
       'allow-remote-seed': { kind: 'boolean', description: 'With --seed: allow seeding a hosted Supabase database' },
     },
@@ -924,7 +926,14 @@ function resolveAdapterSelection(
 function resolveDbUrl(opts: ParsedFlags, selection: AdapterSelection): { dbUrl?: string; configuredEnv?: string } {
   const configuredEnv = envNameFromAdapterOptions(selection.adapterOptions);
   const fromConfiguredEnv = configuredEnv ? process.env[configuredEnv] : undefined;
-  const dbUrl = (opts.url as string | undefined)
+  const flagUrl = opts.url as string | undefined;
+  const aliasUrl = opts['db-url'] as string | undefined;
+  if (flagUrl !== undefined && aliasUrl !== undefined && flagUrl !== aliasUrl) {
+    throw new CliError('INVALID_FLAG_VALUE', '--url and --db-url were both passed with different values', {
+      hint: '--db-url is an alias of --url: pass only one of them.',
+    });
+  }
+  const dbUrl = (flagUrl ?? aliasUrl)
     ?? fromConfiguredEnv
     ?? process.env.ACCESSNEXUS_DB_URL
     ?? process.env.SUPABASE_DB_URL
@@ -1030,28 +1039,6 @@ async function createPgClient(dbUrl: string): Promise<any> {
 /** Hide the password in a connection string before printing it. */
 function redactUrl(url: string): string {
   return url.replace(/(\/\/[^:/@]+:)[^@]*@/, '$1***@');
-}
-
-async function ensureUuidCompatibility(client: any): Promise<void> {
-  const sql = `
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;
-    DO $accessnexus$
-    BEGIN
-      IF to_regprocedure('public.uuid_generate_v7()') IS NULL THEN
-        CREATE OR REPLACE FUNCTION public.uuid_generate_v7()
-        RETURNS uuid
-        LANGUAGE sql
-        VOLATILE
-        SET search_path = pg_catalog
-        AS $fn$
-          SELECT gen_random_uuid();
-        $fn$;
-      END IF;
-    END
-    $accessnexus$;
-    ALTER FUNCTION public.uuid_generate_v7() SET search_path = pg_catalog;
-  `;
-  await client.query(sql);
 }
 
 async function ensureMigrationsTable(client: any): Promise<void> {
@@ -1209,9 +1196,79 @@ async function refreshAppliedMigrationChecksum(
   await client.query(query, [category, filename, nextChecksum]);
 }
 
+export interface ForeignPolicy {
+  schema: string;
+  table: string;
+  policy: string;
+  command: string;
+  permissive: boolean;
+}
+
+/**
+ * Tables the schema manages, as (schema, table) pairs, plus the policy names
+ * AccessNexus generates for them (`<prefix>_<table>_<op>`).
+ */
+export function managedPolicyTargets(
+  schema: SchemaDef,
+  policyPrefix: string,
+  defaultSchema = 'public',
+): { tables: Array<{ schema: string; table: string }>; generatedNames: Set<string> } {
+  const tables: Array<{ schema: string; table: string }> = [];
+  const generatedNames = new Set<string>();
+  for (const key of Object.keys(schema)) {
+    const dot = key.indexOf('.');
+    tables.push(dot === -1 ? { schema: defaultSchema, table: key } : { schema: key.slice(0, dot), table: key.slice(dot + 1) });
+    for (const op of ['select', 'insert', 'update', 'delete']) generatedNames.add(`${policyPrefix}_${key}_${op}`);
+  }
+  return { tables, generatedNames };
+}
+
+/** RLS policies on managed tables whose name is not one AccessNexus generates. */
+export async function findForeignPolicies(
+  client: { query(sql: string, params?: unknown[]): Promise<{ rows: any[] }> },
+  targets: ReturnType<typeof managedPolicyTargets>,
+): Promise<ForeignPolicy[]> {
+  if (targets.tables.length === 0) return [];
+  const { rows } = await client.query(
+    `SELECT p.schemaname, p.tablename, p.policyname, p.cmd, p.permissive
+       FROM pg_catalog.pg_policies p
+       JOIN unnest($1::text[], $2::text[]) AS t(schema_name, table_name)
+         ON p.schemaname = t.schema_name AND p.tablename = t.table_name
+      ORDER BY p.schemaname, p.tablename, p.policyname`,
+    [targets.tables.map((t) => t.schema), targets.tables.map((t) => t.table)],
+  );
+  return rows
+    .filter((row) => !targets.generatedNames.has(String(row.policyname)))
+    .map((row) => ({
+      schema: String(row.schemaname),
+      table: String(row.tablename),
+      policy: String(row.policyname),
+      command: String(row.cmd),
+      permissive: String(row.permissive).toUpperCase() === 'PERMISSIVE',
+    }));
+}
+
+function quoteIdent(name: string): string {
+  return `"${name.replaceAll('"', '""')}"`;
+}
+
+function describeForeignPolicies(policies: ForeignPolicy[]): string {
+  return policies.map((p) => `${p.schema}.${p.table}: "${p.policy}" (${p.command}${p.permissive ? '' : ', restrictive'})`).join('; ');
+}
+
+function reportForeignPolicies(policies: ForeignPolicy[], willDrop: boolean): void {
+  if (policies.length === 0) return;
+  log(paint.bold(`  Foreign policies (not generated by AccessNexus) on managed tables: ${policies.length}`));
+  for (const p of policies) log(`    ${paint.yellow('!')} ${p.schema}.${p.table}: ${p.policy} (${p.command}${p.permissive ? '' : ', restrictive'})`);
+  log(`  ${paint.gray(willDrop
+    ? 'These are dropped in the push transaction (--replace-foreign-policies).'
+    : 'Permissive policies OR together: these would keep granting access. push refuses until you pass --replace-foreign-policies.')}\n`);
+}
+
 async function runPush(opts: ParsedFlags): Promise<CommandResult> {
   const dryRun = opts['dry-run'] === true;
   const allowDestructive = opts['allow-destructive'] === true;
+  const replaceForeign = opts['replace-foreign-policies'] === true;
 
   log(`\n${brand()} push...\n`);
 
@@ -1262,6 +1319,13 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
     });
   }
 
+  const schema = await loadSchema(config.schema);
+  const targets = managedPolicyTargets(
+    schema,
+    config.naming.policyPrefix,
+    (config.adapterOptions as { schemaName?: string } | undefined)?.schemaName ?? 'public',
+  );
+
   log(`  Adapter: ${selection.adapter}${selection.targetName ? ` (target: ${selection.targetName})` : ''}`);
   log(`  Files:   ${fileCount}`);
   for (const group of plan) {
@@ -1273,27 +1337,71 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
 
   if (dryRun) {
     reportDestructive(migrationDestructive, 'Migration files (applied only if not yet applied)');
+    // Read-only look at the live policies when a database is reachable.
+    let foreignPolicies: ForeignPolicy[] | null = null;
+    if (dbUrl) {
+      let client: any;
+      try {
+        client = await createPgClient(dbUrl);
+        foreignPolicies = await findForeignPolicies(client, targets);
+      } catch (err) {
+        log(`  ${paint.yellow('!')} Could not inspect the database for foreign policies: ${toCliError(err).message}\n`);
+      } finally {
+        if (client) await client.end().catch(() => {});
+      }
+    } else {
+      log(`  ${paint.gray('No database URL: foreign policies not checked (pass --url to check them).')}\n`);
+    }
+    if (foreignPolicies) reportForeignPolicies(foreignPolicies, replaceForeign);
     log(`  ${paint.green('✓')} Dry run — execution skipped\n`);
-    return { ...base, destructive: migrationDestructive, applied: [], skipped: [], seed: null };
+    return {
+      ...base,
+      destructive: migrationDestructive,
+      foreignPolicies,
+      wouldRefuse: foreignPolicies !== null && foreignPolicies.length > 0 && !replaceForeign,
+      applied: [],
+      skipped: [],
+      droppedPolicies: [],
+      seed: null,
+    };
   }
 
   if (!dbUrl) throw missingDbUrlError('push', configuredEnv);
   if (opts.seed === true) assertSeedTargetAllowed(dbUrl, opts);
 
-
   const applied: string[] = [];
   const skipped: Array<{ path: string; reason: string }> = [];
-  const progress = () => ({ ...base, applied: [...applied], skipped: [...skipped] });
+  const droppedPolicies: ForeignPolicy[] = [];
+  const progress = () => ({ ...base, applied: [...applied], skipped: [...skipped], droppedPolicies: [...droppedPolicies] });
+  // After a rollback nothing from this push stays in the database.
+  const rolledBack = () => ({ ...base, applied: [], skipped: [...skipped], droppedPolicies: [], rolledBack: [...applied] });
 
   const client = await createPgClient(dbUrl);
   let lockAcquired = false;
+  let inTransaction = false;
   try {
     const needsBypass = plan.some((group) => group.files.some((file) => /SECURITY DEFINER/i.test(readFileSync(file, 'utf-8'))));
     if (needsBypass) await assertRoleBypassesRls(client);
     await acquirePushLock(client);
     lockAcquired = true;
+
+    // One transaction for the whole push: bookkeeping, foreign-policy drops,
+    // migrations, policies, triggers and RPCs commit together or not at all.
+    await client.query('BEGIN');
+    inTransaction = true;
     await ensureMigrationsTable(client);
-    await ensureUuidCompatibility(client);
+
+    // Foreign policies: permissive policies OR together, so a policy we did not
+    // generate keeps granting access next to ours. Never keep or drop silently.
+    const foreign = await findForeignPolicies(client, targets);
+    if (foreign.length > 0 && !replaceForeign) {
+      reportForeignPolicies(foreign, false);
+      throw new CliError('FOREIGN_POLICIES', `${foreign.length} RLS polic${foreign.length === 1 ? 'y' : 'ies'} on managed tables were not generated by AccessNexus and would keep granting access: ${describeForeignPolicies(foreign)}`, {
+        hint: 'Nothing was applied. Review them (`foreignPolicies` in --json). Port any rule you still need into accessnexus.schema.ts, '
+          + 'then re-run with --replace-foreign-policies to drop them in the same transaction as the push.',
+        data: { ...progress(), foreignPolicies: foreign },
+      });
+    }
 
     // Data-loss guard: look at pending migrations before applying anything.
     const pendingDestructive: DestructiveStatement[] = [];
@@ -1311,6 +1419,14 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
       });
     }
 
+    if (foreign.length > 0) {
+      reportForeignPolicies(foreign, true);
+      for (const p of foreign) {
+        await client.query(`DROP POLICY ${quoteIdent(p.policy)} ON ${quoteIdent(p.schema)}.${quoteIdent(p.table)};`);
+        droppedPolicies.push(p);
+      }
+    }
+
     for (const group of plan) {
       if (group.files.length === 0) continue;
       log(paint.bold(`  ${group.title}:`));
@@ -1324,9 +1440,9 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
           if (appliedRecord.checksum !== fileChecksum) {
             if (group.key === 'migrations') {
               throw new CliError('MIGRATION_DRIFT', `Migration ${display} changed after it was applied`, {
-                hint: 'Applied migrations are immutable. Restore the file (e.g. `git checkout -- '
+                hint: 'Nothing was applied. Applied migrations are immutable. Restore the file (e.g. `git checkout -- '
                   + `${display}\`), change accessnexus.schema.ts instead and run \`npx accessnexus generate\` to get a new __changes migration.`,
-                data: progress(),
+                data: rolledBack(),
               });
             }
 
@@ -1345,48 +1461,47 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
 
         const startedAt = Date.now();
         try {
-          await client.query('BEGIN');
           await client.query(sql);
-          const record = {
-            category: group.key,
-            filename: display,
-            checksum: fileChecksum,
-            executionTimeMs: Date.now() - startedAt,
-          };
-          if (appliedRecord) await updateAppliedMigration(client, record);
-          else await recordMigration(client, { ...record, success: true });
-          await client.query('COMMIT');
         } catch (error: any) {
-          try {
-            await client.query('ROLLBACK');
-          } catch {
-            // ignore rollback errors and preserve the root SQL error
-          }
           const pgMessage = String(error?.message ?? 'unknown SQL error');
-          try {
-            await recordMigration(client, {
-              category: group.key,
-              filename: display,
-              checksum: fileChecksum,
-              executionTimeMs: Date.now() - startedAt,
-              success: false,
-              logs: pgMessage.slice(0, 4000),
-            });
-          } catch {
-            // best effort only, do not hide root SQL error
-          }
           throw new CliError('PUSH_FAILED', `Postgres rejected ${display}: ${pgMessage}`, {
-            hint: `${display} was rolled back; files listed in "applied" stay applied. `
+            hint: 'The whole push was rolled back: nothing from it was applied (not the files in "rolledBack", not the foreign-policy drops). '
               + 'Fix the cause in accessnexus.schema.ts (or the database state), run `npx accessnexus generate`, then push again.',
-            data: progress(),
+            data: { ...rolledBack(), failed: display },
             cause: error,
           });
         }
+        const record = {
+          category: group.key,
+          filename: display,
+          checksum: fileChecksum,
+          executionTimeMs: Date.now() - startedAt,
+        };
+        if (appliedRecord) await updateAppliedMigration(client, record);
+        else await recordMigration(client, { ...record, success: true });
         applied.push(display);
         log(`  ${paint.green('✓')} ${display}${appliedRecord ? paint.gray(' (re-applied: changed)') : ''}`);
       }
       log('');
     }
+
+    await client.query('COMMIT');
+    inTransaction = false;
+  } catch (err) {
+    if (inTransaction) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // ignore rollback errors and preserve the root error
+      }
+    }
+    if (err instanceof CliError || !inTransaction) throw err;
+    const message = String((err as any)?.message ?? err);
+    throw new CliError('PUSH_FAILED', `push failed and was rolled back: ${message}`, {
+      hint: 'Nothing from this push was applied. Fix the cause (database state or connection), then push again.',
+      data: rolledBack(),
+      cause: err,
+    });
   } finally {
     if (lockAcquired) {
       try {

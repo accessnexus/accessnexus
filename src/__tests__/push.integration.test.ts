@@ -110,7 +110,7 @@ async function cli(...argv: string[]): Promise<{ code: number; json: any }> {
 }
 
 function writeSchema(body: string): void {
-  writeFileSync(join(cwd, 'accessnexus.schema.ts'), `import { defineSchema, definePermissions, table, policy, trigger } from '${SRC_INDEX}';\n${body}`);
+  writeFileSync(join(cwd, 'accessnexus.schema.ts'), `import { defineSchema, definePermissions, table, policy, trigger, rpc } from '${SRC_INDEX}';\n${body}`);
 }
 
 /** The ```ts block of llms.txt that contains `marker`, importing from this checkout. */
@@ -509,11 +509,13 @@ export default defineSeed(schema, { profiles: [{ id: '${ALICE}', email: 'alice@e
     expect(schema).toContain('policy.all([');
     writeFileSync(join(cwd, 'accessnexus.schema.ts'), schema.replaceAll("from 'accessnexus'", `from '${SRC_INDEX}'`));
 
-    // Judge the imported rules alone: drop the original policies (AccessNexus leaves
-    // policies it did not create in place).
-    await admin.query(`DROP POLICY "service only" ON secrets; DROP POLICY "read all" ON docs; DROP POLICY tenant_ok ON docs;`);
+    // Judge the imported rules alone: push refuses while the original policies are
+    // there, and --replace-foreign-policies drops them in the push transaction.
     expect((await cli('generate')).code).toBe(0);
-    const pushed = await cli('push');
+    const refused = await cli('push');
+    expect(refused.json.error.code).toBe('FOREIGN_POLICIES');
+    expect(refused.json.foreignPolicies.map((p: any) => p.policy).sort()).toEqual(['read all', 'service only', 'tenant_ok']);
+    const pushed = await cli('push', '--replace-foreign-policies');
     expect(pushed.json.error ?? null).toBeNull();
     expect((await asUser(null, 'SELECT * FROM secrets')).rowCount).toBe(0);
     expect((await asUser(ALICE, 'DELETE FROM secrets')).rowCount).toBe(0);
@@ -521,4 +523,139 @@ export default defineSeed(schema, { profiles: [{ id: '${ALICE}', email: 'alice@e
     // The RESTRICTIVE tenant filter still applies on top of "read all".
     expect((await asUser(null, 'SELECT body FROM docs')).rows.map((r) => r.body)).toEqual(['visible']);
   }, 90_000);
+  const notesSchema = (extra = '') => `
+export default defineSchema({
+  notes: table({
+    columns: { id: 'uuid', owner_id: 'uuid', body: 'text' },
+    primaryKey: 'id',
+    policies: { select: policy.isOwner('owner_id'), insert: policy.isOwner('owner_id'), update: policy.isOwner('owner_id'), delete: policy.isOwner('owner_id') },
+  }),${extra}
+});`;
+
+  async function policyNames(table: string): Promise<string[]> {
+    const { rows } = await admin.query(`SELECT policyname FROM pg_policies WHERE schemaname = 'public' AND tablename = $1 ORDER BY policyname`, [table]);
+    return rows.map((r: any) => r.policyname);
+  }
+
+  it('refuses foreign policies on managed tables, and replaces them only with --replace-foreign-policies', async () => {
+    // A pre-existing project: the table and a permissive policy AccessNexus did not write.
+    await admin.query(`
+      CREATE TABLE public.notes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), owner_id uuid, body text NOT NULL);
+      ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY;
+      CREATE POLICY "anyone can read" ON public.notes FOR SELECT USING (true);
+      GRANT ALL ON public.notes TO anon, authenticated;
+      INSERT INTO public.notes (owner_id, body) VALUES ('${ALICE}', 'alice note');
+    `);
+    writeSchema(notesSchema());
+    expect((await cli('generate')).code).toBe(0);
+
+    // Dry run reports them without touching the database.
+    const dry = await cli('push', '--dry-run');
+    expect(dry.code).toBe(0);
+    expect(dry.json.wouldRefuse).toBe(true);
+    expect(dry.json.foreignPolicies).toEqual([
+      { schema: 'public', table: 'notes', policy: 'anyone can read', command: 'SELECT', permissive: true },
+    ]);
+
+    const refused = await cli('push');
+    expect(refused.code).toBe(1);
+    expect(refused.json.error.code).toBe('FOREIGN_POLICIES');
+    expect(refused.json.error.message).toContain('public.notes: "anyone can read"');
+    expect(refused.json.error.hint).toContain('--replace-foreign-policies');
+    expect(refused.json.foreignPolicies).toHaveLength(1);
+    expect(refused.json.applied).toEqual([]);
+    // Database unchanged: no bookkeeping table, only the original policy.
+    expect((await admin.query(`SELECT to_regclass('public.accessnexus_migrations') IS NULL AS absent`)).rows[0].absent).toBe(true);
+    expect(await policyNames('notes')).toEqual(['anyone can read']);
+
+    const replaced = await cli('push', '--replace-foreign-policies');
+    expect(replaced.json.error ?? null).toBeNull();
+    expect(replaced.code).toBe(0);
+    expect(replaced.json.droppedPolicies.map((p: any) => p.policy)).toEqual(['anyone can read']);
+    expect(await policyNames('notes')).toEqual([
+      'accessnexus_notes_delete', 'accessnexus_notes_insert', 'accessnexus_notes_select', 'accessnexus_notes_update',
+    ]);
+    // Access now matches the schema: owner only.
+    expect((await asUser(null, 'SELECT * FROM notes')).rowCount).toBe(0);
+    expect((await asUser(BOB, 'SELECT * FROM notes')).rowCount).toBe(0);
+    expect((await asUser(ALICE, 'SELECT * FROM notes')).rowCount).toBe(1);
+
+    // A later push with nothing foreign left needs no flag.
+    expect((await cli('push')).code).toBe(0);
+  }, 60_000);
+
+  it('push is atomic: a failing RPC file rolls back migrations, policies and bookkeeping', async () => {
+    writeSchema(notesSchema());
+    expect((await cli('generate')).code).toBe(0);
+    expect((await cli('push')).code).toBe(0);
+    const before = (await admin.query(`SELECT category, filename, checksum FROM accessnexus_migrations ORDER BY id`)).rows;
+    const policiesBefore = await policyNames('notes');
+
+    // New table + changed policies + an RPC Postgres rejects (unknown table).
+    writeSchema(`
+export default defineSchema({
+  notes: table({
+    columns: { id: 'uuid', owner_id: 'uuid', body: 'text' },
+    primaryKey: 'id',
+    policies: { select: policy.isAuthenticated(), insert: policy.isOwner('owner_id') },
+  }),
+  tags: table({
+    columns: { id: 'uuid', name: 'text' },
+    primaryKey: 'id',
+    policies: { select: policy.isAuthenticated() },
+  }),
+}, {
+  rpcs: {
+    broken: rpc({ returns: 'int', language: 'sql', body: 'SELECT count(*)::int FROM table_that_does_not_exist;' }),
+  },
+});`);
+    expect((await cli('generate')).code).toBe(0);
+    const failed = await cli('push');
+    expect(failed.code).toBe(1);
+    expect(failed.json.error.code).toBe('PUSH_FAILED');
+    expect(failed.json.failed).toMatch(/rpcs/);
+    expect(failed.json.applied).toEqual([]);
+    expect(failed.json.rolledBack.length).toBeGreaterThan(0);
+    expect(failed.json.error.hint).toContain('rolled back');
+
+    // Nothing from the failed push remains.
+    expect((await admin.query(`SELECT category, filename, checksum FROM accessnexus_migrations ORDER BY id`)).rows).toEqual(before);
+    expect(await policyNames('notes')).toEqual(policiesBefore);
+    expect((await admin.query(`SELECT to_regclass('public.tags') IS NULL AS absent`)).rows[0].absent).toBe(true);
+    // The advisory lock was released.
+    const lock = await admin.query(`SELECT pg_try_advisory_lock(hashtext('accessnexus_push_lock')) AS ok`);
+    expect(lock.rows[0].ok).toBe(true);
+    await admin.query(`SELECT pg_advisory_unlock(hashtext('accessnexus_push_lock'))`);
+  }, 60_000);
+
+  it('uuidGeneration v7 creates a real, time-ordered UUIDv7 helper that anon cannot call', async () => {
+    writeFileSync(join(cwd, 'accessnexus.config.ts'), `import { defineConfig } from '${SRC_INDEX}';\nexport default defineConfig({ adapterOptions: { uuidGeneration: 'v7' } });\n`);
+    writeSchema(notesSchema());
+    expect((await cli('generate')).code).toBe(0);
+    const pushed = await cli('push', '--db-url', DB_URL!);
+    expect(pushed.json.error ?? null).toBeNull();
+
+    // No v4 impostor under another name.
+    expect((await admin.query(`SELECT to_regprocedure('public.uuid_generate_v7()') IS NULL AS absent`)).rows[0].absent).toBe(true);
+
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const { rows } = await admin.query(`INSERT INTO notes (owner_id, body) VALUES ('${ALICE}', 'n${i}') RETURNING id::text`);
+      ids.push(rows[0].id);
+      await admin.query('SELECT pg_sleep(0.003)');
+    }
+    for (const id of ids) {
+      expect(id[14]).toBe('7'); // version nibble
+      expect('89ab').toContain(id[19]); // RFC 9562 variant
+    }
+    expect([...ids].sort()).toEqual(ids);
+    // The first 48 bits are the current Unix time in milliseconds.
+    const ms = parseInt(ids[0].replaceAll('-', '').slice(0, 12), 16);
+    expect(Math.abs(ms - Date.now())).toBeLessThan(60_000);
+
+    // A signed-in user's insert uses the default; anon cannot call it as an RPC.
+    expect((await asUser(ALICE, `INSERT INTO notes (owner_id, body) VALUES ('${ALICE}', 'api')`)).rowCount).toBe(1);
+    expect(await rejected(null, 'SELECT public.accessnexus_uuidv7()')).toMatch(/permission denied/);
+  }, 60_000);
+
 });
