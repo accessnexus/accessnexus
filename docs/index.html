@@ -1,0 +1,1006 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AccessNexus — The missing schema layer for Supabase</title>
+  <meta name="description" content="Define your schema in TypeScript — AccessNexus generates migrations, RLS policies, RBAC permissions, triggers, RPCs & a typed SDK." />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace'],
+          },
+          colors: {
+            bg: { 900: '#0B1120', 800: '#0F172A', 700: '#1E293B' },
+            accessnexus: { 400: '#38BDF8', 500: '#0EA5E9', 600: '#0284C7', glow: 'rgba(56,189,248,0.5)' },
+            supa: { 400: '#4ADE80', 500: '#22C55E', glow: 'rgba(74,222,128,0.5)' },
+          },
+          animation: { 'fade-in': 'fadeIn .5s ease-out forwards', 'slide-up': 'slideUp .5s ease-out forwards' },
+          keyframes: {
+            fadeIn: { '0%': { opacity: '0' }, '100%': { opacity: '1' } },
+            slideUp: { '0%': { opacity: '0', transform: 'translateY(20px)' }, '100%': { opacity: '1', transform: 'translateY(0)' } },
+          },
+        },
+      },
+    }
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <style>
+    ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#334155;border-radius:3px}::-webkit-scrollbar-thumb:hover{background:#475569}
+    body{background:#0B1120;color:#E2E8F0;font-family:'Inter',sans-serif}
+    .glass{background:rgba(11,17,32,.8);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.05)}
+    .code-window{background:#0d1117;border:1px solid #30363d;border-radius:8px;overflow:hidden;margin-bottom:1.5rem;box-shadow:0 4px 6px -1px rgba(0,0,0,.1)}
+    .code-header{background:#161b22;padding:8px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #30363d;font-size:.75rem;color:#8b949e}
+    .code-content{padding:1rem;overflow-x:auto;font-family:'JetBrains Mono',monospace;font-size:.8rem;line-height:1.7}
+    .code-content pre{margin:0;white-space:pre}
+    .k{color:#ff7b72}.f{color:#d2a8ff}.s{color:#a5d6ff}.c{color:#8b949e;font-style:italic}.t{color:#79c0ff}.n{color:#79c0ff}.p{color:#c9d1d9}
+    [data-lang]:not(.active){display:none}[data-lang].active{display:block;animation:fadeIn .4s ease-out}
+    .nav-link{position:relative;padding-left:1rem;border-left:1px solid #334155;color:#94a3b8;transition:all .2s;display:block}
+    .nav-link:hover{color:#E2E8F0;border-left-color:#64748b}
+    .nav-link.active{color:#38BDF8;border-left-color:#38BDF8;font-weight:500}
+    .bg-grid{background-size:40px 40px;background-image:linear-gradient(to right,rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(to bottom,rgba(255,255,255,.03) 1px,transparent 1px);mask-image:linear-gradient(to bottom,black 40%,transparent 100%);-webkit-mask-image:linear-gradient(to bottom,black 40%,transparent 100%)}
+    .glow-text{text-shadow:0 0 20px rgba(56,189,248,.4)}
+    .type-table th{text-align:left;padding:.5rem 1rem;color:#94a3b8;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
+    .type-table td{padding:.5rem 1rem;border-top:1px solid #1e293b;font-size:.85rem}
+    .type-table td:first-child{font-family:'JetBrains Mono',monospace;color:#a5d6ff}
+    .type-table td:nth-child(2){font-family:'JetBrains Mono',monospace;color:#d2a8ff;font-size:.8rem}
+    section[id]{scroll-margin-top:5rem}
+    .badge{display:inline-flex;align-items:center;padding:.125rem .5rem;border-radius:9999px;font-size:.7rem;font-weight:600}
+  </style>
+</head>
+<body class="antialiased">
+
+  <!-- HEADER -->
+  <header class="fixed top-0 w-full z-50 glass h-16">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-full flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <button id="mobile-menu-btn" class="lg:hidden text-slate-400 hover:text-white">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+        </button>
+        <a href="#" class="flex items-center gap-2 group">
+          <div class="w-8 h-8 rounded bg-gradient-to-tr from-accessnexus-600 to-supa-500 flex items-center justify-center shadow-[0_0_15px_rgba(14,165,233,.3)]">
+            <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <span class="text-xl font-bold tracking-tight text-white group-hover:text-accessnexus-400 transition">AccessNexus</span>
+        </a>
+        <span class="hidden sm:inline-flex badge bg-accessnexus-500/10 text-accessnexus-400 border border-accessnexus-500/20 tracking-wide uppercase">Beta v0.1</span>
+      </div>
+      <div class="flex items-center gap-4">
+        <div class="hidden sm:flex p-1 bg-slate-800 rounded-lg border border-slate-700/50">
+          <button class="lang-btn active px-3 py-1 text-xs font-medium rounded transition-all text-slate-400 hover:text-white" data-set-lang="en">EN</button>
+          <button class="lang-btn px-3 py-1 text-xs font-medium rounded transition-all text-slate-400 hover:text-white" data-set-lang="pt">PT</button>
+          <style>.lang-btn.active{background:#334155;color:white}</style>
+        </div>
+        <a href="https://github.com" target="_blank" class="text-slate-400 hover:text-white transition">
+          <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <div class="max-w-7xl mx-auto flex pt-16 min-h-screen">
+
+    <!-- SIDEBAR -->
+    <aside id="sidebar" class="fixed inset-y-0 left-0 z-40 w-64 transform -translate-x-full lg:translate-x-0 lg:static lg:block transition-transform duration-300 bg-[#0B1120] border-r border-slate-800 lg:h-[calc(100vh-4rem)] lg:sticky lg:top-16 overflow-y-auto">
+      <nav class="p-6 space-y-6 text-sm">
+
+        <!-- EN Nav -->
+        <div data-lang="en" class="active">
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">Start Here</h5>
+            <ul class="space-y-2">
+              <li><a href="#introduction" class="nav-link">Introduction</a></li>
+              <li><a href="#quick-start" class="nav-link">Quick Start</a></li>
+              <li><a href="#config" class="nav-link">Configuration</a></li>
+            </ul>
+          </div>
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">Schema</h5>
+            <ul class="space-y-2">
+              <li><a href="#schema" class="nav-link">Schema Definition</a></li>
+              <li><a href="#column-types" class="nav-link">Column Types</a></li>
+              <li><a href="#database-mode" class="nav-link">Database Mode</a></li>
+            </ul>
+          </div>
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">Security</h5>
+            <ul class="space-y-2">
+              <li><a href="#policies" class="nav-link">Policies (RLS)</a></li>
+              <li><a href="#permissions" class="nav-link">Permissions (RBAC)</a></li>
+            </ul>
+          </div>
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">Features</h5>
+            <ul class="space-y-2">
+              <li><a href="#triggers" class="nav-link">Triggers</a></li>
+              <li><a href="#rpcs" class="nav-link">RPCs</a></li>
+              <li><a href="#seed" class="nav-link">Seed Data</a></li>
+              <li><a href="#typed-sdk" class="nav-link">Typed SDK</a></li>
+            </ul>
+          </div>
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">CLI</h5>
+            <ul class="space-y-2">
+              <li><a href="#cli" class="nav-link">Commands</a></li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- PT Nav -->
+        <div data-lang="pt">
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">Comece Aqui</h5>
+            <ul class="space-y-2">
+              <li><a href="#introduction" class="nav-link">Introducao</a></li>
+              <li><a href="#quick-start" class="nav-link">Inicio Rapido</a></li>
+              <li><a href="#config" class="nav-link">Configuracao</a></li>
+            </ul>
+          </div>
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">Schema</h5>
+            <ul class="space-y-2">
+              <li><a href="#schema" class="nav-link">Definicao de Schema</a></li>
+              <li><a href="#column-types" class="nav-link">Tipos de Coluna</a></li>
+              <li><a href="#database-mode" class="nav-link">Modo Database</a></li>
+            </ul>
+          </div>
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">Seguranca</h5>
+            <ul class="space-y-2">
+              <li><a href="#policies" class="nav-link">Policies (RLS)</a></li>
+              <li><a href="#permissions" class="nav-link">Permissoes (RBAC)</a></li>
+            </ul>
+          </div>
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">Features</h5>
+            <ul class="space-y-2">
+              <li><a href="#triggers" class="nav-link">Triggers</a></li>
+              <li><a href="#rpcs" class="nav-link">RPCs</a></li>
+              <li><a href="#seed" class="nav-link">Seed Data</a></li>
+              <li><a href="#typed-sdk" class="nav-link">SDK Tipado</a></li>
+            </ul>
+          </div>
+          <div class="mb-6">
+            <h5 class="mb-3 font-semibold text-white tracking-wide uppercase text-xs">CLI</h5>
+            <ul class="space-y-2">
+              <li><a href="#cli" class="nav-link">Comandos</a></li>
+            </ul>
+          </div>
+        </div>
+
+      </nav>
+    </aside>
+
+    <!-- CONTENT -->
+    <main class="flex-1 min-w-0 px-4 sm:px-8 lg:px-12 py-12 relative">
+      <div class="absolute inset-0 bg-grid z-0 pointer-events-none opacity-20"></div>
+
+      <!-- ============ HERO ============ -->
+      <section id="introduction" class="relative z-10 mb-20 animate-fade-in">
+        <div data-lang="en" class="active">
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-800/50 border border-slate-700/50 text-xs text-slate-400 mb-6 backdrop-blur-sm">
+            <span class="w-2 h-2 rounded-full bg-supa-400 animate-pulse"></span>
+            <span>Built for Supabase</span>
+          </div>
+          <h1 class="text-4xl sm:text-6xl font-extrabold text-white tracking-tight mb-6 leading-[1.1]">
+            The missing schema layer <br class="hidden sm:block"> for <span class="text-transparent bg-clip-text bg-gradient-to-r from-supa-400 to-accessnexus-400 glow-text">Supabase</span>
+          </h1>
+          <p class="text-lg text-slate-400 max-w-2xl leading-relaxed mb-8">
+            Define your entire database &mdash; tables, RLS policies, triggers, functions &mdash; in TypeScript. AccessNexus generates production-ready SQL and a fully typed SDK.
+          </p>
+        </div>
+        <div data-lang="pt">
+          <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-800/50 border border-slate-700/50 text-xs text-slate-400 mb-6 backdrop-blur-sm">
+            <span class="w-2 h-2 rounded-full bg-supa-400 animate-pulse"></span>
+            <span>Feito para Supabase</span>
+          </div>
+          <h1 class="text-4xl sm:text-6xl font-extrabold text-white tracking-tight mb-6 leading-[1.1]">
+            A camada de schema que <br class="hidden sm:block"> falta no <span class="text-transparent bg-clip-text bg-gradient-to-r from-supa-400 to-accessnexus-400 glow-text">Supabase</span>
+          </h1>
+          <p class="text-lg text-slate-400 max-w-2xl leading-relaxed mb-8">
+            Defina todo o seu banco &mdash; tabelas, RLS, triggers, funcoes &mdash; em TypeScript. O AccessNexus gera SQL pronto para producao e um SDK totalmente tipado.
+          </p>
+        </div>
+        <div class="flex flex-col sm:flex-row gap-4 items-start sm:items-center">
+          <div class="flex items-center gap-0 bg-slate-900 border border-slate-700 rounded-lg p-1 pr-4 shadow-lg">
+            <span class="px-3 text-slate-500 select-none">$</span>
+            <code class="font-mono text-sm text-accessnexus-400">npm install accessnexus</code>
+            <button class="ml-4 text-slate-500 hover:text-white transition copy-btn" data-copy="npm install accessnexus">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+            </button>
+          </div>
+          <a href="#quick-start" class="px-6 py-2.5 rounded-lg bg-white text-slate-900 font-semibold hover:bg-slate-200 transition shadow-[0_0_20px_rgba(255,255,255,.1)]">
+            <span data-lang="en" class="active">Get Started</span><span data-lang="pt">Comecar</span>
+          </a>
+        </div>
+      </section>
+
+      <!-- FEATURES GRID -->
+      <section class="grid md:grid-cols-3 gap-6 mb-24 animate-slide-up" style="animation-delay:.1s">
+        <div class="p-6 rounded-2xl bg-slate-800/50 border border-slate-700 hover:border-slate-600 transition group">
+          <div class="w-10 h-10 rounded-lg bg-accessnexus-500/10 flex items-center justify-center mb-4 group-hover:scale-110 transition">
+            <svg class="w-6 h-6 text-accessnexus-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          </div>
+          <h3 class="text-white font-semibold mb-2">RLS Policies</h3>
+          <p class="text-sm text-slate-400" data-lang="en">11 policy builders that compile to optimized Postgres RLS. No more raw SQL in the dashboard.</p>
+          <p class="text-sm text-slate-400" data-lang="pt">11 builders de policy que compilam para RLS otimizado. Sem mais SQL cru no dashboard.</p>
+        </div>
+        <div class="p-6 rounded-2xl bg-slate-800/50 border border-slate-700 hover:border-slate-600 transition group">
+          <div class="w-10 h-10 rounded-lg bg-supa-500/10 flex items-center justify-center mb-4 group-hover:scale-110 transition">
+            <svg class="w-6 h-6 text-supa-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          </div>
+          <h3 class="text-white font-semibold mb-2">RBAC & Multi-tenant</h3>
+          <p class="text-sm text-slate-400" data-lang="en">Centralized role-based access control with built-in multi-tenant scoping via join tables.</p>
+          <p class="text-sm text-slate-400" data-lang="pt">Controle de acesso centralizado com suporte multi-tenant via tabelas de juncao.</p>
+        </div>
+        <div class="p-6 rounded-2xl bg-gradient-to-br from-slate-800 to-accessnexus-900/20 border border-accessnexus-500/30 hover:border-accessnexus-400/50 transition group">
+          <div class="w-10 h-10 rounded-lg bg-amber-500/10 flex items-center justify-center mb-4 group-hover:scale-110 transition">
+            <svg class="w-6 h-6 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          </div>
+          <h3 class="text-white font-semibold mb-2">Full Stack Generation</h3>
+          <p class="text-sm text-slate-400" data-lang="en">Migrations, triggers, RPCs, seed data, and a typed SDK &mdash; all from one schema file.</p>
+          <p class="text-sm text-slate-400" data-lang="pt">Migrations, triggers, RPCs, seed e SDK tipado &mdash; tudo de um unico arquivo de schema.</p>
+        </div>
+      </section>
+
+      <!-- WHY ACCESSNEXUS -->
+      <section class="mb-24 animate-slide-up" style="animation-delay:.15s">
+        <div class="p-8 rounded-2xl bg-gradient-to-br from-slate-800/80 to-accessnexus-900/10 border border-slate-700">
+          <h2 class="text-2xl font-bold text-white mb-3">
+            <span data-lang="en" class="active">Why AccessNexus?</span><span data-lang="pt">Por que AccessNexus?</span>
+          </h2>
+          <p class="text-slate-400 mb-2 max-w-2xl" data-lang="en">Row-Level Security is the #1 source of data-access bugs in apps that talk to Supabase directly &mdash; verbose SQL, easy to get wrong, and the mistake only shows up at runtime, once a user (or an attacker) has already hit the gap. Recursive RLS (a policy that queries its own table) is a common trap.</p>
+          <p class="text-slate-400 mb-2 max-w-2xl" data-lang="pt">Row-Level Security e a fonte n&ordm;1 de bugs de acesso a dados em apps que falam direto com o Supabase &mdash; SQL verboso, facil de errar, e o erro so aparece em runtime, quando um usuario (ou um atacante) ja bateu na brecha. RLS recursivo (policy que consulta a propria tabela) e uma armadilha comum.</p>
+          <p class="text-slate-300 mb-6 max-w-2xl" data-lang="en">AccessNexus makes your access rules <strong class="text-accessnexus-400">correct by construction</strong> and keeps them under version control &mdash; not scattered across migrations, drifting from the code.</p>
+          <p class="text-slate-300 mb-6 max-w-2xl" data-lang="pt">O AccessNexus torna suas regras de acesso <strong class="text-accessnexus-400">corretas por construcao</strong> e as mantem versionadas &mdash; nao espalhadas em migrations, fora de sincronia com o codigo.</p>
+
+          <div class="overflow-x-auto rounded-xl border border-slate-700">
+            <table class="w-full text-sm">
+              <thead class="bg-slate-800/70 text-slate-300">
+                <tr>
+                  <th class="text-left font-medium px-4 py-3"></th>
+                  <th class="text-left font-medium px-4 py-3">
+                    <span data-lang="en" class="active">Raw RLS / primitive tools</span><span data-lang="pt">RLS cru / ferramenta primitiva</span>
+                  </th>
+                  <th class="text-left font-medium px-4 py-3 text-accessnexus-400">AccessNexus</th>
+                </tr>
+              </thead>
+              <tbody class="text-slate-400 divide-y divide-slate-800">
+                <tr>
+                  <td class="px-4 py-3 text-slate-300"><span data-lang="en" class="active">Level</span><span data-lang="pt">Nivel</span></td>
+                  <td class="px-4 py-3"><span data-lang="en" class="active">Primitive (raw <code>pgPolicy</code> / SQL)</span><span data-lang="pt">Primitivo (<code>pgPolicy</code> / SQL cru)</span></td>
+                  <td class="px-4 py-3">Batteries-included &mdash; <code class="text-accessnexus-400">policy.any/isOwner/hasRole</code>, RBAC, RPC, SDK</td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-slate-300"><span data-lang="en" class="active">RLS recursion</span><span data-lang="pt">Recursao de RLS</span></td>
+                  <td class="px-4 py-3">manual</td>
+                  <td class="px-4 py-3"><span data-lang="en" class="active">resolved via a generated <code>SECURITY DEFINER</code> function</span><span data-lang="pt">resolvida via funcao <code>SECURITY DEFINER</code> gerada</span></td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-slate-300"><span data-lang="en" class="active">RLS performance</span><span data-lang="pt">Perf de RLS</span></td>
+                  <td class="px-4 py-3">manual</td>
+                  <td class="px-4 py-3"><code>(SELECT auth.uid())</code> initPlan <span data-lang="en" class="active">by default</span><span data-lang="pt">por padrao</span></td>
+                </tr>
+                <tr>
+                  <td class="px-4 py-3 text-slate-300"><span data-lang="en" class="active">Focus</span><span data-lang="pt">Foco</span></td>
+                  <td class="px-4 py-3"><span data-lang="en" class="active">general-purpose ORM</span><span data-lang="pt">ORM de proposito geral</span></td>
+                  <td class="px-4 py-3"><span data-lang="en" class="active">native RLS / RBAC</span><span data-lang="pt">RLS / RBAC nativo</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="text-xs text-slate-500 mt-3" data-lang="en">Roadmap: policy testing &mdash; proving a policy actually blocks the access it should, in CI.</p>
+          <p class="text-xs text-slate-500 mt-3" data-lang="pt">Roadmap: policy testing &mdash; provar que uma policy realmente bloqueia o acesso indevido, no CI.</p>
+        </div>
+      </section>
+
+      <!-- ============ QUICK START ============ -->
+      <section id="quick-start" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-8 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">01</span>
+          <span data-lang="en" class="active">Quick Start</span><span data-lang="pt">Inicio Rapido</span>
+        </h2>
+
+        <!-- Step 1 -->
+        <div class="mb-12 pl-4 border-l-2 border-slate-800">
+          <h3 class="text-lg font-medium text-accessnexus-400 mb-4" data-lang="en">1. Install & Initialize</h3>
+          <h3 class="text-lg font-medium text-accessnexus-400 mb-4" data-lang="pt">1. Instalar e Inicializar</h3>
+          <div class="code-window"><div class="code-header"><span>Terminal</span><button class="text-xs hover:text-white copy-btn" data-copy="npm install accessnexus && npx accessnexus init">Copy</button></div>
+            <div class="code-content"><pre><span class="c"># Install</span>
+$ npm install accessnexus
+
+<span class="c"># Initialize (auto-detects your framework)</span>
+$ npx accessnexus init</pre></div>
+          </div>
+
+          <div class="mt-6 p-4 rounded-lg bg-accessnexus-500/10 border border-accessnexus-500/30 text-sm">
+            <p class="text-slate-300 mb-2" data-lang="en"><strong class="text-accessnexus-400">Already using Supabase?</strong> <code class="text-accessnexus-400">init</code> adopts your project &mdash; it reuses your existing Supabase client and introspects the live database. Point it at a database URL to import <strong>tables, RLS policies and functions</strong>; without one it imports tables from the PostgREST OpenAPI spec (RLS is not exposed over REST).</p>
+            <p class="text-slate-300 mb-2" data-lang="pt"><strong class="text-accessnexus-400">Ja usa Supabase?</strong> O <code class="text-accessnexus-400">init</code> adota seu projeto &mdash; reusa o cliente Supabase existente e introspecta o banco ao vivo. Aponte para uma URL de banco para importar <strong>tabelas, policies RLS e functions</strong>; sem ela, importa tabelas via OpenAPI do PostgREST (RLS nao e exposto via REST).</p>
+            <div class="code-window mt-1"><div class="code-header"><span>Terminal</span></div>
+              <div class="code-content"><pre><span class="c"># Full import (policies + functions) via a direct DB connection</span>
+$ SUPABASE_DB_URL=<span class="s">postgresql://...</span> npx accessnexus init</pre></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2 -->
+        <div class="mb-12 pl-4 border-l-2 border-slate-800">
+          <h3 class="text-lg font-medium text-accessnexus-400 mb-4" data-lang="en">2. Define your schema</h3>
+          <h3 class="text-lg font-medium text-accessnexus-400 mb-4" data-lang="pt">2. Defina seu schema</h3>
+          <div class="code-window"><div class="code-header"><span>accessnexus.schema.ts</span></div>
+            <div class="code-content"><pre><span class="k">import</span> { defineSchema, table, policy } <span class="k">from</span> <span class="s">'accessnexus'</span>;
+
+<span class="k">export default</span> <span class="f">defineSchema</span>({
+  <span class="t">profiles</span>: <span class="f">table</span>({
+    columns: {
+      id:    <span class="s">'uuid'</span>,
+      name:  <span class="s">'text'</span>,
+      email: { type: <span class="s">'text'</span>, unique: <span class="n">true</span> },
+      role:  <span class="s">"enum('admin','user')"</span>,
+    },
+    primaryKey: <span class="s">'id'</span>,
+    references: { id: <span class="s">'auth.users.id'</span> },
+    policies: {
+      select: policy.<span class="f">isAuthenticated</span>(),
+      update: policy.<span class="f">isOwner</span>(<span class="s">'id'</span>),
+    },
+  }),
+});</pre></div>
+          </div>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="pl-4 border-l-2 border-slate-800">
+          <h3 class="text-lg font-medium text-accessnexus-400 mb-4" data-lang="en">3. Generate & Push</h3>
+          <h3 class="text-lg font-medium text-accessnexus-400 mb-4" data-lang="pt">3. Gerar e Aplicar</h3>
+          <div class="code-window"><div class="code-header"><span>Terminal</span></div>
+            <div class="code-content"><pre><span class="c"># Generate SQL + SDK</span>
+$ npx accessnexus generate
+
+<span class="c"># Apply to your database</span>
+$ npx accessnexus push
+
+<span class="c"># Output:</span>
+<span class="c">#   Migrations: 1</span>
+<span class="c">#   Policies:   1</span>
+<span class="c">#   SDK:        types.ts, client.ts</span>
+<span class="c">#   Seed:       applied</span></pre></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ CONFIGURATION ============ -->
+      <section id="config" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">02</span>
+          <span data-lang="en" class="active">Configuration</span><span data-lang="pt">Configuracao</span>
+        </h2>
+        <p class="text-slate-400 mb-6" data-lang="en">Create a <code class="text-accessnexus-400">accessnexus.config.ts</code> at your project root to customize output paths and adapter settings.</p>
+        <p class="text-slate-400 mb-6" data-lang="pt">Crie um <code class="text-accessnexus-400">accessnexus.config.ts</code> na raiz do projeto para customizar caminhos e configuracoes do adapter.</p>
+
+        <div class="code-window"><div class="code-header"><span>accessnexus.config.ts</span></div>
+          <div class="code-content"><pre><span class="k">import</span> { defineConfig } <span class="k">from</span> <span class="s">'accessnexus'</span>;
+
+<span class="k">export default</span> <span class="f">defineConfig</span>({
+  schema: <span class="s">'./accessnexus.schema.ts'</span>,      <span class="c">// schema file path</span>
+  seed:   <span class="s">'./accessnexus.seed.ts'</span>,        <span class="c">// seed file path</span>
+  adapter: <span class="s">'supabase'</span>,
+
+  output: {
+    dir:        <span class="s">'./generated'</span>,          <span class="c">// base output dir</span>
+    migrations: <span class="s">'./supabase/migrations'</span>,
+    policies:   <span class="s">'./generated/policies'</span>,
+    triggers:   <span class="s">'./generated/triggers'</span>,
+    rpcs:       <span class="s">'./generated/rpcs'</span>,
+    sdk:        <span class="s">'./src/lib/accessnexus'</span>,
+  },
+
+  adapterOptions: {
+    dbUrlEnv: <span class="s">'SUPABASE_DB_URL'</span>,      <span class="c">// env var for push/seed</span>
+  },
+
+  naming: {
+    policyPrefix: <span class="s">'app'</span>,              <span class="c">// RLS policy prefix</span>
+  },
+
+  generate: {
+    sqlOnly: <span class="n">false</span>,                   <span class="c">// skip SDK generation</span>
+    sdkOnly: <span class="n">false</span>,                   <span class="c">// skip SQL generation</span>
+  },
+});</pre></div>
+        </div>
+      </section>
+
+      <!-- ============ SCHEMA ============ -->
+      <section id="schema" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">03</span>
+          <span data-lang="en" class="active">Schema Definition</span><span data-lang="pt">Definicao de Schema</span>
+        </h2>
+        <p class="text-slate-400 mb-6" data-lang="en">Use <code class="text-accessnexus-400">table()</code> to define each table with columns, keys, references, policies, triggers, and more.</p>
+        <p class="text-slate-400 mb-6" data-lang="pt">Use <code class="text-accessnexus-400">table()</code> para definir cada tabela com colunas, chaves, referencias, policies, triggers, etc.</p>
+
+        <div class="code-window"><div class="code-header"><span>Full table() API</span></div>
+          <div class="code-content"><pre><span class="f">table</span>({
+  <span class="c">// Required: column definitions</span>
+  columns: {
+    id:         <span class="s">'uuid'</span>,                        <span class="c">// shorthand</span>
+    email:      { type: <span class="s">'text'</span>, unique: <span class="n">true</span> }, <span class="c">// with constraints</span>
+    bio:        <span class="s">'text?'</span>,                       <span class="c">// nullable (append ?)</span>
+    status:     <span class="s">"enum('active','inactive')"</span>,   <span class="c">// inline enum</span>
+    tags:       <span class="s">'text[]'</span>,                      <span class="c">// array type</span>
+    org_id:     <span class="s">'uuid'</span>,
+    created_at: { type: <span class="s">'timestamptz'</span>, default: <span class="s">'now()'</span> },
+    updated_at: <span class="s">'timestamptz?'</span>,
+    deleted_at: <span class="s">'timestamptz?'</span>,
+  },
+
+  <span class="c">// Primary key</span>
+  primaryKey: <span class="s">'id'</span>,
+
+  <span class="c">// Foreign keys: column -> 'table.column' or 'schema.table.column'</span>
+  references: {
+    id: <span class="s">'auth.users.id'</span>,       <span class="c">// external schema ref</span>
+    org_id: <span class="s">'organizations.id'</span>,  <span class="c">// internal ref</span>
+  },
+
+  <span class="c">// RLS policies (see Policies section)</span>
+  policies: {
+    select: policy.<span class="f">isAuthenticated</span>(),
+    insert: policy.<span class="f">isOwner</span>(<span class="s">'id'</span>),  <span class="c">// only your own row</span>
+    update: policy.<span class="f">isOwner</span>(<span class="s">'id'</span>),
+    delete: policy.<span class="f">none</span>(),
+  },
+
+  <span class="c">// Triggers (see Triggers section)</span>
+  triggers: [
+    trigger.<span class="f">updatedAt</span>(<span class="s">'updated_at'</span>),
+    trigger.<span class="f">auditLog</span>({ table: <span class="s">'audit_log'</span> }),
+  ],
+
+  <span class="c">// Soft delete: DELETE becomes UPDATE deleted_at = NOW()</span>
+  softDelete: <span class="s">'deleted_at'</span>,
+
+  <span class="c">// Enable RLS (auto-enabled when policies are defined)</span>
+  enableRLS: <span class="n">true</span>,
+})</pre></div>
+        </div>
+      </section>
+
+      <!-- ============ COLUMN TYPES ============ -->
+      <section id="column-types" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">04</span>
+          <span data-lang="en" class="active">Column Types</span><span data-lang="pt">Tipos de Coluna</span>
+        </h2>
+        <p class="text-slate-400 mb-6" data-lang="en">Append <code class="text-accessnexus-400">?</code> to any type to make it nullable. Example: <code class="text-accessnexus-400">'text?'</code></p>
+        <p class="text-slate-400 mb-6" data-lang="pt">Adicione <code class="text-accessnexus-400">?</code> a qualquer tipo para tornar nullable. Exemplo: <code class="text-accessnexus-400">'text?'</code></p>
+
+        <div class="overflow-x-auto rounded-lg border border-slate-700">
+          <table class="type-table w-full">
+            <thead class="bg-slate-800/50"><tr><th>AccessNexus Type</th><th>PostgreSQL</th><th>TypeScript</th></tr></thead>
+            <tbody>
+              <tr><td>'uuid'</td><td>UUID</td><td class="text-slate-400">string</td></tr>
+              <tr><td>'text'</td><td>TEXT</td><td class="text-slate-400">string</td></tr>
+              <tr><td>'varchar'</td><td>VARCHAR</td><td class="text-slate-400">string</td></tr>
+              <tr><td>'int'</td><td>INTEGER</td><td class="text-slate-400">number</td></tr>
+              <tr><td>'smallint'</td><td>SMALLINT</td><td class="text-slate-400">number</td></tr>
+              <tr><td>'bigint'</td><td>BIGINT</td><td class="text-slate-400">number</td></tr>
+              <tr><td>'serial'</td><td>SERIAL</td><td class="text-slate-400">number</td></tr>
+              <tr><td>'float'</td><td>DOUBLE PRECISION</td><td class="text-slate-400">number</td></tr>
+              <tr><td>'decimal'</td><td>NUMERIC</td><td class="text-slate-400">number</td></tr>
+              <tr><td>'boolean'</td><td>BOOLEAN</td><td class="text-slate-400">boolean</td></tr>
+              <tr><td>'json'</td><td>JSON</td><td class="text-slate-400">Record&lt;string, unknown&gt;</td></tr>
+              <tr><td>'jsonb'</td><td>JSONB</td><td class="text-slate-400">Record&lt;string, unknown&gt;</td></tr>
+              <tr><td>'date'</td><td>DATE</td><td class="text-slate-400">string</td></tr>
+              <tr><td>'timestamp'</td><td>TIMESTAMP</td><td class="text-slate-400">string</td></tr>
+              <tr><td>'timestamptz'</td><td>TIMESTAMPTZ</td><td class="text-slate-400">string</td></tr>
+              <tr><td>'time'</td><td>TIME</td><td class="text-slate-400">string</td></tr>
+              <tr><td>'text[]'</td><td>TEXT[]</td><td class="text-slate-400">string[]</td></tr>
+              <tr><td>'int[]'</td><td>INTEGER[]</td><td class="text-slate-400">number[]</td></tr>
+              <tr><td>'uuid[]'</td><td>UUID[]</td><td class="text-slate-400">string[]</td></tr>
+              <tr><td>"enum('a','b')"</td><td>CREATE TYPE ... AS ENUM</td><td class="text-slate-400">string</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="text-lg font-semibold text-white mt-8 mb-4" data-lang="en">Column constraints</h3>
+        <h3 class="text-lg font-semibold text-white mt-8 mb-4" data-lang="pt">Constraints de coluna</h3>
+        <div class="code-window"><div class="code-header"><span>Column definition object</span></div>
+          <div class="code-content"><pre>columns: {
+  email: {
+    type:    <span class="s">'text'</span>,
+    unique:  <span class="n">true</span>,                <span class="c">// UNIQUE constraint</span>
+    default: <span class="s">"'guest@test.com'"</span>,  <span class="c">// DEFAULT value</span>
+    check:   <span class="s">"email LIKE '%@%'"</span>,  <span class="c">// CHECK constraint</span>
+  }
+}</pre></div>
+        </div>
+      </section>
+
+      <!-- ============ DATABASE MODE ============ -->
+      <section id="database-mode" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">05</span>
+          <span data-lang="en" class="active">Database Mode</span><span data-lang="pt">Modo Database</span>
+        </h2>
+        <p class="text-slate-400 mb-6" data-lang="en">If you already have a Supabase project, import your <code class="text-accessnexus-400">database.types.ts</code> and AccessNexus will infer columns automatically. You only define policies, triggers, and other AccessNexus config.</p>
+        <p class="text-slate-400 mb-6" data-lang="pt">Se voce ja tem um projeto Supabase, importe seu <code class="text-accessnexus-400">database.types.ts</code> e o AccessNexus infere as colunas automaticamente. Voce so define policies, triggers e outras configs.</p>
+
+        <div class="code-window"><div class="code-header"><span>accessnexus.schema.ts (Database Mode)</span></div>
+          <div class="code-content"><pre><span class="k">import</span> <span class="k">type</span> { Database } <span class="k">from</span> <span class="s">'./database.types'</span>;
+<span class="k">import</span> { defineSchema, policy } <span class="k">from</span> <span class="s">'accessnexus'</span>;
+
+<span class="c">// Columns are inferred from Database type - no need to redefine them!</span>
+<span class="k">export default</span> <span class="f">defineSchema</span>&lt;Database&gt;({
+  profiles: {
+    policies: {
+      select: policy.<span class="f">isAuthenticated</span>(),
+      update: policy.<span class="f">isOwner</span>(<span class="s">'id'</span>),
+    },
+  },
+  posts: {
+    policies: {
+      select: policy.<span class="f">public</span>(),
+      insert: policy.<span class="f">isAuthenticated</span>(),
+      delete: policy.<span class="f">hasRole</span>(<span class="s">'admin'</span>), <span class="c">// global app role (JWT app_metadata.role)</span>
+    },
+  },
+});</pre></div>
+        </div>
+      </section>
+
+      <!-- ============ POLICIES ============ -->
+      <section id="policies" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">06</span>
+          <span data-lang="en" class="active">Policies (RLS)</span><span data-lang="pt">Policies (RLS)</span>
+        </h2>
+        <p class="text-slate-400 mb-8" data-lang="en">AccessNexus provides 11 composable policy builders that compile to PostgreSQL Row-Level Security.</p>
+        <p class="text-slate-400 mb-8" data-lang="pt">O AccessNexus oferece 11 builders de policy composiveis que compilam para Row-Level Security do PostgreSQL.</p>
+
+        <!-- Primitives -->
+        <h3 class="text-lg font-semibold text-white mb-4">Primitives</h3>
+        <div class="code-window"><div class="code-header"><span>Basic rules</span></div>
+          <div class="code-content"><pre>policy.<span class="f">public</span>()            <span class="c">// Anyone (no auth required)</span>
+policy.<span class="f">isAuthenticated</span>()  <span class="c">// (SELECT auth.uid()) IS NOT NULL</span>
+policy.<span class="f">none</span>()              <span class="c">// Block all access</span>
+policy.<span class="f">isOwner</span>(<span class="s">'user_id'</span>) <span class="c">// Row owner: (SELECT auth.uid()) = column</span>
+policy.<span class="f">hasRole</span>(<span class="s">'admin'</span>)   <span class="c">// Global app role: JWT app_metadata.role (not an org role)</span></pre></div>
+        </div>
+
+        <!-- belongsTo -->
+        <h3 class="text-lg font-semibold text-white mb-4 mt-8">Membership & Joins</h3>
+        <div class="code-window"><div class="code-header"><span>policy.belongsTo()</span></div>
+          <div class="code-content"><pre><span class="c">// User belongs to same org (via join table)</span>
+policy.<span class="f">belongsTo</span>(<span class="s">'org_id'</span>, {
+  table:      <span class="s">'org_members'</span>,   <span class="c">// join table</span>
+  foreignKey: <span class="s">'org_id'</span>,        <span class="c">// join table FK to tenant</span>
+  localKey:   <span class="s">'user_id'</span>,       <span class="c">// join table FK to user</span>
+  where: { role: [<span class="s">'admin'</span>, <span class="s">'manager'</span>] },  <span class="c">// optional: filter by role</span>
+})
+
+policy.<span class="f">matchesField</span>(<span class="s">'author_id'</span>, <span class="s">'auth.uid()'</span>)  <span class="c">// Two fields must match</span>
+policy.<span class="f">custom</span>(<span class="s">"status = 'published'"</span>)               <span class="c">// Raw SQL escape hatch</span></pre></div>
+        </div>
+
+        <!-- Combinators -->
+        <h3 class="text-lg font-semibold text-white mb-4 mt-8">Combinators</h3>
+        <div class="code-window"><div class="code-header"><span>Composing rules</span></div>
+          <div class="code-content"><pre><span class="c">// OR: any rule must pass</span>
+policy.<span class="f">any</span>([
+  policy.<span class="f">isOwner</span>(<span class="s">'user_id'</span>),
+  policy.<span class="f">hasRole</span>(<span class="s">'admin'</span>),
+])
+
+<span class="c">// AND: all rules must pass</span>
+policy.<span class="f">all</span>([
+  policy.<span class="f">isAuthenticated</span>(),
+  policy.<span class="f">custom</span>(<span class="s">"is_public = true"</span>),
+])
+
+<span class="c">// Extra condition on the written row: USING (a), WITH CHECK (a AND b)</span>
+policy.<span class="f">withCheck</span>(
+  policy.<span class="f">isOwner</span>(<span class="s">'user_id'</span>),   <span class="c">// USING: which rows can be targeted</span>
+  policy.<span class="f">custom</span>(<span class="s">"edited = true"</span>), <span class="c">// WITH CHECK: still the owner AND edited</span>
+)</pre></div>
+        </div>
+      </section>
+
+      <!-- ============ PERMISSIONS ============ -->
+      <section id="permissions" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">07</span>
+          <span data-lang="en" class="active">Permissions (RBAC)</span><span data-lang="pt">Permissoes (RBAC)</span>
+        </h2>
+        <p class="text-slate-400 mb-6" data-lang="en">For complex apps, define roles and permissions in one place with <code class="text-accessnexus-400">definePermissions()</code>. Supports multi-tenant scoping via join tables.</p>
+        <p class="text-slate-400 mb-6" data-lang="pt">Para apps complexos, defina roles e permissoes em um unico lugar com <code class="text-accessnexus-400">definePermissions()</code>. Suporta multi-tenant via tabelas de juncao.</p>
+
+        <div class="code-window"><div class="code-header"><span>definePermissions()</span></div>
+          <div class="code-content"><pre><span class="k">const</span> permissions = <span class="f">definePermissions</span>({
+  roles: [<span class="s">'admin'</span>, <span class="s">'manager'</span>, <span class="s">'member'</span>, <span class="s">'viewer'</span>],
+
+  <span class="c">// Multi-tenant: how users belong to organizations</span>
+  tenant: {
+    table:        <span class="s">'org_members'</span>,
+    userColumn:   <span class="s">'user_id'</span>,
+    tenantColumn: <span class="s">'org_id'</span>,
+    roleColumn:   <span class="s">'role'</span>,
+  },
+
+  <span class="c">// Permission rules per resource</span>
+  resources: {
+    projects: {
+      ownerColumn:  <span class="s">'created_by'</span>,
+      tenantColumn: <span class="s">'org_id'</span>,
+      read:   { scope: <span class="s">'tenant'</span> },                              <span class="c">// any org member</span>
+      create: { scope: <span class="s">'tenant'</span>, roles: [<span class="s">'admin'</span>, <span class="s">'manager'</span>] }, <span class="c">// + created_by = auth.uid()</span>
+      update: { any: [<span class="s">'own'</span>, { scope: <span class="s">'tenant'</span>, roles: [<span class="s">'manager'</span>] }] }, <span class="c">// + stays in the org</span>
+      delete: { scope: <span class="s">'tenant'</span>, roles: [<span class="s">'admin'</span>] },             <span class="c">// org admins only</span>
+    },
+  },
+});</pre></div>
+        </div>
+
+        <h3 class="text-lg font-semibold text-white mb-4 mt-6" data-lang="en">Permission Levels</h3>
+        <h3 class="text-lg font-semibold text-white mb-4 mt-6" data-lang="pt">Niveis de Permissao</h3>
+        <div class="overflow-x-auto rounded-lg border border-slate-700">
+          <table class="type-table w-full">
+            <thead class="bg-slate-800/50"><tr><th>Level</th><th>Description</th></tr></thead>
+            <tbody>
+              <tr><td>'public'</td><td class="text-slate-400">Anyone, no auth required</td></tr>
+              <tr><td>'*'</td><td class="text-slate-400">Any authenticated user</td></tr>
+              <tr><td>'none'</td><td class="text-slate-400">Blocked</td></tr>
+              <tr><td>'own'</td><td class="text-slate-400">Owner only (requires ownerColumn)</td></tr>
+              <tr><td>['admin', 'editor']</td><td class="text-slate-400">Global app roles from JWT app_metadata.role (OR) <tr><td>['admin', 'editor']</td><td class="text-slate-400">Specific roles (OR)</td></tr>mdash; not org roles</td></tr>
+              <tr><td>{ scope: 'tenant' }</td><td class="text-slate-400">Any member of the tenant</td></tr>
+              <tr><td>{ scope: 'tenant', roles: [...] }</td><td class="text-slate-400">Tenant member with specific role</td></tr>
+              <tr><td>{ any: [...] }</td><td class="text-slate-400">OR combination of levels</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="text-lg font-semibold text-white mb-4 mt-6" data-lang="en">Using in schema</h3>
+        <h3 class="text-lg font-semibold text-white mb-4 mt-6" data-lang="pt">Uso no schema</h3>
+        <div class="code-window"><div class="code-header"><span>Two ways to use permissions</span></div>
+          <div class="code-content"><pre><span class="c">// Option A: generate all policies for a resource</span>
+policies: permissions.<span class="f">policiesFor</span>(<span class="s">'projects'</span>)
+
+<span class="c">// Option B: pick individual rules</span>
+policies: {
+  select: permissions.<span class="f">can</span>(<span class="s">'projects'</span>, <span class="s">'read'</span>),
+  insert: permissions.<span class="f">can</span>(<span class="s">'projects'</span>, <span class="s">'create'</span>),
+}</pre></div>
+        </div>
+      </section>
+
+      <!-- ============ TRIGGERS ============ -->
+      <section id="triggers" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">08</span>
+          Triggers
+        </h2>
+        <p class="text-slate-400 mb-8" data-lang="en">AccessNexus generates PL/pgSQL trigger functions and attaches them to your tables. Three presets + a custom escape hatch.</p>
+        <p class="text-slate-400 mb-8" data-lang="pt">O AccessNexus gera funcoes trigger em PL/pgSQL e as associa as suas tabelas. Tres presets + escape hatch customizado.</p>
+
+        <div class="code-window"><div class="code-header"><span>All trigger types</span></div>
+          <div class="code-content"><pre><span class="c">// 1. Auto-update timestamp on every UPDATE</span>
+trigger.<span class="f">updatedAt</span>(<span class="s">'updated_at'</span>)
+
+<span class="c">// 2. Soft delete: intercept DELETE, set column = NOW()</span>
+trigger.<span class="f">softDelete</span>(<span class="s">'deleted_at'</span>)
+<span class="c">//    or use the table shorthand:</span>
+<span class="f">table</span>({ softDelete: <span class="s">'deleted_at'</span>, ... })
+
+<span class="c">// 3. Audit log: log changes to an audit table</span>
+trigger.<span class="f">auditLog</span>({
+  table: <span class="s">'audit_log'</span>,
+  columns: [<span class="s">'name'</span>, <span class="s">'status'</span>],  <span class="c">// optional: log only these columns</span>
+})
+
+<span class="c">// 4. Custom trigger with full PL/pgSQL control</span>
+trigger.<span class="f">custom</span>({
+  name: <span class="s">'validate_status'</span>,
+  events: [<span class="s">'before_update'</span>],
+  when: <span class="s">'OLD.status IS DISTINCT FROM NEW.status'</span>,
+  functionBody: <span class="s">`
+    IF OLD.status = 'done' AND NEW.status = 'todo' THEN
+      RAISE EXCEPTION 'Cannot reopen a done task';
+    END IF;
+    RETURN NEW;`</span>,
+})</pre></div>
+        </div>
+
+        <p class="text-sm text-slate-500 mt-4" data-lang="en">Available events: <code class="text-slate-400">before_insert</code>, <code class="text-slate-400">after_insert</code>, <code class="text-slate-400">before_update</code>, <code class="text-slate-400">after_update</code>, <code class="text-slate-400">before_delete</code>, <code class="text-slate-400">after_delete</code></p>
+        <p class="text-sm text-slate-500 mt-4" data-lang="pt">Eventos disponiveis: <code class="text-slate-400">before_insert</code>, <code class="text-slate-400">after_insert</code>, <code class="text-slate-400">before_update</code>, <code class="text-slate-400">after_update</code>, <code class="text-slate-400">before_delete</code>, <code class="text-slate-400">after_delete</code></p>
+      </section>
+
+      <!-- ============ RPCs ============ -->
+      <section id="rpcs" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">09</span>
+          RPCs (PostgreSQL Functions)
+        </h2>
+        <p class="text-slate-400 mb-8" data-lang="en">Define server-side functions alongside your schema. AccessNexus generates the SQL function and adds it to the typed SDK.</p>
+        <p class="text-slate-400 mb-8" data-lang="pt">Defina funcoes server-side junto com o schema. O AccessNexus gera a funcao SQL e a adiciona ao SDK tipado.</p>
+
+        <div class="code-window"><div class="code-header"><span>Three modes of rpc()</span></div>
+          <div class="code-content"><pre><span class="k">export default</span> <span class="f">defineSchema</span>({ <span class="c">/* tables */</span> }, {
+  rpcs: {
+    <span class="c">// 1. Database mode: marker only, types from Database</span>
+    get_stats: <span class="f">rpc</span>(),
+
+    <span class="c">// 2. Signature only: typed SDK, no SQL generated</span>
+    search: <span class="f">rpc</span>({
+      args: { query: <span class="s">'text'</span> },
+      returns: <span class="s">'jsonb'</span>,
+    }),
+
+    <span class="c">// 3. Full definition: generates SQL + typed SDK</span>
+    get_dashboard: <span class="f">rpc</span>({
+      args: { p_org_id: <span class="s">'uuid'</span> },
+      returns: <span class="s">'jsonb'</span>,
+      security: <span class="s">'definer'</span>,  <span class="c">// or 'invoker' (default)</span>
+      language: <span class="s">'plpgsql'</span>,  <span class="c">// or 'sql'</span>
+      immutable: <span class="n">false</span>,
+      body: <span class="s">`
+        RETURN (
+          SELECT json_build_object(
+            'total', (SELECT count(*) FROM projects WHERE org_id = p_org_id)
+          )
+        );`</span>,
+    }),
+  },
+});</pre></div>
+        </div>
+      </section>
+
+      <!-- ============ SEED ============ -->
+      <section id="seed" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">10</span>
+          Seed Data
+        </h2>
+        <p class="text-slate-400 mb-4" data-lang="en">Populate your database with initial data. AccessNexus handles insertion order (FK dependencies) and auto-provisions <code class="text-accessnexus-400">auth.users</code> entries when needed.</p>
+        <p class="text-slate-400 mb-4" data-lang="pt">Popule seu banco com dados iniciais. O AccessNexus cuida da ordem de insercao (dependencias FK) e auto-provisiona entradas em <code class="text-accessnexus-400">auth.users</code> quando necessario.</p>
+
+        <div class="flex flex-wrap gap-3 mb-6">
+          <span class="badge bg-supa-500/10 text-supa-400 border border-supa-500/20">Idempotent (ON CONFLICT DO UPDATE)</span>
+          <span class="badge bg-accessnexus-500/10 text-accessnexus-400 border border-accessnexus-500/20">Auto auth.users provisioning</span>
+          <span class="badge bg-amber-500/10 text-amber-400 border border-amber-500/20">Auto-runs after push</span>
+        </div>
+
+        <div class="code-window"><div class="code-header"><span>accessnexus.seed.ts</span></div>
+          <div class="code-content"><pre><span class="k">import</span> { defineSeed } <span class="k">from</span> <span class="s">'accessnexus'</span>;
+<span class="k">import</span> schema <span class="k">from</span> <span class="s">'./accessnexus.schema'</span>;
+
+<span class="k">export default</span> <span class="f">defineSeed</span>(schema, {
+  <span class="c">// AccessNexus auto-creates auth.users for these profiles</span>
+  profiles: [
+    { id: <span class="s">'...uuid...'</span>, email: <span class="s">'admin@acme.com'</span>, name: <span class="s">'Admin'</span> },
+    { id: <span class="s">'...uuid...'</span>, email: <span class="s">'user@acme.com'</span>,  name: <span class="s">'User'</span> },
+  ],
+
+  organizations: [
+    { id: <span class="s">'...uuid...'</span>, name: <span class="s">'Acme Corp'</span>, slug: <span class="s">'acme'</span>, owner_id: <span class="s">'...uuid...'</span> },
+  ],
+});</pre></div>
+        </div>
+      </section>
+
+      <!-- ============ TYPED SDK ============ -->
+      <section id="typed-sdk" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">11</span>
+          <span data-lang="en" class="active">Typed SDK</span><span data-lang="pt">SDK Tipado</span>
+        </h2>
+        <p class="text-slate-400 mb-8" data-lang="en">AccessNexus generates a fully typed client wrapper around <code class="text-accessnexus-400">supabase-js</code>. Every table and RPC gets typed methods with autocomplete.</p>
+        <p class="text-slate-400 mb-8" data-lang="pt">O AccessNexus gera um client wrapper totalmente tipado em cima do <code class="text-accessnexus-400">supabase-js</code>. Cada tabela e RPC recebe metodos tipados com autocomplete.</p>
+
+        <div class="grid lg:grid-cols-2 gap-6">
+          <div class="code-window"><div class="code-header"><span>generated/sdk/client.ts (auto-generated)</span></div>
+            <div class="code-content"><pre><span class="c">// Auto-generated by AccessNexus</span>
+<span class="k">export function</span> <span class="f">createAccessNexusClient</span>(
+  supabase: SupabaseClient
+) {
+  <span class="k">return</span> {
+    profiles: {
+      findMany, findById,
+      create, update, delete
+    },
+    organizations: { ... },
+    rpc: {
+      get_dashboard,
+      search_tasks,
+    },
+  };
+}</pre></div>
+          </div>
+          <div class="code-window"><div class="code-header"><span>Your app code</span></div>
+            <div class="code-content"><pre><span class="k">import</span> { createAccessNexusClient }
+  <span class="k">from</span> <span class="s">'./generated/sdk/client'</span>;
+
+<span class="k">const</span> db = <span class="f">createAccessNexusClient</span>(supabase);
+
+<span class="c">// Fully typed! Autocomplete works.</span>
+<span class="k">const</span> { data } = <span class="k">await</span> db.profiles
+  .<span class="f">findMany</span>({ role: <span class="s">'admin'</span> });
+
+<span class="k">const</span> stats = <span class="k">await</span> db.rpc
+  .<span class="f">get_dashboard</span>({ p_org_id: <span class="s">'...'</span> });</pre></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ CLI ============ -->
+      <section id="cli" class="mb-24 pt-10 border-t border-slate-800">
+        <h2 class="text-2xl font-bold text-white mb-4 flex items-center gap-3">
+          <span class="flex items-center justify-center w-8 h-8 rounded-lg bg-accessnexus-500 text-white text-sm font-bold">12</span>
+          <span data-lang="en" class="active">CLI Commands</span><span data-lang="pt">Comandos CLI</span>
+        </h2>
+
+        <div class="space-y-6">
+          <!-- init -->
+          <div class="p-5 rounded-xl bg-slate-800/50 border border-slate-700">
+            <div class="flex items-center gap-3 mb-2">
+              <code class="text-accessnexus-400 font-mono font-semibold">npx accessnexus init</code>
+            </div>
+            <p class="text-sm text-slate-400 mb-3" data-lang="en">Initialize AccessNexus in a new <em>or existing</em> project. Auto-detects your framework, reuses an existing Supabase client (instead of creating a second one), and introspects your database into a schema. With a database URL it imports tables, RLS policies and functions; with only a project URL + secret key it imports tables from the PostgREST OpenAPI spec.</p>
+            <p class="text-sm text-slate-400 mb-3" data-lang="pt">Inicializa o AccessNexus num projeto novo <em>ou existente</em>. Detecta o framework, reusa um cliente Supabase existente (em vez de criar outro) e introspecta o banco para um schema. Com uma URL de banco importa tabelas, policies RLS e functions; com apenas URL do projeto + secret key importa tabelas via OpenAPI do PostgREST.</p>
+            <div class="flex flex-wrap gap-2 text-xs font-mono">
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">SUPABASE_DB_URL</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">ACCESSNEXUS_DB_URL</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">DATABASE_URL</span>
+            </div>
+          </div>
+
+          <!-- generate -->
+          <div class="p-5 rounded-xl bg-slate-800/50 border border-slate-700">
+            <div class="flex items-center gap-3 mb-2">
+              <code class="text-accessnexus-400 font-mono font-semibold">npx accessnexus generate</code>
+            </div>
+            <p class="text-sm text-slate-400 mb-3" data-lang="en">Generate all SQL files (migrations, policies, triggers, RPCs) and the typed SDK from your schema.</p>
+            <p class="text-sm text-slate-400 mb-3" data-lang="pt">Gera todos os arquivos SQL (migrations, policies, triggers, RPCs) e o SDK tipado a partir do schema.</p>
+            <div class="flex flex-wrap gap-2 text-xs font-mono">
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--sql-only</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--sdk-only</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--schema &lt;path&gt;</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--output &lt;dir&gt;</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--prefix &lt;name&gt;</span>
+            </div>
+          </div>
+
+          <!-- diff -->
+          <div class="p-5 rounded-xl bg-slate-800/50 border border-slate-700">
+            <div class="flex items-center gap-3 mb-2">
+              <code class="text-accessnexus-400 font-mono font-semibold">npx accessnexus diff</code>
+            </div>
+            <p class="text-sm text-slate-400" data-lang="en">Show changes between generated files and current output (Git-style diff).</p>
+            <p class="text-sm text-slate-400" data-lang="pt">Mostra diferencas entre os arquivos gerados e o output atual (diff estilo Git).</p>
+          </div>
+
+          <!-- validate -->
+          <div class="p-5 rounded-xl bg-slate-800/50 border border-slate-700">
+            <div class="flex items-center gap-3 mb-2">
+              <code class="text-accessnexus-400 font-mono font-semibold">npx accessnexus validate</code>
+            </div>
+            <p class="text-sm text-slate-400" data-lang="en">Validate your schema without generating files. Checks for errors in references, column types, and policies.</p>
+            <p class="text-sm text-slate-400" data-lang="pt">Valida seu schema sem gerar arquivos. Verifica erros em referencias, tipos de coluna e policies.</p>
+          </div>
+
+          <!-- push -->
+          <div class="p-5 rounded-xl bg-slate-800/50 border border-slate-700">
+            <div class="flex items-center gap-3 mb-2">
+              <code class="text-accessnexus-400 font-mono font-semibold">npx accessnexus push</code>
+            </div>
+            <p class="text-sm text-slate-400 mb-3" data-lang="en">Apply generated SQL to your database. Runs migrations, policies, triggers, RPCs, and seed (if configured) in order. Tracks applied files to avoid re-running.</p>
+            <p class="text-sm text-slate-400 mb-3" data-lang="pt">Aplica o SQL gerado no banco. Roda migrations, policies, triggers, RPCs e seed (se configurado) em ordem. Rastreia arquivos aplicados para evitar re-execucao.</p>
+            <div class="flex flex-wrap gap-2 text-xs font-mono">
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--url &lt;db-url&gt;</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--dry-run</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--target &lt;name&gt;</span>
+            </div>
+          </div>
+
+          <!-- seed -->
+          <div class="p-5 rounded-xl bg-slate-800/50 border border-slate-700">
+            <div class="flex items-center gap-3 mb-2">
+              <code class="text-accessnexus-400 font-mono font-semibold">npx accessnexus seed</code>
+            </div>
+            <p class="text-sm text-slate-400 mb-3" data-lang="en">Populate the database with seed data. Runs automatically after <code class="text-accessnexus-400">push</code> if a seed file is configured.</p>
+            <p class="text-sm text-slate-400 mb-3" data-lang="pt">Popula o banco com dados iniciais. Roda automaticamente apos o <code class="text-accessnexus-400">push</code> se um arquivo seed estiver configurado.</p>
+            <div class="flex flex-wrap gap-2 text-xs font-mono">
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--seed &lt;path&gt;</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--url &lt;db-url&gt;</span>
+              <span class="px-2 py-1 rounded bg-slate-700 text-slate-300">--dry-run</span>
+            </div>
+          </div>
+
+          <!-- env vars -->
+          <div class="p-4 rounded-lg bg-slate-900/50 border border-slate-700/50 text-sm">
+            <p class="text-slate-400" data-lang="en"><strong class="text-white">DB URL fallback order:</strong> <code class="text-accessnexus-400">--url</code> flag &rarr; <code class="text-accessnexus-400">adapterOptions.dbUrlEnv</code> &rarr; <code class="text-slate-300">ACCESSNEXUS_DB_URL</code> &rarr; <code class="text-slate-300">SUPABASE_DB_URL</code> &rarr; <code class="text-slate-300">DATABASE_URL</code></p>
+            <p class="text-slate-400" data-lang="pt"><strong class="text-white">Ordem de fallback da DB URL:</strong> flag <code class="text-accessnexus-400">--url</code> &rarr; <code class="text-accessnexus-400">adapterOptions.dbUrlEnv</code> &rarr; <code class="text-slate-300">ACCESSNEXUS_DB_URL</code> &rarr; <code class="text-slate-300">SUPABASE_DB_URL</code> &rarr; <code class="text-slate-300">DATABASE_URL</code></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- FOOTER -->
+      <footer class="border-t border-slate-800 pt-12 pb-8">
+        <div class="flex flex-col md:flex-row justify-between items-center gap-6">
+          <div class="flex items-center gap-2">
+            <span class="text-lg font-bold text-white">AccessNexus</span>
+            <span class="text-slate-600">/</span>
+            <span class="text-sm text-slate-500">Open Source MIT License</span>
+          </div>
+          <div class="flex gap-6 text-sm text-slate-500">
+            <a href="#introduction" class="hover:text-white transition">Docs</a>
+            <a href="https://github.com" class="hover:text-white transition">GitHub</a>
+          </div>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Overlay (Mobile) -->
+  <div id="overlay" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-30 hidden lg:hidden"></div>
+
+  <script>
+    const mobileBtn = document.getElementById('mobile-menu-btn');
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('overlay');
+    const langBtns = document.querySelectorAll('[data-set-lang]');
+    const langBlocks = document.querySelectorAll('[data-lang]');
+    const copyBtns = document.querySelectorAll('.copy-btn');
+
+    function toggleMenu(){
+      const isOpen=!sidebar.classList.contains('-translate-x-full');
+      if(isOpen){sidebar.classList.add('-translate-x-full');overlay.classList.add('hidden')}
+      else{sidebar.classList.remove('-translate-x-full');overlay.classList.remove('hidden')}
+    }
+    mobileBtn.addEventListener('click',toggleMenu);
+    overlay.addEventListener('click',toggleMenu);
+
+    function setLang(lang){
+      langBlocks.forEach(el=>el.classList.toggle('active',el.dataset.lang===lang));
+      langBtns.forEach(btn=>btn.classList.toggle('active',btn.dataset.setLang===lang));
+      localStorage.setItem('accessnexus-lang',lang);
+    }
+    langBtns.forEach(btn=>btn.addEventListener('click',()=>setLang(btn.dataset.setLang)));
+    setLang(localStorage.getItem('accessnexus-lang')||'en');
+
+    copyBtns.forEach(btn=>{
+      btn.addEventListener('click',async()=>{
+        let text=btn.dataset.copy;
+        if(!text){const c=btn.closest('.code-window');if(c)text=c.querySelector('pre,code').textContent}
+        if(text){
+          await navigator.clipboard.writeText(text);
+          const o=btn.textContent;btn.textContent='Copied!';btn.classList.add('text-supa-400');
+          setTimeout(()=>{btn.textContent=o;btn.classList.remove('text-supa-400')},2000);
+        }
+      });
+    });
+
+    const observer=new IntersectionObserver((entries)=>{
+      entries.forEach(entry=>{
+        if(entry.isIntersecting){
+          document.querySelectorAll('.nav-link').forEach(link=>{
+            link.classList.remove('active');
+            if(link.getAttribute('href')==='#'+entry.target.id)link.classList.add('active');
+          });
+        }
+      });
+    },{rootMargin:'-20% 0px -60% 0px'});
+    document.querySelectorAll('section[id]').forEach(s=>observer.observe(s));
+  </script>
+</body>
+</html>

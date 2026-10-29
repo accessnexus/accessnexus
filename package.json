@@ -1,0 +1,94 @@
+{
+  "name": "accessnexus",
+  "version": "0.1.0",
+  "description": "The missing schema layer for Supabase: define tables and access rules in TypeScript, get migrations, RLS policies, triggers, RPCs and a typed SDK. Built for AI coding agents.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./adapters/supabase": {
+      "types": "./dist/adapters/supabase/index.d.ts",
+      "default": "./dist/adapters/supabase/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "adapters/supabase": [
+        "./dist/adapters/supabase/index.d.ts"
+      ]
+    }
+  },
+  "sideEffects": false,
+  "bin": {
+    "accessnexus": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "llms.txt",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
+    "build:binary": "npm run build && bun build dist/cli/index.js --compile --outfile bin/accessnexus",
+    "build:binary:linux": "npm run build && bun build dist/cli/index.js --compile --target=bun-linux-x64 --outfile bin/accessnexus-linux-x64",
+    "build:binary:mac": "npm run build && bun build dist/cli/index.js --compile --target=bun-darwin-arm64 --outfile bin/accessnexus-darwin-arm64",
+    "build:binary:win": "npm run build && bun build dist/cli/index.js --compile --target=bun-windows-x64 --outfile bin/accessnexus-win-x64.exe",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.examples.json",
+    "prepublishOnly": "npm run typecheck && npm test",
+    "prepare": "npm run build",
+    "generate:example": "npm run build && node dist/cli/index.js generate"
+  },
+  "keywords": [
+    "supabase",
+    "rls",
+    "row-level-security",
+    "orm",
+    "schema",
+    "typescript",
+    "sdk",
+    "prisma",
+    "code-generation",
+    "policies"
+  ],
+  "author": "AccessNexus <dev@accessnexus.dev>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/accessnexus/accessnexus.git"
+  },
+  "homepage": "https://github.com/accessnexus/accessnexus#readme",
+  "bugs": {
+    "url": "https://github.com/accessnexus/accessnexus/issues"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "esbuild": "^0.27.3"
+  },
+  "peerDependencies": {
+    "@supabase/supabase-js": ">=2.0.0",
+    "pg": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "@supabase/supabase-js": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.18",
+    "pg": "^8.18.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}

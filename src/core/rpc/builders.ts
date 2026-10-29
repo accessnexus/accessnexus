@@ -1,0 +1,46 @@
+// ============================================
+// AccessNexus - RPC Builder
+// Fluent API for defining PostgreSQL functions
+// ============================================
+
+import type { ColumnType } from '../types/columns.js';
+import type { RpcDef, RpcLanguage, RpcReturnType, RpcSecurity } from '../types/rpc.js';
+
+/**
+ * Define an RPC (PostgreSQL function), passed to `defineSchema(tables, { rpcs })`.
+ * With a `body`, AccessNexus emits `CREATE OR REPLACE FUNCTION` (default
+ * `plpgsql`, `SECURITY INVOKER`, pinned `search_path`) and a typed
+ * `client.rpc.<name>()`; `security: 'definer'` bypasses RLS — check
+ * `(SELECT auth.uid())` inside the body yourself. A definer RPC is callable by
+ * `authenticated` (and `service_role`) only; `allowAnon: true` adds `anon`.
+ *
+ * @example
+ * ```ts
+ * // Database mode — marker only, types from Database
+ * rpc()
+ *
+ * // Signature only — typed client, no SQL generation
+ * rpc({ args: { user_id: 'uuid' }, returns: 'jsonb' })
+ *
+ * // Full definition — generates SQL + typed client
+ * rpc({
+ *   args: { user_id: 'uuid' },
+ *   returns: 'jsonb',
+ *   body: `RETURN (SELECT json_build_object('count', count(*)) FROM orders);`,
+ * })
+ * ```
+ */
+export function rpc(config?: {
+  args?: Record<string, ColumnType>;
+  returns?: RpcReturnType;
+  body?: string;
+  language?: RpcLanguage;
+  security?: RpcSecurity;
+  immutable?: boolean;
+  allowAnon?: boolean;
+}): RpcDef {
+  return {
+    _rpc: true,
+    ...config,
+  } as RpcDef;
+}

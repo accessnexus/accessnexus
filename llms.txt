@@ -1,0 +1,1116 @@
+# AccessNexus (npm: accessnexus)
+
+> Schema-first engine for Supabase. You describe tables, access rules (RLS), roles,
+> triggers and RPCs once in TypeScript (`accessnexus.schema.ts`); AccessNexus generates the
+> SQL migrations, Row-Level Security policies, triggers, Postgres functions and a typed
+> client SDK — with Supabase RLS best practices built in. This file is the complete
+> reference for AI coding agents. Package version: 0.1.0. Requires Node.js >= 20.
+
+## Mental model (read first)
+
+- `accessnexus.schema.ts` is the single source of truth for the database. To add a table,
+  column, policy, role rule, trigger or RPC: edit the schema, never SQL.
+- Everything under the output folders (default `generated/`) and the SDK files
+  (`client.ts`, `types.ts`) is derived. Never hand-edit it — regenerate.
+- Every table gets Row-Level Security (ENABLE + FORCE). A table WITHOUT `policies` is
+  deny-all for the API (anon and signed-in users get nothing; only the service role and
+  SECURITY DEFINER code reach it) — `validate` warns `NO_POLICIES`. Every table the app reads
+  or writes from the client needs policies. `enableRLS: false` turns RLS off (anyone with
+  the anon key can read and write the table; `validate` warns `RLS_DISABLED`) — never use it
+  unless the user asked for an open table.
+- `push` is the only command that touches the real database. Preview with
+  `push --dry-run` and only push when the user asked for it. `push` refuses generated SQL
+  that is out of date with the schema, and refuses pending migrations that drop
+  tables/columns or change column types unless `--allow-destructive` is passed (ask the
+  user first — that deletes data). It never runs the seed unless `--seed` is passed.
+- All commands are non-interactive when stdin is not a TTY, accept `--json`, and use
+  exit codes 0 = ok, 1 = fixable error (read `error.hint`), 2 = AccessNexus bug.
+
+## Standard agent workflow
+
+1. Edit `accessnexus.schema.ts`.
+2. `npx accessnexus validate --json` — fix every issue with `"severity": "error"` (each has
+   `path` and `hint`); treat warnings as bugs unless deliberate (`RLS_DISABLED`,
+   `PUBLIC_WRITE`, `USER_ROW_INSERT_OPEN`, `TENANT_PARENT_UNCHECKED`, ...). In manual mode
+   TypeScript does not check column names inside `policy.*` / `definePermissions`
+   (`policy.isOwner('usr_id')` compiles): `validate` does (`UNKNOWN_COLUMN`), so never skip it.
+3. `npx accessnexus diff --json` — review the SQL that will change. Run it BEFORE generate:
+   diff compares the schema with the files on disk, so right after `generate` it is empty.
+   (`diff --check` exits 1 when generated files are stale; use it in CI.)
+4. `npx accessnexus generate --json` — writes SQL + SDK; reports created/updated/unchanged.
+   To review afterwards, use `git diff generated/`.
+5. `npx accessnexus push --dry-run --json`, then `npx accessnexus push --json` when asked.
+   If `generate`/`diff`/`push` report `destructive` statements, tell the user what data
+   would be lost; a rename should be a rename in the schema, not remove + add.
+
+New project: `npx accessnexus init --yes` (add `--no-introspect` to skip the database,
+or `--db-url <postgres-url>` to import existing tables, RLS policies and functions). In an
+empty folder `init --yes` first creates a minimal `package.json` (`"type": "module"`).
+
+## Project files
+
+- `accessnexus.schema.ts` — `export default defineSchema({...})` (required). It may import
+  sibling files (`import { cols } from './db/cols.js'`): schema, config and seed files are
+  bundled with esbuild, which ships with accessnexus — no tsx/ts-node needed. The snippets here
+  write relative imports with a `.js` extension (`'./accessnexus.schema.js'` resolves to
+  `accessnexus.schema.ts`), which works with every `moduleResolution` (`bundler`, `node16`,
+  `nodenext`); extensionless imports only typecheck under `bundler`.
+- `accessnexus.config.ts` — optional `export default defineConfig({...})` (paths, prefix).
+- `accessnexus.seed.ts` — optional `export default defineSeed(schema, {...})`.
+- `generated/migrations/` — `<timestamp>__init.sql`, `<timestamp>__changes.sql`, `.snapshot.json`.
+- `generated/policies/<table>_rls.sql`, `generated/triggers/<table>_triggers.sql`, `generated/rpcs/rpcs.sql`.
+- `generated/sdk/` (or `output.sdk`) — `types.ts` + `client.ts` (derived, never edit).
+- The client wrapper `init` writes next to them (`index.ts`, or `server.ts` + `browser.ts`
+  on Next.js) is YOUR file: `generate` never touches it; edit env var names freely.
+- Database URL for push/seed: `--url`, else `adapterOptions.dbUrlEnv`, else
+  `ACCESSNEXUS_DB_URL`, `SUPABASE_DB_URL`, `DATABASE_URL` (`.env` and `.env.local` are loaded).
+  For Supabase use the "Session pooler" connection string (Dashboard → Connect).
+- `push`/`seed` need the `pg` driver (optional peer dependency): `npm install -D pg`.
+- `push` must run as a role with BYPASSRLS — on Supabase the `postgres` user of the
+  connection string. The generated SECURITY DEFINER helpers and the audit/soft-delete
+  triggers rely on their owner bypassing RLS.
+
+## defineSchema + table (manual mode)
+
+Columns are type strings; append `?` for nullable. The object form adds `default`,
+`unique`, `check`, `references`, `onDelete`. Table names and columns are lowercase snake_case
+and cannot be reserved SQL keywords (`order`, `user`, `group`, `limit`, ... → `orders`, `user_id`).
+
+`default` and `check` are RAW SQL, emitted verbatim: `default: 'now()'`, `default: '0'`,
+`default: 'false'`. A string or enum literal needs its own single quotes inside the JS string:
+`status: { type: "enum('todo','done')", default: "'todo'" }` — `default: 'todo'` would be
+`DEFAULT todo` (a column name) and `validate` reports `INVALID_DEFAULT`.
+
+```ts
+// accessnexus.schema.ts
+import { defineSchema, policy, table, trigger } from 'accessnexus';
+
+export default defineSchema({
+  profiles: table({
+    // Public profile only: the email stays in auth.users. Every signed-in user can read
+    // this table, so never put private data (email, phone, address) in it.
+    columns: {
+      id: 'uuid',
+      name: 'text',
+      bio: 'text?',
+      created_at: { type: 'timestamptz', default: 'now()' },
+      updated_at: 'timestamptz?',
+    },
+    primaryKey: 'id',
+    references: { id: 'auth.users.id' },
+    triggers: [trigger.updatedAt('updated_at')],
+    policies: {
+      select: policy.isAuthenticated(),   // private columns? use policy.isOwner('id')
+      insert: policy.isOwner('id'),
+      update: policy.isOwner('id'),
+      delete: policy.none(),
+    },
+  }),
+
+  posts: table({
+    columns: {
+      id: 'uuid',
+      author_id: 'uuid',
+      title: 'text',
+      status: "enum('draft','published')",
+      tags: 'text[]?',
+      deleted_at: 'timestamptz?',
+    },
+    primaryKey: 'id',
+    references: { author_id: 'profiles.id' },
+    indexes: [{ columns: ['author_id', 'status'] }],
+    softDelete: 'deleted_at',
+    policies: {
+      // Soft-deleted rows stay readable through RLS: exclude them from the public branch
+      // (see the soft-delete note under trigger.* builders).
+      select: policy.any([
+        policy.isOwner('author_id'),
+        policy.custom("status = 'published' AND deleted_at IS NULL"),
+      ]),
+      insert: policy.isOwner('author_id'),
+      update: policy.isOwner('author_id'),
+      delete: policy.isOwner('author_id'),
+    },
+  }),
+});
+```
+
+Column types: `uuid text varchar int smallint bigint serial float decimal boolean json jsonb
+date timestamp timestamptz time text[] int[] uuid[]` and `"enum('a','b')"`; add `?` for NULL.
+A `uuid` primary key defaults to `gen_random_uuid()`; a `bigint` one becomes an identity.
+
+Table options: `columns` (required), `primaryKey`, `references` (`column: 'table.column'`
+or `'schema.table.column'`, e.g. `'auth.users.id'`), `onDelete` (per referencing column:
+`'cascade' | 'set null' | 'restrict' | 'no action'`), `policies` (`select`/`insert`/`update`/
+`delete`), `triggers`, `indexes` (`{ columns, unique?, name? }`), `softDelete` (column; DELETE
+becomes `SET <column> = NOW()` and the SDK hides deleted rows), `enableRLS` (only `false`
+matters: it turns RLS off and opens the table — never set it unless asked).
+
+Foreign keys default to `ON DELETE NO ACTION`: deleting a parent that still has children
+fails with a foreign key error. Say what should happen to the children:
+
+```ts
+import { defineSchema, policy, table } from 'accessnexus';
+
+export default defineSchema({
+  projects: table({
+    columns: { id: 'uuid', owner_id: 'uuid', name: 'text' },
+    primaryKey: 'id',
+    references: { owner_id: 'auth.users.id' },
+    policies: { select: policy.isOwner('owner_id'), insert: policy.isOwner('owner_id'), update: policy.isOwner('owner_id'), delete: policy.isOwner('owner_id') },
+  }),
+  tasks: table({
+    columns: {
+      id: 'uuid',
+      project_id: { type: 'uuid', references: 'projects.id', onDelete: 'cascade' }, // tasks go with the project
+      assignee_id: 'uuid?',
+      owner_id: 'uuid',
+    },
+    primaryKey: 'id',
+    references: { assignee_id: 'auth.users.id', owner_id: 'auth.users.id' },
+    onDelete: { assignee_id: 'set null' },                                         // table-level map works too
+    policies: { select: policy.isOwner('owner_id'), insert: policy.isOwner('owner_id'), update: policy.isOwner('owner_id'), delete: policy.isOwner('owner_id') },
+  }),
+});
+```
+
+`'set null'` needs a nullable column. `'cascade'` into a `softDelete` table is rejected
+(`CASCADE_INTO_SOFT_DELETE`): the soft delete would keep the children pointing at a deleted
+parent — use `'restrict'` and soft-delete the children first. Cascades run as the table owner
+(RLS does not stop them), so only cascade where deleting the parent should delete everything.
+
+## Database mode (columns from Supabase types)
+
+If the project already has Supabase-generated `database.types.ts`, list only the tables
+to configure and omit `columns` (mode is detected when no table declares columns). AccessNexus
+then generates RLS, triggers, RPCs and the SDK, but no DDL migrations.
+
+```ts
+import { defineSchema, policy, rpc } from 'accessnexus';
+import type { Database } from './database.types.js';
+
+export default defineSchema<Database>({
+  profiles: {
+    policies: {
+      // Each user reads only their own profile. Use policy.isAuthenticated() only when
+      // the table holds no private columns (email, phone...): every account could list them.
+      select: policy.isOwner('id'),
+      update: policy.isOwner('id'),
+    },
+  },
+}, {
+  rpcs: { get_stats: rpc() },
+});
+```
+
+## policy.* builders
+
+One rule per operation. `select`/`delete` compile to `USING` (which rows are visible /
+deletable); `insert` to `WITH CHECK` (what may be written); `update` to `USING` (which rows
+may be targeted) plus an explicit `WITH CHECK` with the same rule (what the row may become),
+so an update can never move a row out of the rule. An operation without a rule is denied
+once the table has policies. String values in rules are quoted safely.
+
+Policy target role (`TO ...`): a `select` policy is granted `TO public` when some branch can be
+true for an anonymous visitor (`policy.public()`, `policy.custom(...)`, a column-to-column
+`matchesField`), else `TO authenticated`. Writes are `TO public` only when an explicit
+`policy.public()` decides them. The predicate always decides; you never set the role.
+
+```ts
+import { policy } from 'accessnexus';
+
+// (SELECT auth.uid()) IS NOT NULL
+export const signedIn = policy.isAuthenticated();
+// TRUE — everyone, including anonymous visitors (use for reads only)
+export const everyone = policy.public();
+// FALSE — nobody through the API (service role and triggers bypass)
+export const nobody = policy.none();
+// (SELECT auth.uid()) = user_id — the column must be uuid
+export const owner = policy.isOwner('user_id');
+// ((SELECT auth.jwt()) -> 'app_metadata' ->> 'role') = 'admin' — GLOBAL app role, see below
+export const platformAdmin = policy.hasRole('admin');
+// org_id IN (membership via a SECURITY DEFINER helper on org_members)
+export const member = policy.belongsTo('org_id', {
+  table: 'org_members', foreignKey: 'org_id', localKey: 'user_id',
+});
+// same, restricted to members whose role column is admin or manager
+export const orgAdmin = policy.belongsTo('org_id', {
+  table: 'org_members', foreignKey: 'org_id', localKey: 'user_id', where: { role: ['admin', 'manager'] },
+});
+// author_id = (SELECT auth.uid()) — either side may be a column or an auth call
+export const sameUser = policy.matchesField('author_id', 'auth.uid()');
+// raw SQL predicate — always write (SELECT auth.uid()), never bare auth.uid()
+export const published = policy.custom("status = 'published'");
+// OR / AND
+export const ownerOrPublished = policy.any([policy.isOwner('user_id'), published]);
+export const ownerAndUnlocked = policy.all([policy.isOwner('user_id'), policy.custom('locked = false')]);
+// USING = first rule; WITH CHECK = first AND second rule (the written row must pass both)
+export const editOwn = policy.withCheck(policy.isOwner('author_id'), policy.custom('edited = true'));
+// { mode: 'replace' }: WITH CHECK = second rule only (the row may leave the first rule)
+export const publishDraft = policy.withCheck(
+  policy.all([policy.isOwner('author_id'), policy.custom("status = 'draft'")]),
+  policy.all([policy.isOwner('author_id'), policy.custom("status IN ('draft', 'published')")]),
+  { mode: 'replace' },
+);
+```
+
+`belongsTo(column)` without `through` checks `profiles.<column>` of the current user (needs a
+`profiles` table with that column). Avoid it: it is only safe when users can NEVER write that
+column — no `insert` policy on profiles (create profiles from an auth trigger or the service
+role) and `trigger.lockColumns({ columns: ['org_id'] })` on profiles. Otherwise a user sets
+their own `profiles.org_id` to another tenant's id and joins it; `validate` rejects that with
+`BELONGS_TO_PROFILE_WRITABLE`. Use a membership table (`through`) instead.
+With `through`, the membership lookup is a generated
+`SECURITY DEFINER` function with `SET search_path = pg_catalog, public` (no RLS recursion,
+safe on the membership table itself).
+
+Global vs tenant roles — pick the right one:
+- Role INSIDE an org/team/workspace ("org admins can delete"): store it in the membership
+  table and use `{ scope: 'tenant', roles: ['admin'] }` in `definePermissions`, or
+  `policy.belongsTo(col, { ..., where: { role: ['admin'] } })`.
+- Platform-wide role ("our staff can read the audit log"): `policy.hasRole('admin')` or a
+  role array `['admin']` in `definePermissions`. Both read the JWT `app_metadata.role`
+  claim, which only the server can set: `supabase.auth.admin.updateUserById(id,
+  { app_metadata: { role: 'admin' } })` (service role) or a custom access token hook.
+  The top-level JWT `role` claim is never used (it is the Postgres role `authenticated`).
+`validate` warns with `GLOBAL_ROLE_IN_TENANT_TABLE` when a table mixes both.
+
+## definePermissions (centralized RBAC, multi-tenant)
+
+Actions map `read→select`, `create→insert`, `update→update`, `delete→delete`. Levels:
+`'public'`, `'*'` (any signed-in user), `'none'`, `'own'` (needs `ownerColumn`), a role array
+(GLOBAL app roles from `app_metadata.role`, see above), `{ scope: 'tenant' }` (member of the
+row's tenant, needs `tenant` and `tenantColumn`), `{ scope: 'tenant', roles: [...] }` (member
+with one of those roles, needs `tenant.roleColumn`), `{ any: [...] }` (OR). Unknown roles throw
+at definition time.
+
+Writes are pinned by default (secure unless you opt out):
+- `create` also requires `ownerColumn = (SELECT auth.uid())` — nobody can create rows
+  attributed to someone else. Opt out with `pinOwnerOnCreate: false` when others assign the
+  owner column (e.g. a task's `assignee_id`); pin the real creator column yourself then.
+- `update`, and `create` when its level is not already tenant-scoped, also require that the
+  user is a member of the row's (new) tenant — an owner cannot move a row into another
+  org. Not applied to `create` when `tenantColumn` is `'id'` (the row is the tenant itself).
+  Opt out with `pinTenant: false` for resources written by non-members (customers booking
+  into a shop).
+
+```ts
+import { definePermissions } from 'accessnexus';
+
+export const permissions = definePermissions({
+  roles: ['owner', 'editor', 'viewer'],
+  tenant: { table: 'team_members', userColumn: 'user_id', tenantColumn: 'team_id', roleColumn: 'role' },
+  resources: {
+    documents: {
+      ownerColumn: 'created_by',
+      tenantColumn: 'team_id',
+      read: { scope: 'tenant' },
+      create: { scope: 'tenant', roles: ['owner', 'editor'] }, // + created_by = auth.uid()
+      update: { any: ['own', { scope: 'tenant', roles: ['owner'] }] }, // + stays in a team you belong to
+      delete: { scope: 'tenant', roles: ['owner'] },
+    },
+  },
+});
+
+// On the table: policies: permissions.policiesFor('documents')
+// One rule:     permissions.can('documents', 'update')
+export const documentPolicies = permissions.policiesFor('documents');
+export const canUpdate = permissions.can('documents', 'update');
+```
+
+## trigger.* builders
+
+```ts
+import { trigger } from 'accessnexus';
+
+// BEFORE UPDATE: sets updated_at = NOW()
+export const touch = trigger.updatedAt('updated_at');
+// BEFORE DELETE: sets deleted_at = NOW() and cancels the delete
+// (table option softDelete: 'deleted_at' adds this automatically)
+export const softDelete = trigger.softDelete('deleted_at');
+// AFTER INSERT/UPDATE/DELETE: inserts into audit_log (see the audit-log recipe)
+export const audit = trigger.auditLog({ table: 'audit_log' });
+// BEFORE UPDATE: API users cannot change these columns (RLS is row-level, not column-level)
+export const freezeOwner = trigger.lockColumns({ columns: ['owner_id', 'org_id'] });
+// Lock every column except status/position, unless the SQL condition holds (NEW/OLD available)
+export const statusOnly = trigger.lockColumns({
+  name: 'assignee_scope', // needed when a table has two lockColumns triggers
+  except: ['status', 'position'],
+  unless: "EXISTS (SELECT 1 FROM org_members m WHERE m.org_id = OLD.org_id AND m.user_id = (SELECT auth.uid()) AND m.role = 'admin')",
+});
+// Custom PL/pgSQL; events: before_/after_ + insert/update/delete; forEach: 'row' | 'statement'
+export const lowerEmail = trigger.custom({
+  name: 'lowercase_email',
+  events: ['before_insert', 'before_update'],
+  when: 'NEW.email IS NOT NULL',
+  functionBody: 'NEW.email = lower(NEW.email); RETURN NEW;',
+});
+// security: 'definer' runs as the owner and bypasses RLS — only for trusted side effects
+export const addCreator = trigger.custom({
+  name: 'add_creator_as_owner',
+  events: ['after_insert'],
+  security: 'definer',
+  functionBody: "INSERT INTO public.team_members (team_id, user_id, role) VALUES (NEW.id, NEW.created_by, 'owner'); RETURN NEW;",
+});
+```
+
+`trigger.auditLog` and `trigger.softDelete` functions are `SECURITY DEFINER` with
+`SET search_path = pg_catalog, public` and schema-qualified targets: the audit table keeps
+`insert: policy.none()` (users cannot forge entries). A soft delete is authorized by the
+DELETE policy: the generated guard rejects any plain UPDATE by an API user that sets or
+clears the soft-delete column (so the UPDATE policy cannot be used to soft-delete or restore);
+restore rows with the service role or a `security: 'definer'` RPC. `trigger.lockColumns`
+raises SQLSTATE 42501 when a locked column changes; it never blocks the service role,
+SECURITY DEFINER code or columns kept by `trigger.updatedAt`. `updatedAt`, `lockColumns` and
+`trigger.custom` run as the writing user (INVOKER, RLS applies to what they read/write)
+unless `security: 'definer'`. In a definer body schema-qualify tables (`public.team_members`).
+
+Soft-deleted rows stay visible through RLS (only the SDK filters them). To hide them from raw
+API reads too, add the condition to `select`, e.g.
+`policy.all([policy.isOwner('author_id'), policy.custom('deleted_at IS NULL')])`.
+
+## rpc (Postgres functions)
+
+Pass RPCs as the second argument of `defineSchema`. With a `body`, AccessNexus emits
+`CREATE OR REPLACE FUNCTION` (defaults: `plpgsql`, `SECURITY INVOKER`, volatile, pinned
+`search_path`, returns `void` when `returns` is omitted) and a typed `client.rpc.<name>()`.
+`rpc({ args, returns })` without body only types the client; `rpc()` is a marker for
+Database mode. `security: 'definer'` bypasses RLS — check `(SELECT auth.uid())` yourself
+(and reject anonymous callers). For definer RPCs AccessNexus revokes EXECUTE from `PUBLIC` and
+`anon` and grants it to `authenticated` and `service_role`; pass `allowAnon: true` to keep
+anon. Invoker RPCs keep Supabase's default (callable by `anon` and `authenticated`; RLS
+applies inside). `validate` warns `UNWRAPPED_AUTH_CALL` for a bare `auth.uid()` in a body.
+
+```ts
+import { defineSchema, policy, rpc, table } from 'accessnexus';
+
+export default defineSchema({
+  todos: table({
+    columns: { id: 'uuid', user_id: 'uuid', done: 'boolean' },
+    primaryKey: 'id',
+    references: { user_id: 'auth.users.id' },
+    policies: {
+      select: policy.isOwner('user_id'),
+      insert: policy.isOwner('user_id'),
+      update: policy.isOwner('user_id'),
+      delete: policy.isOwner('user_id'),
+    },
+  }),
+}, {
+  rpcs: {
+    count_open_todos: rpc({
+      returns: 'int',
+      language: 'sql',
+      body: 'SELECT count(*)::int FROM todos WHERE user_id = (SELECT auth.uid()) AND NOT done;',
+    }),
+    complete_all: rpc({
+      args: { p_user: 'uuid' },
+      body: 'UPDATE todos SET done = true WHERE user_id = p_user AND p_user = (SELECT auth.uid());',
+    }),
+    reset_my_todos: rpc({
+      security: 'definer', // bypasses RLS: check the caller first
+      body: `IF (SELECT auth.uid()) IS NULL THEN RAISE EXCEPTION 'sign in first' USING ERRCODE = '42501'; END IF;
+             DELETE FROM public.todos WHERE user_id = (SELECT auth.uid());`,
+    }),
+  },
+});
+```
+
+## defineSeed
+
+```ts
+// accessnexus.seed.ts — applied by `accessnexus seed` or `accessnexus push --seed` (never implicitly)
+import { defineSeed } from 'accessnexus';
+import schema from './accessnexus.schema.js';
+
+export default defineSeed(schema, {
+  profiles: [
+    { id: '00000000-0000-0000-0000-000000000001', name: 'Admin' },
+  ],
+});
+```
+
+Database mode: `defineSeed<Database>({ table: [rows] })`. Rows whose columns reference
+`auth.users.id` provision those users in `auth.users` (email confirmed) with a random,
+unknowable password — set `ACCESSNEXUS_SEED_PASSWORD` to log in as them locally. Seeding a hosted
+Supabase database (`*.supabase.co` / `*.supabase.com`) is refused without
+`--allow-remote-seed`. Seeds upsert by primary key, so re-running is safe.
+
+## defineConfig
+
+```ts
+// accessnexus.config.ts — every field optional
+import { defineConfig } from 'accessnexus';
+
+export default defineConfig({
+  schema: './accessnexus.schema.ts',
+  seed: './accessnexus.seed.ts',
+  output: {
+    dir: './generated',                 // base for the folders below
+    migrations: './supabase/migrations',
+    sdk: './src/lib/accessnexus',           // where the app imports the client from
+  },
+  naming: { policyPrefix: 'app' },      // policy names: <prefix>_<table>_<operation>
+  generate: { sqlOnly: false, sdkOnly: false },
+  adapterOptions: {
+    dbUrlEnv: 'SUPABASE_DB_URL',        // env var push/seed read the DB URL from
+    deterministic: true,                // omit the "Generated at" header line
+    uuidGeneration: 'v7',               // time-ordered uuid PKs via accessnexus_uuidv7()
+  },
+  targets: {                            // push/seed --target <name>
+    staging: { adapter: 'supabase', adapterOptions: { dbUrlEnv: 'STAGING_DB_URL' } },
+  },
+});
+```
+
+## SupabaseAdapter (programmatic generation)
+
+Pure functions returning `{ path, content }`; the CLI uses them. Useful in tests.
+
+```ts
+import { SupabaseAdapter } from 'accessnexus';
+import schema from './accessnexus.schema.js';
+
+const adapter = new SupabaseAdapter({ policyPrefix: 'accessnexus', deterministic: true });
+const policies = adapter.generatePolicies(schema);   // <table>_rls.sql
+const triggers = adapter.generateTriggers(schema);   // <table>_triggers.sql
+const migration = adapter.generateMigrations(schema); // 001_initial.sql (full DDL)
+const rpcs = adapter.generateRpcs(schema);           // rpcs.sql
+const sdk = adapter.generateClient(schema);          // types.ts + client.ts
+
+export const files = [...policies, ...triggers, ...migration, ...rpcs, ...sdk].map((f) => f.path);
+```
+
+## Generated SDK
+
+`createAccessNexusClient(supabase)` wraps a supabase-js client with typed per-table accessors:
+`findMany(filter?, { include? })`, `findById(id, { include? })`, `create(row)`,
+`update(id, patch)`, `delete(id)` (a real DELETE; on soft-delete tables the trigger sets the
+column instead, so the DELETE policy decides), plus
+`rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js. `include`
+embeds tables declared in `references`. RLS still applies: the SDK runs as the signed-in user.
+`<Table>Create` types make nullable columns, columns with a `default` and an auto-generated
+(uuid/bigint) primary key optional; everything else is required.
+
+```ts
+import { createClient } from '@supabase/supabase-js';
+import { createAccessNexusClient } from './generated/sdk/client.js';
+
+const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'public-anon-key'));
+
+export async function example(userId: string) {
+  const { data: me } = await db.profiles.findById(userId);
+  const { data: projects } = await db.projects.findMany({ org_id: 'some-org-id' }, { include: { org: true } });
+  await db.profiles.update(userId, { name: 'New name' });
+  const { data: stats } = await db.rpc.get_org_dashboard({ p_org_id: 'some-org-id' });
+  return { me, projects, stats };
+}
+```
+
+## CLI reference
+
+`npx accessnexus <command> [flags]`; `npx accessnexus <command> --help` lists flags.
+
+Flags on every command: `--json` (one JSON object on stdout, nothing else; colors off —
+also for `help --json` and `<command> --help --json`),
+`--verbose` (debug + stack traces; same as `DEBUG=accessnexus`), `--config <path>`.
+Unknown flags and commands are errors (with a did-you-mean hint), never ignored.
+Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
+
+- `init` — scaffold AccessNexus in any Node project (Next.js app/pages, Vite with any framework,
+  CRA, or a plain Node/other project): schema (template or imported from the DB),
+  `accessnexus.config.ts`, SDK wrappers reusing an existing Supabase client, a `accessnexus` npm
+  script, and a AccessNexus block in `AGENTS.md` (plus a pointer in `CLAUDE.md` if present). Without a TTY it requires `--yes`. Flags: `--yes`/`-y`,
+  `--src <dir>`, `--sdk <dir>` (default `<src>/lib/accessnexus`), `--prefix <name>`,
+  `--db-url <url>`, `--no-introspect`, `--install` (install missing @supabase packages),
+  `--force` (overwrite an existing schema), `--no-agents`. Re-running is safe: an existing
+  schema is kept (unless `--force`) and the AGENTS.md block is replaced in place. With `--yes`
+  in a folder without `package.json` it creates a minimal one. `--db-url` imports each policy
+  without ever granting more than the database did: policies for non-API roles
+  (`TO service_role`) are skipped, `TO authenticated` adds the signed-in check, RESTRICTIVE
+  policies are AND-ed in, anon-only policies become a TODO (denied), and an operation with no
+  applicable policy becomes `policy.none()`; a table whose RLS is off in the database gets an
+  explicit `enableRLS: false` (with a comment) so `push` does not change it silently — remove
+  it to lock the table. Over REST (no `--db-url`) RLS cannot be read: the imported tables
+  have no policies, so `push` turns RLS on for all of them — existing database policies stay
+  (push never drops policies it did not create), but a table whose RLS was off becomes
+  deny-all until you add policies (or `enableRLS: false`). Review the imported rules (comments name the
+  source policy) and replace `policy.custom` with semantic builders where possible. `push`
+  never drops policies it did not create: Postgres ORs permissive policies, so once the
+  imported rules are reviewed, ask the user before dropping the original ones.
+- `validate` — load + check the schema, write nothing. Flags: `--schema <path>`.
+- `generate` — write migrations, policies, triggers, RPCs and the SDK. Files that only differ
+  in the `-- Generated at:` line are left untouched. Flags: `--schema`, `--output <dir>` (every
+  output folder goes under `<dir>`, overriding the paths in `accessnexus.config.ts` — handy to
+  preview into a scratch folder), `--sql-only`, `--sdk-only`, `--prefix <name>`.
+- `diff` — what `generate` would change; writes nothing. Same flags + `--check` (exit 1 when
+  anything is out of date).
+- `push` — apply generated SQL in order migrations → policies → triggers → rpcs, each file in a
+  transaction, tracked in `public.accessnexus_migrations`. Re-running skips unchanged files and
+  re-applies changed policy/trigger/RPC files; editing an applied migration is refused. Before
+  touching the database it checks that the generated SQL matches the schema
+  (`GENERATED_OUT_OF_DATE`) and that no pending migration destroys data
+  (`DESTRUCTIVE_MIGRATION`), and that the role bypasses RLS when the SQL has SECURITY DEFINER
+  helpers (`PUSH_ROLE_NO_BYPASSRLS`). Prints a notice instead of waiting silently when another
+  push holds the lock. Flags: `--url <db-url>`, `--dry-run` (lists files and destructive statements),
+  `--allow-destructive`, `--seed` (also run the seed), `--allow-remote-seed`, `--output`,
+  `--schema`, `--prefix`, `--adapter`, `--target`.
+- `seed` — upsert seed rows. Flags: `--seed <path>`, `--url`, `--dry-run` (prints the SQL),
+  `--allow-remote-seed`, `--schema`, `--prefix`, `--adapter`, `--target`.
+- `help [command]`, `version` (also `--version`). With `--json` both print one object.
+
+Database connections (`push`, `seed`, `init --db-url`) give up after 10 s with
+`DB_CONNECTION_FAILED` instead of hanging; set `ACCESSNEXUS_DB_CONNECT_TIMEOUT=<seconds>` to change it.
+
+Exit codes: `0` success; `1` user-fixable (bad flag, missing file, schema error, missing DB
+URL, unreachable DB, SQL rejected, stale output, destructive migration without
+`--allow-destructive`, failed seed); `2` internal error
+(a AccessNexus bug — rerun with `--verbose` and report the stack).
+
+### --json output shapes
+
+Every result has `ok`, `command` and `version`. Failures add `error` (and keep any partial
+result fields, e.g. `issues`, `applied`).
+
+```ts
+export interface SchemaIssue {
+  severity: 'error' | 'warning';
+  code: string;   // e.g. 'UNKNOWN_COLUMN'
+  path: string;   // e.g. 'posts.policies.update'
+  message: string;
+  hint?: string;  // how to fix it
+}
+
+export interface ErrorResult {
+  ok: false;
+  command: string;
+  version: string;
+  error: { code: string; message: string; hint?: string; stack?: string /* --verbose */ };
+  issues?: SchemaIssue[]; // SCHEMA_VALIDATION_FAILED
+}
+
+export interface ValidateResult {
+  ok: true; command: 'validate'; version: string;
+  schemaPath: string;
+  mode: 'manual' | 'database';
+  tables: Array<{ name: string; columns: number; primaryKey: string | null; rls: boolean; policies: string[]; triggers: Array<{ kind: string; name: string | null }> }>;
+  rpcs: string[];
+  issues: SchemaIssue[]; // warnings only (errors make ok=false)
+  summary: { errors: number; warnings: number };
+}
+
+export interface DestructiveStatement {
+  file: string;   // migration file
+  line: number;
+  kind: 'drop_table' | 'drop_column' | 'alter_column_type' | 'drop_type' | 'truncate';
+  sql: string;
+}
+
+export interface GenerateResult {
+  ok: true; command: 'generate'; version: string;
+  schemaPath: string;
+  mode: 'manual' | 'database';
+  files: Array<{ path: string; category: 'migrations' | 'policies' | 'triggers' | 'rpcs' | 'sdk'; status: 'created' | 'updated' | 'unchanged' }>;
+  destructive: DestructiveStatement[]; // in migrations written by this run
+  summary: { created: number; updated: number; unchanged: number; files: number; tables: number };
+  warnings: SchemaIssue[];
+}
+
+export interface DiffResult {
+  ok: boolean; // false only with --check and pending changes (error.code GENERATED_OUT_OF_DATE)
+  command: 'diff'; version: string;
+  schemaPath: string;
+  changed: boolean;
+  destructive: DestructiveStatement[]; // in migrations generate would write
+  summary: { added: number; modified: number; removed: number };
+  changes: Array<{ path: string; status: 'added' | 'modified' | 'removed'; diff: string }>;
+  warnings: SchemaIssue[];
+}
+
+export interface PushResult {
+  ok: true; command: 'push'; version: string;
+  dryRun: boolean;
+  adapter: string;
+  target: string | null;
+  plan: Array<{ category: string; files: string[] }>;
+  destructive?: DestructiveStatement[]; // --dry-run: in all migration files
+  applied: string[];
+  skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
+  seed: null | { path: string; status: 'applied' | 'skipped'; authUsers: number; durationMs?: number }; // only with --seed
+  // on failure: error.code DESTRUCTIVE_MIGRATION adds destructive[]; GENERATED_OUT_OF_DATE adds
+  // stale: Array<{ path: string; status: string }>; a failed --seed keeps applied[] and seed.status 'failed'
+}
+
+export interface SeedResult {
+  ok: true; command: 'seed'; version: string;
+  dryRun: boolean; seedPath: string; checksum: string; rows: number;
+  authUsers: number; // auth.users rows the seed provisions
+  applied: boolean;
+  sql?: string; // --dry-run
+}
+
+export interface InitResult {
+  ok: true; command: 'init'; version: string;
+  status: 'initialized' | 'already_initialized';
+  framework?: string;
+  schemaSource?: 'template' | 'database' | 'rest';
+  sdkPath?: string;
+  policyPrefix?: string;
+  installed?: string[]; // packages installed by --install
+  files: Array<{ path: string; action: 'created' | 'updated' | 'skipped' }>;
+  agents: null | { agentsMd: 'created' | 'updated' | 'unchanged'; claudeMd: 'updated' | 'unchanged' | 'absent' };
+  nextSteps?: string[];
+}
+
+export interface HelpResult { // help --json, <command> --help --json
+  ok: true; command: 'help'; version: string;
+  topic: string | null; // the command asked about, null for the overview
+  commands: Array<{
+    name: string; summary: string; examples: string[];
+    flags: Array<{ name: string; kind: 'boolean' | 'string'; value?: string; description: string }>;
+  }>;
+  exitCodes: Record<'0' | '1' | '2', string>;
+  docs: string; // path of this file
+}
+
+export interface VersionResult { ok: true; command: 'version'; version: string }
+```
+
+## Recipes
+
+### Owner-only table (each user sees and edits only their rows)
+
+```ts
+import { defineSchema, policy, table, trigger } from 'accessnexus';
+
+export default defineSchema({
+  notes: table({
+    columns: {
+      id: 'uuid',
+      user_id: 'uuid',
+      body: 'text',
+      created_at: { type: 'timestamptz', default: 'now()' },
+      updated_at: 'timestamptz?',
+    },
+    primaryKey: 'id',
+    references: { user_id: 'auth.users.id' },
+    indexes: [{ columns: ['user_id'] }],
+    triggers: [trigger.updatedAt('updated_at')],
+    policies: {
+      select: policy.isOwner('user_id'),
+      insert: policy.isOwner('user_id'),
+      update: policy.isOwner('user_id'),
+      delete: policy.isOwner('user_id'),
+    },
+  }),
+});
+```
+
+### Public read, authenticated write
+
+Anonymous visitors read published rows: the `select` rule has a branch that needs no user
+(`custom('published = true')`), so its policy is granted `TO public`. Writes stay signed-in
+only. Do not "fix" a read problem with `select: policy.public()` — that also exposes drafts.
+
+```ts
+import { defineSchema, policy, table } from 'accessnexus';
+
+export default defineSchema({
+  articles: table({
+    columns: { id: 'uuid', author_id: 'uuid', title: 'text', published: 'boolean' },
+    primaryKey: 'id',
+    references: { author_id: 'auth.users.id' },
+    policies: {
+      select: policy.any([policy.custom('published = true'), policy.isOwner('author_id')]),
+      insert: policy.isOwner('author_id'), // signed in AND writing as themselves
+      update: policy.isOwner('author_id'),
+      delete: policy.isOwner('author_id'),
+    },
+  }),
+});
+```
+
+### Multi-tenant with roles (teams)
+
+Roles live in the membership table (`team_members.role`). The team creator becomes its first
+owner through a `security: 'definer'` AFTER INSERT trigger on `teams` — not through an INSERT
+rule on `team_members`, which a creator removed by the other owners could replay to rejoin.
+Owners add anyone, editors may only add plain members (so nobody can promote themselves).
+`definePermissions` pins writes: `projects.created_by` must be the creator and a project can
+never move to a team the user is not in; `lockColumns` keeps who/where a row belongs fixed.
+
+```ts
+import { definePermissions, defineSchema, policy, table, trigger } from 'accessnexus';
+
+const permissions = definePermissions({
+  roles: ['owner', 'editor', 'member'],
+  tenant: { table: 'team_members', userColumn: 'user_id', tenantColumn: 'team_id', roleColumn: 'role' },
+  resources: {
+    teams: {
+      ownerColumn: 'created_by',
+      tenantColumn: 'id',                          // the row IS the tenant
+      read: { any: ['own', { scope: 'tenant' }] },  // creator sees it before joining
+      create: '*',                                  // + created_by = auth.uid()
+      update: { scope: 'tenant', roles: ['owner'] },
+      delete: { scope: 'tenant', roles: ['owner'] },
+    },
+    projects: {
+      ownerColumn: 'created_by',
+      tenantColumn: 'team_id',
+      read: { scope: 'tenant' },
+      create: { scope: 'tenant', roles: ['owner', 'editor'] },
+      update: { any: ['own', { scope: 'tenant', roles: ['owner'] }] },
+      delete: { scope: 'tenant', roles: ['owner'] },
+    },
+  },
+});
+
+/** Current user is a member of the row's team (optionally with one of `roles`). */
+function teamMember(roles?: string[]) {
+  return policy.belongsTo('team_id', {
+    table: 'team_members', foreignKey: 'team_id', localKey: 'user_id',
+    ...(roles ? { where: { role: roles } } : {}),
+  });
+}
+
+export default defineSchema({
+  teams: table({
+    columns: { id: 'uuid', name: 'text', created_by: 'uuid' },
+    primaryKey: 'id',
+    references: { created_by: 'auth.users.id' },
+    triggers: [
+      // The creator becomes the first owner (runs as the table owner, bypassing RLS)
+      trigger.custom({
+        name: 'add_creator_as_owner',
+        events: ['after_insert'],
+        security: 'definer',
+        functionBody: "INSERT INTO public.team_members (team_id, user_id, role) VALUES (NEW.id, NEW.created_by, 'owner'); RETURN NEW;",
+      }),
+      trigger.lockColumns({ columns: ['created_by'] }),
+    ],
+    policies: permissions.policiesFor('teams'),
+  }),
+  team_members: table({
+    columns: { id: 'uuid', team_id: 'uuid', user_id: 'uuid', role: "enum('owner','editor','member')" },
+    primaryKey: 'id',
+    references: { team_id: 'teams.id', user_id: 'auth.users.id' },
+    onDelete: { team_id: 'cascade' },                     // deleting a team removes its memberships
+    indexes: [{ columns: ['team_id', 'user_id'], unique: true }],
+    triggers: [trigger.lockColumns({ columns: ['team_id', 'user_id'] })], // owners change roles only
+    policies: {
+      // Own rows too: INSERT ... RETURNING (what the SDK's create does) must see the new row
+      select: policy.any([teamMember(), policy.isOwner('user_id')]),
+      insert: policy.any([
+        teamMember(['owner']),                                                     // owners add anyone
+        policy.all([teamMember(['editor']), policy.custom("role = 'member'")]),    // editors add members only
+      ]),
+      update: teamMember(['owner']),
+      delete: policy.any([teamMember(['owner']), policy.isOwner('user_id')]),     // owners remove, anyone leaves
+    },
+  }),
+  projects: table({
+    columns: { id: 'uuid', team_id: 'uuid', created_by: 'uuid', name: 'text' },
+    primaryKey: 'id',
+    references: { team_id: 'teams.id', created_by: 'auth.users.id' },
+    onDelete: { team_id: 'cascade' },
+    triggers: [trigger.lockColumns({ columns: ['created_by', 'team_id'] })],
+    policies: permissions.policiesFor('projects'),
+  }),
+});
+```
+
+App flow: `db.teams.create({ name, created_by: user.id })` — the creator is now an owner.
+Then owners add people with `db.team_members.create({ team_id, user_id, role })`.
+This direct add is fine here because co-members see nothing personal about each other. If
+co-members can read each other's profiles (email, name), switch to invitations — see
+"Visibility derived from sharing a tenant" in the RLS rules below.
+
+Trade-off: `teams.read` includes `'own'` so the creator can read the row the SDK's `create`
+returns (`INSERT ... RETURNING` is checked before the AFTER INSERT membership exists). A
+creator later removed from the team therefore still sees that one `teams` row (its name),
+never its projects or members. If the team name itself is sensitive, drop `'own'` from
+`read` and create teams with `db.teams.create(...)` ignoring the returned row (or through a
+`security: 'definer'` RPC that inserts and returns the id).
+
+### Child of a tenant resource (tasks under projects)
+
+RLS checks each row against its OWN tenant column, and foreign keys are checked without
+RLS. So `tasks` needs its own `org_id` (denormalized, so `belongsTo` can check it), and
+something must keep `tasks.org_id` equal to the project's `org_id` — otherwise a member of
+org A can create a task in A that points at org B's project (probing B's ids, attaching
+rows that cascade with B's data). `validate` warns `TENANT_PARENT_UNCHECKED` when the guard
+is missing. Guard it with a BEFORE INSERT/UPDATE trigger and freeze both columns:
+
+```ts
+import { defineSchema, policy, table, trigger } from 'accessnexus';
+
+const member = policy.belongsTo('org_id', { table: 'org_members', foreignKey: 'org_id', localKey: 'user_id' });
+const memberPolicies = { select: member, insert: member, update: member, delete: member };
+
+export default defineSchema({
+  orgs: table({
+    columns: { id: 'uuid', name: 'text' },
+    primaryKey: 'id',
+    policies: { select: policy.belongsTo('id', { table: 'org_members', foreignKey: 'org_id', localKey: 'user_id' }) },
+  }),
+  org_members: table({
+    columns: { id: 'uuid', org_id: 'uuid', user_id: 'uuid', role: "enum('admin','member')" },
+    primaryKey: 'id',
+    references: { org_id: 'orgs.id', user_id: 'auth.users.id' },
+    indexes: [{ columns: ['org_id', 'user_id'], unique: true }],
+    policies: { select: policy.isOwner('user_id') }, // writes: service role / definer RPCs only
+  }),
+  projects: table({
+    columns: { id: 'uuid', org_id: 'uuid', name: 'text' },
+    primaryKey: 'id',
+    references: { org_id: 'orgs.id' },
+    triggers: [trigger.lockColumns({ columns: ['org_id'] })],
+    policies: memberPolicies,
+  }),
+  tasks: table({
+    columns: { id: 'uuid', org_id: 'uuid', project_id: 'uuid', title: 'text' },
+    primaryKey: 'id',
+    references: { org_id: 'orgs.id', project_id: 'projects.id' },
+    onDelete: { project_id: 'cascade' },
+    triggers: [
+      // Runs as the writing user (INVOKER): a project of another org is invisible
+      // through RLS, so it is reported exactly like a project that does not exist.
+      trigger.custom({
+        name: 'same_org_project',
+        events: ['before_insert', 'before_update'],
+        functionBody: `
+          IF NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = NEW.project_id AND p.org_id = NEW.org_id) THEN
+            RAISE EXCEPTION 'project % not found in org %', NEW.project_id, NEW.org_id USING ERRCODE = '23503';
+          END IF;
+          RETURN NEW;`,
+      }),
+      trigger.lockColumns({ name: 'lock_tenant', columns: ['org_id', 'project_id'] }),
+    ],
+    policies: memberPolicies,
+  }),
+});
+```
+
+The same applies to any deeper level (comments under tasks: check `tasks.org_id`).
+
+### Let a user change only some columns
+
+RLS decides WHICH rows a user may update, never WHICH columns: `update: 'own'` on an
+assignee also lets them rewrite the title, the assignee or the tenant. Lock the rest with
+`trigger.lockColumns` (BEFORE UPDATE, compares OLD and NEW):
+
+```ts
+import { defineSchema, policy, table, trigger } from 'accessnexus';
+
+export default defineSchema({
+  tickets: table({
+    columns: {
+      id: 'uuid',
+      org_id: 'uuid',
+      reporter_id: 'uuid',
+      assignee_id: 'uuid?',
+      title: 'text',
+      status: { type: "enum('open','doing','done')", default: "'open'" },
+    },
+    primaryKey: 'id',
+    references: { reporter_id: 'auth.users.id', assignee_id: 'auth.users.id' },
+    triggers: [
+      // Nobody re-attributes a ticket or moves it to another org
+      trigger.lockColumns({ name: 'lock_identity', columns: ['reporter_id', 'org_id'] }),
+      // The assignee may only change status; the reporter may change anything else
+      trigger.lockColumns({
+        name: 'assignee_scope',
+        except: ['status'],
+        unless: 'OLD.reporter_id = (SELECT auth.uid())',
+      }),
+    ],
+    policies: {
+      select: policy.any([policy.isOwner('reporter_id'), policy.isOwner('assignee_id')]),
+      insert: policy.isOwner('reporter_id'),
+      update: policy.any([policy.isOwner('reporter_id'), policy.isOwner('assignee_id')]),
+      delete: policy.isOwner('reporter_id'),
+    },
+  }),
+});
+```
+
+For a multi-step change that must stay consistent, prefer a `security: 'definer'` RPC that
+checks the caller and updates only what it should.
+
+### Audit log
+
+`trigger.auditLog({ table })` inserts `(table_name, operation, old_data, new_data,
+changed_at)` into the audit table from a `SECURITY DEFINER` function, so the audit table needs
+exactly those columns (others nullable or defaulted) and should block API inserts with
+`policy.none()`. `validate` reports `AUDIT_TABLE_MISMATCH` (wrong columns, an error) and
+`AUDIT_INSERT_OPEN` (users could forge entries, a warning).
+
+```ts
+import { defineSchema, policy, table, trigger } from 'accessnexus';
+
+export default defineSchema({
+  invoices: table({
+    columns: { id: 'uuid', owner_id: 'uuid', amount: 'decimal' },
+    primaryKey: 'id',
+    references: { owner_id: 'auth.users.id' },
+    triggers: [trigger.auditLog({ table: 'audit_log' })],
+    policies: {
+      select: policy.isOwner('owner_id'),
+      insert: policy.isOwner('owner_id'),
+      update: policy.isOwner('owner_id'),
+      delete: policy.none(),
+    },
+  }),
+  audit_log: table({
+    columns: {
+      id: 'bigint',
+      table_name: 'text',
+      operation: 'text',
+      old_data: 'jsonb?',
+      new_data: 'jsonb?',
+      changed_at: { type: 'timestamptz', default: 'now()' },
+    },
+    primaryKey: 'id',
+    policies: {
+      select: policy.hasRole('admin'),   // platform staff (app_metadata.role)
+      insert: policy.none(),             // only the trigger writes (SECURITY DEFINER)
+      update: policy.none(),             // append-only
+      delete: policy.none(),
+    },
+  }),
+});
+```
+
+## RLS rules agents must not break
+
+- Every table reachable from the client has `policies`; use `policy.none()` for operations
+  that must be blocked. Never "fix" a permission error by removing policies, adding
+  `enableRLS: false` or using `policy.public()` for writes.
+- A tenant-scoped row that references another tenant-scoped row (tasks → projects) needs a
+  same-tenant guard trigger (see "Child of a tenant resource"; `TENANT_PARENT_UNCHECKED`).
+- Never put private columns (email, phone) in a table whose `select` is
+  `isAuthenticated()`/`public()`: on Supabase anyone can sign up and read them.
+- Never use `policy.public()` (or `'public'`) for insert/update/delete unless the user asked
+  for anonymous writes (`validate` warns `PUBLIC_WRITE`).
+- A table keyed by the user id (`profiles.id` → `auth.users.id`) inserts with
+  `policy.isOwner('id')`, never `isAuthenticated()` — that lets anyone create another
+  user's row (`USER_ROW_INSERT_OPEN`).
+- Never write a bare `auth.uid()` / `auth.jwt()` in `policy.custom` or RPC bodies — always
+  `(SELECT auth.uid())` (evaluated once per query instead of once per row).
+- `policy.isOwner` columns are `uuid`; reference `auth.users.id` or `profiles.id`.
+- Use `withCheck(using, check)` to add conditions on the written row; it keeps `using` in
+  `WITH CHECK`. Only use `{ mode: 'replace' }` when the row may legitimately leave `using`.
+- Keep the write pins of `definePermissions` (`pinOwnerOnCreate`, `pinTenant`); disable one
+  only for a concrete reason and pin the right column yourself.
+- Never let a member grant a role equal to or above their own: restrict inserts/updates of
+  the membership table with `policy.custom("role IN (...)")` (see the multi-tenant recipe).
+- Visibility derived from sharing a tenant ("org mates can see my profile") is only private
+  if joining a tenant needs the person's consent. If admins may insert any `user_id` into
+  the membership table, anyone can create a tenant, add a stranger and read their data as a
+  "co-member". In that case add people only through an accepted invitation (a
+  `security: 'definer'` RPC that checks the invited, confirmed email) and set the membership
+  table's `insert` to `policy.none()`; otherwise keep personal columns out of co-member reads.
+- Never add a "bootstrap" INSERT rule on the membership table ("the creator may add
+  themselves as owner"): it stays valid forever, so a removed creator can rejoin. Add the
+  first member with a `security: 'definer'` AFTER INSERT trigger on the tenant table.
+- RLS cannot restrict columns. Freeze owner/creator/tenant columns and limit what partial
+  editors may change with `trigger.lockColumns`; an UPDATE rule never does it.
+- Org/team roles are tenant roles (`{ scope: 'tenant', roles }`), not `hasRole`.
+- The `select` rule must admit rows the user just inserted/updated: the SDK's `create` and
+  `update` return the row (`INSERT/UPDATE ... RETURNING`), which fails with an RLS error
+  otherwise. On a membership table, add `policy.isOwner('user_id')` to `select`.
+- Never use `belongsTo(col)` without `through` while users can write `profiles.<col>`
+  (`BELONGS_TO_PROFILE_WRITABLE`).
+- Membership checks go through `belongsTo` with `through` / `definePermissions` tenants —
+  they compile to `SECURITY DEFINER` helpers with a pinned `search_path` that avoid RLS
+  recursion. Do not re-implement them with `policy.custom` subqueries on the same table.
+  (Trigger conditions such as `lockColumns({ unless })` are the exception: they are raw SQL
+  run as the caller, outside any policy, so an `EXISTS` on the membership table is the way
+  to write them — the membership table's own `select` policy still applies.)
+- `security: 'definer'` RPCs/triggers and the service role bypass RLS: check the caller inside.
+- Do not edit generated SQL to change behavior; change the schema and regenerate. Applied
+  migrations are immutable — `push` refuses drift.
+
+## Troubleshooting by error code
+
+- `SCHEMA_NOT_FOUND` — no schema at the path: create `accessnexus.schema.ts`
+  (`npx accessnexus init --yes`), pass `--schema`, or set `schema` in `accessnexus.config.ts`.
+- `SCHEMA_NO_DEFAULT_EXPORT` — end the file with `export default defineSchema({...})`.
+- `SCHEMA_INVALID` — a builder rejected the definition (bad identifier, unknown reference,
+  unknown role in definePermissions); the message names the table/field.
+- `SCHEMA_VALIDATION_FAILED` — see `issues[]`; fix each `path` as its `hint` says. Common
+  codes: `UNKNOWN_COLUMN`, `UNKNOWN_TABLE`, `UNKNOWN_COLUMN_TYPE`, `OWNER_COLUMN_NOT_UUID`,
+  `INVALID_POLICY_RULE` (wrote `'public'` instead of `policy.public()`),
+  `UNKNOWN_POLICY_OPERATION` (`read`/`create` used as policy keys), `EMPTY_COMBINATOR`,
+  `MISSING_COLUMNS`, `AUDIT_TABLE_MISMATCH`, `RPC_IN_TABLES`, `INVALID_TRIGGER`,
+  `INVALID_REFERENCE`, `INVALID_IDENTIFIER`, `RESERVED_IDENTIFIER` (rename `order` → `orders`),
+  `UNKNOWN_TABLE_KEY` (typo such as `polices:`, or tables nested under a `tables:` key —
+  pass them directly to `defineSchema`), `INVALID_ENUM_VALUE` (a `belongsTo` `where` value
+  that is not in the membership column's enum, e.g. a misspelled role).
+  `INVALID_DEFAULT` (`default` is raw SQL: write `"'todo'"`, not `'todo'`),
+  `INVALID_ON_DELETE` (unknown action, no foreign key, or `'set null'` on a NOT NULL column),
+  `CASCADE_INTO_SOFT_DELETE` (use `'restrict'`), `DUPLICATE_TRIGGER` (give a second
+  `lockColumns`/`custom` trigger its own `name`), `BELONGS_TO_PROFILE_WRITABLE` (use
+  `through`, or make `profiles.<col>` server-written only), `RLS_DISABLED_WITH_POLICIES`
+  (remove `enableRLS: false`).
+  Warnings: `NO_POLICIES` (table is deny-all for the API — add policies if the client uses
+  it), `RLS_DISABLED` (`enableRLS: false`: the table is open to the anon key),
+  `TENANT_PARENT_UNCHECKED` (add the same-tenant guard trigger), `NO_PRIMARY_KEY`, `UNWRAPPED_AUTH_CALL` (bare `auth.uid()` in a
+  custom policy or an RPC body), `PUBLIC_WRITE` (insert/update/delete open to anonymous
+  visitors through `policy.public()`), `USER_ROW_INSERT_OPEN` (use `policy.isOwner('id')`),
+  `AUDIT_INSERT_OPEN`, `GLOBAL_ROLE_IN_TENANT_TABLE`, `SCHEMA_EMPTY`.
+- `SCHEMA_LOAD_FAILED` / `CONFIG_LOAD_FAILED` / `SEED_LOAD_FAILED` — the file threw while
+  running or imports a package that is not installed; fix the named file/import.
+- `MODULE_SYNTAX_ERROR` — TypeScript/syntax error at the location shown. `TS_LOADER_MISSING`
+  — esbuild (a accessnexus dependency) is missing: reinstall with `npm install -D accessnexus`.
+- `CONFIG_NOT_FOUND` / `CONFIG_INVALID` — fix `--config` or the config's default export.
+- `UNKNOWN_COMMAND`, `UNKNOWN_FLAG`, `MISSING_FLAG_VALUE`, `INVALID_FLAG_VALUE`,
+  `UNEXPECTED_ARGUMENT`, `INVALID_FLAGS` — follow the hint / `--help`.
+- `GENERATED_OUT_OF_DATE` — `diff --check` or `push` found generated files that do not match
+  the schema: run `generate` (review `diff`), then retry.
+- `DESTRUCTIVE_MIGRATION` — a pending migration drops a table/column or changes a column
+  type. Nothing was applied. If it is a rename, rename in the schema; otherwise confirm with
+  the user (and a backup) before `push --allow-destructive`.
+- `NOTHING_TO_PUSH` — run `generate` first (or fix `--output`).
+- `DB_URL_MISSING` — pass `--url` or set `SUPABASE_DB_URL` (or `ACCESSNEXUS_DB_URL`/`DATABASE_URL`).
+- `PG_DRIVER_MISSING` — `push`, `seed` and `init --db-url` need it: `npm install -D pg`.
+- `PUSH_ROLE_NO_BYPASSRLS` — the connected role does not bypass RLS, which the generated
+  SECURITY DEFINER helpers need. Nothing was applied. Connect as `postgres` (Supabase
+  Session pooler string) or `ALTER ROLE <role> BYPASSRLS` as a superuser.
+- `SEED_REMOTE_BLOCKED` — seeding a hosted Supabase project; use a local database or pass
+  `--allow-remote-seed` if the project is disposable.
+- `DB_CONNECTION_FAILED` — wrong URL/password/network; for Supabase use the Session pooler
+  string; local databases may need `?sslmode=disable`. A host that never answers fails after
+  10 s (`ACCESSNEXUS_DB_CONNECT_TIMEOUT=<seconds>`).
+- `PUSH_FAILED` — Postgres rejected a file (message has the SQL error). That file was rolled
+  back; files in `applied` stay applied. Fix the schema, `generate`, `push` again.
+- `MIGRATION_DRIFT` — an applied migration file was edited: restore it, change the schema,
+  `generate` a new `__changes` migration.
+- `SEED_NOT_FOUND` / `SEED_EMPTY` / `SEED_FAILED` — create/fix `accessnexus.seed.ts`; seed after
+  push. With `push --seed`, the SQL was already pushed when the seed fails.
+- `ADAPTER_NOT_FOUND` / `ADAPTER_AMBIGUOUS` / `ADAPTER_UNSUPPORTED` / `TARGET_NOT_FOUND` —
+  only the `supabase` adapter exists. `TARGET_INVALID` — the named entry in
+  `config.targets` has no `adapter`; add `adapter: 'supabase'` to it.
+- `INIT_NOT_INTERACTIVE` — add `--yes`. `INIT_NEEDS_INPUT` — pass the flag named in the hint.
+  `INIT_DETECT_FAILED` — run init in the project root (the folder with package.json), or
+  create one (`npm init -y`, or `init --yes` creates a minimal one).
+- `INTERNAL_ERROR` (exit 2) — a AccessNexus bug: rerun with `--verbose`, report the stack.
+
+## Limits (v0.1.0)
+
+- Only the Supabase adapter exists. Database mode does not generate DDL migrations.
+- Migrations are generated from snapshot diffs; renames are detected heuristically — read
+  `diff` output before pushing destructive changes (`-- Destructive:` comments).
+- `push` applies files one by one (each in its own transaction), not as a single transaction.
+- Identifiers are emitted unquoted: lowercase snake_case, no reserved keywords.
+- RLS is row-level: it cannot restrict which columns an UPDATE changes — use
+  `trigger.lockColumns` (see the recipe).
+- Foreign keys are `ON DELETE NO ACTION` unless `onDelete` says otherwise.
+- Each `enum(...)` column gets its own Postgres type (`<table>_<column>_enum`); cast between
+  them in SQL (`v.role::text::org_members_role_enum`).
+- GRANT/REVOKE: `security: 'definer'` RPCs are not executable by `anon` unless `allowAnon`.
+  Membership helpers are revoked from `PUBLIC`/`anon` and granted to `authenticated`; a
+  helper used by a policy that also admits `anon` (`TO public`) is granted to `anon` too,
+  which is safe because it returns false when `auth.uid()` is null. Invoker RPCs and tables
+  keep Supabase's default grants.
+- More prose and examples: `node_modules/accessnexus/README.md`.

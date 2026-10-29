@@ -1,0 +1,576 @@
+{
+  "version": 3,
+  "definitionHash": "60b64b90",
+  "schemaHash": "33144539",
+  "schemaState": {
+    "tables": {
+      "profiles": {
+        "primaryKey": "id",
+        "columns": {
+          "id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "auth.users.id"
+          },
+          "email": {
+            "type": "text",
+            "nullable": false,
+            "unique": true
+          },
+          "name": {
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          "avatar_url": {
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          "bio": {
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          "created_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "default": "now()",
+            "unique": false
+          },
+          "updated_at": {
+            "type": "timestamptz",
+            "nullable": true,
+            "unique": false
+          }
+        },
+        "indexes": []
+      },
+      "organizations": {
+        "primaryKey": "id",
+        "columns": {
+          "id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false
+          },
+          "name": {
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          "slug": {
+            "type": "text",
+            "nullable": false,
+            "unique": true
+          },
+          "owner_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "profiles.id"
+          },
+          "logo_url": {
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          "plan": {
+            "type": "enum('free','pro','enterprise')",
+            "nullable": false,
+            "unique": false
+          },
+          "settings": {
+            "type": "jsonb",
+            "nullable": true,
+            "unique": false
+          },
+          "created_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "default": "now()",
+            "unique": false
+          },
+          "updated_at": {
+            "type": "timestamptz",
+            "nullable": true,
+            "unique": false
+          }
+        },
+        "indexes": [
+          {
+            "name": "idx_organizations_owner_id_fk",
+            "unique": false,
+            "columns": [
+              "owner_id"
+            ]
+          }
+        ]
+      },
+      "org_members": {
+        "primaryKey": "id",
+        "columns": {
+          "id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false
+          },
+          "org_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "organizations.id",
+            "onDelete": "cascade"
+          },
+          "user_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "profiles.id"
+          },
+          "role": {
+            "type": "enum('admin','manager','member','viewer')",
+            "nullable": false,
+            "unique": false
+          },
+          "invited_by": {
+            "type": "uuid",
+            "nullable": true,
+            "unique": false,
+            "references": "profiles.id"
+          },
+          "joined_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "default": "now()",
+            "unique": false
+          }
+        },
+        "indexes": [
+          {
+            "name": "idx_org_members_org_id_user_id_1",
+            "unique": true,
+            "columns": [
+              "org_id",
+              "user_id"
+            ]
+          },
+          {
+            "name": "idx_org_members_org_id_fk",
+            "unique": false,
+            "columns": [
+              "org_id"
+            ]
+          },
+          {
+            "name": "idx_org_members_user_id_fk",
+            "unique": false,
+            "columns": [
+              "user_id"
+            ]
+          },
+          {
+            "name": "idx_org_members_invited_by_fk",
+            "unique": false,
+            "columns": [
+              "invited_by"
+            ]
+          }
+        ]
+      },
+      "projects": {
+        "primaryKey": "id",
+        "softDelete": "deleted_at",
+        "columns": {
+          "id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false
+          },
+          "org_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "organizations.id"
+          },
+          "name": {
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          "description": {
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          "status": {
+            "type": "enum('active','archived','completed')",
+            "nullable": false,
+            "unique": false
+          },
+          "created_by": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "profiles.id"
+          },
+          "is_public": {
+            "type": "boolean",
+            "nullable": false,
+            "unique": false
+          },
+          "created_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "default": "now()",
+            "unique": false
+          },
+          "updated_at": {
+            "type": "timestamptz",
+            "nullable": true,
+            "unique": false
+          },
+          "deleted_at": {
+            "type": "timestamptz",
+            "nullable": true,
+            "unique": false
+          }
+        },
+        "indexes": [
+          {
+            "name": "idx_projects_org_id_fk",
+            "unique": false,
+            "columns": [
+              "org_id"
+            ]
+          },
+          {
+            "name": "idx_projects_created_by_fk",
+            "unique": false,
+            "columns": [
+              "created_by"
+            ]
+          },
+          {
+            "name": "idx_projects_active_pk",
+            "unique": false,
+            "columns": [
+              "id"
+            ],
+            "predicate": "deleted_at IS NULL"
+          }
+        ]
+      },
+      "tasks": {
+        "primaryKey": "id",
+        "columns": {
+          "id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false
+          },
+          "org_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "organizations.id"
+          },
+          "project_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "projects.id"
+          },
+          "title": {
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          "description": {
+            "type": "text",
+            "nullable": true,
+            "unique": false
+          },
+          "status": {
+            "type": "enum('todo','in_progress','review','done')",
+            "nullable": false,
+            "unique": false
+          },
+          "priority": {
+            "type": "enum('low','medium','high','critical')",
+            "nullable": false,
+            "unique": false
+          },
+          "assignee_id": {
+            "type": "uuid",
+            "nullable": true,
+            "unique": false,
+            "references": "profiles.id"
+          },
+          "reporter_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "profiles.id"
+          },
+          "due_date": {
+            "type": "date",
+            "nullable": true,
+            "unique": false
+          },
+          "estimated_hours": {
+            "type": "float",
+            "nullable": true,
+            "unique": false
+          },
+          "tags": {
+            "type": "text[]",
+            "nullable": true,
+            "unique": false
+          },
+          "position": {
+            "type": "int",
+            "nullable": false,
+            "unique": false
+          },
+          "created_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "default": "now()",
+            "unique": false
+          },
+          "updated_at": {
+            "type": "timestamptz",
+            "nullable": true,
+            "unique": false
+          }
+        },
+        "indexes": [
+          {
+            "name": "idx_tasks_org_id_fk",
+            "unique": false,
+            "columns": [
+              "org_id"
+            ]
+          },
+          {
+            "name": "idx_tasks_project_id_fk",
+            "unique": false,
+            "columns": [
+              "project_id"
+            ]
+          },
+          {
+            "name": "idx_tasks_assignee_id_fk",
+            "unique": false,
+            "columns": [
+              "assignee_id"
+            ]
+          },
+          {
+            "name": "idx_tasks_reporter_id_fk",
+            "unique": false,
+            "columns": [
+              "reporter_id"
+            ]
+          }
+        ]
+      },
+      "comments": {
+        "primaryKey": "id",
+        "softDelete": "deleted_at",
+        "columns": {
+          "id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false
+          },
+          "org_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "organizations.id"
+          },
+          "task_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "tasks.id"
+          },
+          "author_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "profiles.id"
+          },
+          "body": {
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          "edited": {
+            "type": "boolean",
+            "nullable": false,
+            "unique": false
+          },
+          "created_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "default": "now()",
+            "unique": false
+          },
+          "updated_at": {
+            "type": "timestamptz",
+            "nullable": true,
+            "unique": false
+          },
+          "deleted_at": {
+            "type": "timestamptz",
+            "nullable": true,
+            "unique": false
+          }
+        },
+        "indexes": [
+          {
+            "name": "idx_comments_org_id_fk",
+            "unique": false,
+            "columns": [
+              "org_id"
+            ]
+          },
+          {
+            "name": "idx_comments_task_id_fk",
+            "unique": false,
+            "columns": [
+              "task_id"
+            ]
+          },
+          {
+            "name": "idx_comments_author_id_fk",
+            "unique": false,
+            "columns": [
+              "author_id"
+            ]
+          },
+          {
+            "name": "idx_comments_active_pk",
+            "unique": false,
+            "columns": [
+              "id"
+            ],
+            "predicate": "deleted_at IS NULL"
+          }
+        ]
+      },
+      "audit_log": {
+        "primaryKey": "id",
+        "columns": {
+          "id": {
+            "type": "bigint",
+            "nullable": false,
+            "unique": false
+          },
+          "table_name": {
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          "operation": {
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          "old_data": {
+            "type": "jsonb",
+            "nullable": true,
+            "unique": false
+          },
+          "new_data": {
+            "type": "jsonb",
+            "nullable": true,
+            "unique": false
+          },
+          "changed_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "default": "now()",
+            "unique": false
+          }
+        },
+        "indexes": []
+      },
+      "invitations": {
+        "primaryKey": "id",
+        "columns": {
+          "id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false
+          },
+          "org_id": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "organizations.id",
+            "onDelete": "cascade"
+          },
+          "email": {
+            "type": "text",
+            "nullable": false,
+            "unique": false
+          },
+          "role": {
+            "type": "enum('manager','member','viewer')",
+            "nullable": false,
+            "unique": false
+          },
+          "invited_by": {
+            "type": "uuid",
+            "nullable": false,
+            "unique": false,
+            "references": "profiles.id"
+          },
+          "token": {
+            "type": "text",
+            "nullable": false,
+            "unique": true
+          },
+          "expires_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "unique": false
+          },
+          "accepted_at": {
+            "type": "timestamptz",
+            "nullable": true,
+            "unique": false
+          },
+          "created_at": {
+            "type": "timestamptz",
+            "nullable": false,
+            "default": "now()",
+            "unique": false
+          }
+        },
+        "indexes": [
+          {
+            "name": "idx_invitations_org_id_fk",
+            "unique": false,
+            "columns": [
+              "org_id"
+            ]
+          },
+          {
+            "name": "idx_invitations_invited_by_fk",
+            "unique": false,
+            "columns": [
+              "invited_by"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "lastMigrationFile": "20261029174612__changes.sql"
+}
