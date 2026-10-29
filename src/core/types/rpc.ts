@@ -19,6 +19,9 @@ export type RpcSecurity = 'invoker' | 'definer';
  */
 export type RpcArg = ColumnType | { readonly type: ColumnType; readonly default?: string };
 
+/** Function volatility (`CREATE FUNCTION ... VOLATILE | STABLE | IMMUTABLE`). */
+export type RpcVolatility = 'volatile' | 'stable' | 'immutable';
+
 /** Return type for an RPC function */
 export type RpcReturnType = ColumnType | 'void';
 
@@ -49,8 +52,24 @@ export interface RpcDef {
   /** Security context (default: invoker) */
   readonly security?: RpcSecurity;
 
-  /** Whether the function is immutable (default: false → volatile) */
+  /**
+   * Volatility (default `'volatile'`). Declare `'stable'` for read-only
+   * functions used inside RLS policies: Postgres can then evaluate them once
+   * per query instead of once per row.
+   */
+  readonly volatility?: RpcVolatility;
+
+  /** Alias of `volatility: 'immutable'` (kept for compatibility). */
   readonly immutable?: boolean;
+
+  /**
+   * Function configuration: `SET key = 'value'` clauses, e.g.
+   * `{ row_security: 'off' }`. Keys are GUC names (`work_mem`,
+   * `myapp.tenant`); each value is emitted as one quoted SQL literal.
+   * `search_path` is always pinned to `pg_catalog, <schema>` by the generator;
+   * a different `search_path` here is ignored (`validate` warns).
+   */
+  readonly set?: Readonly<Record<string, string>>;
 
   /**
    * `security: 'definer'` only: also let anonymous visitors call it (default

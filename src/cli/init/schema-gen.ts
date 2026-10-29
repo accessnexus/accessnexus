@@ -14,6 +14,56 @@ export interface SchemaGenOptions {
   policyPrefix: string;
   /** User-defined functions to emit as RPCs (from the direct-DB introspection). */
   functions?: IntrospectedFunction[];
+  /**
+   * Collects every imported function whose search_path the generator will
+   * change (it always pins `pg_catalog, public`), for init's report.
+   */
+  hardened?: HardenedFunction[];
+}
+
+/** A function whose search_path changes when AccessNexus regenerates it. */
+export interface HardenedFunction {
+  kind: 'rpc' | 'trigger';
+  /** RPC name, or `table.trigger_name` for a trigger function. */
+  name: string;
+  /** search_path declared in the database, or null when it had none. */
+  from: string | null;
+  to: string;
+}
+
+/** The search_path every generated function gets. */
+export const PINNED_SEARCH_PATH = 'pg_catalog, public';
+
+function samePath(a: string, b: string): boolean {
+  const norm = (v: string) => v.split(',').map((p) => p.trim().replace(/^"(.*)"$/, '$1')).filter(Boolean).join(',');
+  return norm(a) === norm(b);
+}
+
+/**
+ * The search_path change for an imported function (null when it already
+ * matches the pinned one), plus its other config entries for `set`.
+ */
+function splitConfig(config: Record<string, string> | undefined): { searchPath: string | null; changed: boolean; rest: Record<string, string> } {
+  const rest: Record<string, string> = {};
+  let searchPath: string | null = null;
+  for (const [k, v] of Object.entries(config ?? {})) {
+    if (k.toLowerCase() === 'search_path') searchPath = v;
+    else rest[k] = v;
+  }
+  return { searchPath, changed: searchPath === null || !samePath(searchPath, PINNED_SEARCH_PATH), rest };
+}
+
+function renderSet(rest: Record<string, string>, indent: string): string[] {
+  const keys = Object.keys(rest).sort();
+  if (keys.length === 0) return [];
+  const pairs = keys.map((k) => `${/^[a-z_][a-z0-9_]*$/.test(k) ? k : tsString(k)}: ${tsString(rest[k])}`);
+  return [`${indent}set: { ${pairs.join(', ')} },`];
+}
+
+function hardeningNote(searchPath: string | null, indent: string): string {
+  return searchPath === null
+    ? `${indent}// NOTE: had no search_path; generate pins SET search_path = ${PINNED_SEARCH_PATH} (schema-qualify anything outside public).`
+    : `${indent}// NOTE: search_path was '${searchPath}'; generate pins SET search_path = ${PINNED_SEARCH_PATH} (schema-qualify anything outside public).`;
 }
 
 /**
@@ -21,9 +71,9 @@ export interface SchemaGenOptions {
  */
 export function generateSchemaFromIntrospection(options: SchemaGenOptions): string {
   const { tables, functions = [] } = options;
-  const { policyPrefix } = options;
+  const { policyPrefix, hardened } = options;
   const imports = ['defineSchema', 'table', 'policy'];
-  const triggerBlocks = new Map(tables.map((t) => [t.name, renderTriggers(t, policyPrefix)]));
+  const triggerBlocks = new Map(tables.map((t) => [t.name, renderTriggers(t, policyPrefix, hardened)]));
   if ([...triggerBlocks.values()].some((b) => b.usesBuilder)) imports.push('trigger');
   if (functions.length > 0) imports.push('rpc');
   const lines: string[] = [
@@ -127,7 +177,7 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
         continue;
       }
       seen.add(fn.name);
-      lines.push(...renderRpc(fn));
+      lines.push(...renderRpc(fn, hardened));
       lines.push('');
     }
     lines.push('  },');
@@ -145,7 +195,7 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
  * returning TABLE/SETOF/composite are emitted as signature-only markers (their SQL
  * stays in the project's migrations) to avoid generating a wrong RETURNS clause.
  */
-function renderRpc(fn: IntrospectedFunction): string[] {
+function renderRpc(fn: IntrospectedFunction, hardened?: HardenedFunction[]): string[] {
   const sig = `${fn.name}(${fn.args}) -> ${fn.returns} [${fn.language}${fn.security === 'definer' ? ', definer' : ''}]`;
   const mappedReturn = mapReturnType(fn.returns);
 
@@ -165,7 +215,13 @@ function renderRpc(fn: IntrospectedFunction): string[] {
     return [`    // ${sig}`, `    ${fn.name}: rpc(),`];
   }
 
-  const out: string[] = [`    // ${sig}`, `    ${fn.name}: rpc({`];
+  const cfg = splitConfig(fn.config);
+  const out: string[] = [`    // ${sig}`];
+  if (cfg.changed) {
+    out.push(hardeningNote(cfg.searchPath, '    '));
+    hardened?.push({ kind: 'rpc', name: fn.name, from: cfg.searchPath, to: PINNED_SEARCH_PATH });
+  }
+  out.push(`    ${fn.name}: rpc({`);
   if (Object.keys(mappedArgs).length > 0) {
     const pairs = Object.entries(mappedArgs).map(([n, t]) => `${n}: ${t}`);
     out.push(`      args: { ${pairs.join(', ')} },`);
@@ -173,7 +229,8 @@ function renderRpc(fn: IntrospectedFunction): string[] {
   out.push(`      returns: '${mappedReturn}',`);
   out.push(`      language: '${fn.language === 'sql' ? 'sql' : 'plpgsql'}',`);
   if (fn.security === 'definer') out.push(`      security: 'definer',`);
-  if (fn.volatility === 'immutable') out.push(`      immutable: true,`);
+  if (fn.volatility !== 'volatile') out.push(`      volatility: '${fn.volatility}',`);
+  out.push(...renderSet(cfg.rest, '      '));
   out.push(`      body: \`${escapeTemplateString(fn.body.trim())}\`,`);
   out.push(`    }),`);
   return out;
@@ -577,7 +634,11 @@ const IDENTIFIER = /^_?[a-z][a-z0-9_]*$/;
  * express is kept as a WARNING comment with the original definition instead of
  * being dropped silently.
  */
-export function renderTriggers(t: Pick<IntrospectedTable, 'name' | 'triggers'>, policyPrefix: string): { lines: string[]; usesBuilder: boolean } {
+export function renderTriggers(
+  t: Pick<IntrospectedTable, 'name' | 'triggers'>,
+  policyPrefix: string,
+  hardened?: HardenedFunction[],
+): { lines: string[]; usesBuilder: boolean } {
   const entries: string[] = [];
   const comments: string[] = [];
   const usedNames = new Set<string>();
@@ -624,12 +685,18 @@ export function renderTriggers(t: Pick<IntrospectedTable, 'name' | 'triggers'>, 
     entries.push(`      // Imported from trigger ${trg.name} (function ${trg.functionSchema}.${trg.functionName}). push creates`);
     entries.push(`      // ${policyPrefix}_${t.name}_${name}: push refuses (FOREIGN_TRIGGERS) until --replace-foreign-triggers drops the original.`);
     for (const note of notes) entries.push(`      // ${note}`);
+    const cfg = splitConfig(trg.config);
+    if (cfg.changed) {
+      entries.push(hardeningNote(cfg.searchPath, '      '));
+      hardened?.push({ kind: 'trigger', name: `${t.name}.${name}`, from: cfg.searchPath, to: PINNED_SEARCH_PATH });
+    }
     entries.push('      trigger.custom({');
     entries.push(`        name: '${name}',`);
     entries.push(`        events: [${ops.map((op) => `'${timing}_${op}'`).join(', ')}],`);
     if (forEach === 'statement') entries.push(`        forEach: 'statement',`);
     if (when) entries.push(`        when: ${tsString(when)},`);
     if (trg.security === 'definer') entries.push(`        security: 'definer',`);
+    entries.push(...renderSet(cfg.rest, '        '));
     entries.push(`        functionBody: \`${escapeTemplateString(trg.body.trim())}\`,`);
     entries.push('      }),');
   }

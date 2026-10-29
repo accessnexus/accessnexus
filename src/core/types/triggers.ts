@@ -96,6 +96,11 @@ export interface CustomTrigger extends TriggerRule {
    * trusted side effects such as creating the first membership row.
    */
   readonly security?: 'invoker' | 'definer';
+  /**
+   * Function configuration (`SET key = 'value'`), e.g. `{ row_security: 'off' }`.
+   * Same rules as `rpc({ set })`: `search_path` stays pinned by the generator.
+   */
+  readonly set?: Readonly<Record<string, string>>;
 }
 
 /**

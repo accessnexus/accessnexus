@@ -1182,6 +1182,7 @@ function checkTrigger(ctx: Ctx, tableName: string, path: string, t: any): void {
           message: 'trigger.custom needs a functionBody (PL/pgSQL, ending with RETURN NEW/OLD/NULL)',
         });
       }
+      checkFunctionSet(ctx, `${path}.set`, t.set, `trigger.custom ${String(t.name)}`);
       break;
     default:
       push(ctx, {
@@ -1240,6 +1241,59 @@ function checkAuditTarget(ctx: Ctx, tableName: string, path: string, auditName: 
   }
 }
 
+const RPC_VOLATILITIES = new Set(['volatile', 'stable', 'immutable']);
+const GUC_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)?$/i;
+
+/** Normalize a search_path value for comparison: `"$user", public` -> `$user,public`. */
+export function normalizeSearchPath(value: string): string {
+  return value.split(',').map((p) => p.trim().replace(/^"(.*)"$/, '$1')).filter(Boolean).join(',');
+}
+
+/** `set` of an rpc()/trigger.custom(): GUC names, string values, search_path stays pinned. */
+function checkFunctionSet(ctx: Ctx, path: string, set: unknown, owner: string): void {
+  if (set === undefined) return;
+  if (set === null || typeof set !== 'object' || Array.isArray(set)) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_FUNCTION_SET',
+      path,
+      message: `${owner}: set must be an object of { parameter: 'value' }`,
+      hint: "Example: set: { row_security: 'off' }.",
+    });
+    return;
+  }
+  for (const [key, value] of Object.entries(set as Record<string, unknown>)) {
+    if (!GUC_NAME.test(key)) {
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_FUNCTION_SET',
+        path: `${path}.${key}`,
+        message: `${owner}: "${key}" is not a valid configuration parameter name`,
+        hint: 'Use a GUC name such as row_security, work_mem or myapp.setting.',
+      });
+      continue;
+    }
+    if (typeof value !== 'string') {
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_FUNCTION_SET',
+        path: `${path}.${key}`,
+        message: `${owner}: set.${key} must be a string (it is emitted as one quoted SQL literal)`,
+      });
+      continue;
+    }
+    if (key.toLowerCase() === 'search_path' && normalizeSearchPath(value) !== 'pg_catalog,public') {
+      push(ctx, {
+        severity: 'warning',
+        code: 'SEARCH_PATH_PINNED',
+        path: `${path}.${key}`,
+        message: `${owner}: search_path '${value}' is ignored; generated functions always use SET search_path = pg_catalog, public`,
+        hint: 'Remove set.search_path and schema-qualify anything outside public in the body.',
+      });
+    }
+  }
+}
+
 function checkRpc(ctx: Ctx, name: string, def: any): void {
   const path = `rpcs.${name}`;
   if (!IDENTIFIER.test(name)) {
@@ -1262,6 +1316,25 @@ function checkRpc(ctx: Ctx, name: string, def: any): void {
   if (typeof def.body === 'string') {
     checkSqlAuthCalls(ctx, `${path}.body`, def.body, `rpc ${name}`);
   }
+  const vol = def.volatility;
+  if (vol !== undefined && !RPC_VOLATILITIES.has(vol)) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_RPC',
+      path: `${path}.volatility`,
+      message: `rpc ${name}: volatility must be 'volatile', 'stable' or 'immutable', got ${JSON.stringify(vol)}`,
+    });
+  } else if ((def.immutable === true && vol !== undefined && vol !== 'immutable')
+    || (def.immutable === false && vol === 'immutable')) {
+    push(ctx, {
+      severity: 'error',
+      code: 'RPC_VOLATILITY_CONFLICT',
+      path: `${path}.volatility`,
+      message: `rpc ${name}: immutable: ${def.immutable} conflicts with volatility: '${vol}'`,
+      hint: "Drop `immutable` and keep only `volatility` (immutable: true is an alias of volatility: 'immutable').",
+    });
+  }
+  checkFunctionSet(ctx, `${path}.set`, def.set, `rpc ${name}`);
   let sawDefault = false;
   for (const [arg, input] of Object.entries((def.args ?? {}) as Record<string, unknown>)) {
     const type = input && typeof input === 'object' ? (input as any).type : input;

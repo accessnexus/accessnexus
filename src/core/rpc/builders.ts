@@ -3,7 +3,7 @@
 // Fluent API for defining PostgreSQL functions
 // ============================================
 
-import type { RpcArg, RpcDef, RpcLanguage, RpcReturnType, RpcSecurity } from '../types/rpc.js';
+import type { RpcArg, RpcDef, RpcLanguage, RpcReturnType, RpcSecurity, RpcVolatility } from '../types/rpc.js';
 
 /**
  * Define an RPC (PostgreSQL function), passed to `defineSchema(tables, { rpcs })`.
@@ -35,7 +35,10 @@ export function rpc(config?: {
   body?: string;
   language?: RpcLanguage;
   security?: RpcSecurity;
+  volatility?: RpcVolatility;
+  /** Alias of `volatility: 'immutable'`. */
   immutable?: boolean;
+  set?: Record<string, string>;
   allowAnon?: boolean;
 }): RpcDef {
   return {

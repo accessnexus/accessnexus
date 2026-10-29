@@ -21,7 +21,7 @@ export type {
   PolicyOperation, PolicyRule, PublicSchema, RowOf,
   // RPC types
   RpcDef,
-  RpcLanguage, RpcReturnType, RpcSecurity, ScalarType, SchemaDef, SeedSqlOptions, SoftDeleteTrigger, LockColumnsTrigger,
+  RpcLanguage, RpcReturnType, RpcSecurity, RpcVolatility, ScalarType, SchemaDef, SeedSqlOptions, SoftDeleteTrigger, LockColumnsTrigger,
   // Supabase Database type helpers
   SupabaseDatabase,
   SupabaseSchemaInput,

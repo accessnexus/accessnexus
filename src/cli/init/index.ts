@@ -19,6 +19,7 @@ import {
   buildRuntimeSchema,
   generateSchemaFromIntrospection,
   generateSchemaTemplate,
+  type HardenedFunction,
 } from './schema-gen.js';
 import { generateFrameworkFiles, type ResolvedExisting } from './templates.js';
 import type { ExistingSupabase } from './detect.js';
@@ -191,6 +192,7 @@ export async function runInit(options: InitOptions): Promise<Record<string, unkn
   let schemaSource: 'template' | 'database' | 'rest' = 'template';
   let introspectedTables: IntrospectedTable[] | null = null;
   let introspectedFunctions: IntrospectedFunction[] = [];
+  const hardenedFunctions: HardenedFunction[] = [];
 
   if (pullFromDb) {
     // A direct DB connection reads policies + functions (the faithful path for
@@ -223,7 +225,15 @@ export async function runInit(options: InitOptions): Promise<Record<string, unkn
             tables: result.tables,
             functions: result.functions,
             policyPrefix,
+            hardened: hardenedFunctions,
           });
+          if (hardenedFunctions.length > 0) {
+            info(`search_path hardened on ${hardenedFunctions.length} imported function${hardenedFunctions.length > 1 ? 's' : ''} `
+              + `(generate pins SET search_path = pg_catalog, public; see the // NOTE: comments in the schema):`);
+            for (const h of hardenedFunctions) {
+              info(`  ${h.kind} ${h.name}: ${h.from === null ? '(none)' : `'${h.from}'`} -> '${h.to}'`);
+            }
+          }
           schemaSource = 'database';
         }
         done = true;
@@ -430,6 +440,7 @@ export async function runInit(options: InitOptions): Promise<Record<string, unkn
     installed,
     files,
     agents,
+    hardenedFunctions,
     nextSteps,
   };
 }

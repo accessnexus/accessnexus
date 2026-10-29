@@ -25,6 +25,49 @@ function isColumnName(value: string): boolean {
   return /^[a-z_][a-z0-9_]*$/i.test(value);
 }
 
+/** A GUC name: `work_mem`, `row_security`, or a custom `myapp.setting`. */
+const GUC_NAME = /^[a-z_][a-z0-9_$]*(\.[a-z_][a-z0-9_$]*)?$/i;
+
+/**
+ * Volatility of an rpc(): `volatility`, else `immutable: true` (alias), else
+ * volatile. A contradicting combination throws (validate reports it first).
+ */
+export function resolveRpcVolatility(name: string, def: { volatility?: string; immutable?: boolean }): 'volatile' | 'stable' | 'immutable' {
+  const v = def.volatility;
+  if (v !== undefined && v !== 'volatile' && v !== 'stable' && v !== 'immutable') {
+    throw new Error(`[AccessNexus] rpc ${name}: volatility must be 'volatile', 'stable' or 'immutable' (got ${JSON.stringify(v)})`);
+  }
+  if (def.immutable === true && v !== undefined && v !== 'immutable') {
+    throw new Error(`[AccessNexus] rpc ${name}: immutable: true conflicts with volatility: '${v}'`);
+  }
+  if (def.immutable === false && v === 'immutable') {
+    throw new Error(`[AccessNexus] rpc ${name}: immutable: false conflicts with volatility: 'immutable'`);
+  }
+  return v ?? (def.immutable ? 'immutable' : 'volatile');
+}
+
+/**
+ * `SET key = 'value'` lines for a function's `set` option. Keys must be GUC
+ * names (emitted unquoted, so they are validated); values always go through
+ * quoteLiteral. `search_path` is skipped: the generator pins its own.
+ */
+export function functionSetClauses(set: Readonly<Record<string, string>> | undefined, owner: string): string[] {
+  if (!set) return [];
+  const out: string[] = [];
+  for (const key of Object.keys(set).sort()) {
+    if (!GUC_NAME.test(key)) {
+      throw new Error(`[AccessNexus] ${owner}: set key "${key}" is not a valid configuration parameter name`);
+    }
+    if (key.toLowerCase() === 'search_path') continue;
+    const value = set[key];
+    if (typeof value !== 'string') {
+      throw new Error(`[AccessNexus] ${owner}: set.${key} must be a string`);
+    }
+    out.push(`SET ${key.toLowerCase()} = ${quoteLiteral(value)}`);
+  }
+  return out;
+}
+
 /** Quote a value as a SQL string literal (single quotes doubled). */
 function quoteLiteral(value: unknown): string {
   return `'${String(value).replaceAll("'", "''")}'`;
@@ -701,6 +744,7 @@ export class SupabaseAdapter implements Adapter {
           ...(hasOwnBlock ? [body] : [`BEGIN`, `  ${body}`, `END;`]),
           `$$ LANGUAGE plpgsql`,
           ...(r.security === 'definer' ? [`SECURITY DEFINER`] : []),
+          ...functionSetClauses(r.set, `trigger ${r.name}`),
           `${searchPath};`,
           '',
           ...(idempotent ? [`DROP TRIGGER IF EXISTS ${trgName} ON ${tableName};`] : []),
@@ -763,7 +807,7 @@ export class SupabaseAdapter implements Adapter {
 
       const language = def.language ?? 'plpgsql';
       const security = (def.security ?? 'invoker').toUpperCase();
-      const volatility = def.immutable ? 'IMMUTABLE' : 'VOLATILE';
+      const volatility = resolveRpcVolatility(name, def).toUpperCase();
 
       // Build argument list
       const argList = def.args
@@ -791,6 +835,7 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`SECURITY ${security}`);
       lines.push(`${volatility}`);
       lines.push(this.functionSearchPathClause());
+      lines.push(...functionSetClauses(def.set, `rpc ${name}`));
       lines.push(`AS $$`);
       lines.push(...bodyContent);
       lines.push(`$$;`);

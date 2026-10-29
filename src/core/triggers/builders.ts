@@ -154,6 +154,7 @@ export const trigger = {
     when?: string;
     forEach?: TriggerForEach;
     security?: 'invoker' | 'definer';
+    set?: Record<string, string>;
   }): CustomTrigger {
     return {
       kind: 'custom',
@@ -163,6 +164,7 @@ export const trigger = {
       when: options.when,
       forEach: options.forEach,
       ...(options.security !== undefined ? { security: options.security } : {}),
+      ...(options.set !== undefined ? { set: options.set } : {}),
     } as const;
   },
 } as const;

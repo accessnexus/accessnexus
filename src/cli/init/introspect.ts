@@ -46,6 +46,8 @@ export interface IntrospectedTrigger {
   functionSchema: string;
   language: string;
   security: 'invoker' | 'definer';
+  /** pg_proc.proconfig of the trigger function (`{ name: value }`); direct DB only. */
+  config?: Record<string, string>;
   /** pg_proc.prosrc of the trigger function. */
   body: string;
 }

@@ -24,7 +24,21 @@ export interface IntrospectedFunction {
   language: string; // plpgsql | sql | ...
   security: 'invoker' | 'definer';
   volatility: 'immutable' | 'stable' | 'volatile';
+  /** pg_proc.proconfig as `{ name: value }` (e.g. `{ search_path: 'public', row_security: 'off' }`). */
+  config: Record<string, string>;
   body: string; // prosrc (inner body)
+}
+
+/** Parse pg_proc.proconfig (`{"search_path=public","row_security=off"}`) into a map. */
+export function parseProconfig(raw: unknown): Record<string, string> {
+  const entries: string[] = Array.isArray(raw) ? raw.map(String) : [];
+  const out: Record<string, string> = {};
+  for (const entry of entries) {
+    const eq = entry.indexOf('=');
+    if (eq <= 0) continue;
+    out[entry.slice(0, eq)] = entry.slice(eq + 1);
+  }
+  return out;
 }
 
 export interface DbIntrospectionResult extends IntrospectionResult {
@@ -91,7 +105,7 @@ SELECT c.relname AS table_name, t.tgname AS name, t.tgtype::int AS tgtype,
           JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = k.attnum) AS update_columns,
        (t.tgconstraint <> 0) AS is_constraint, t.tgenabled::text AS enabled,
        p.proname AS function_name, pn.nspname AS function_schema, l.lanname AS language,
-       p.prosecdef AS secdef, p.prosrc AS body
+       p.prosecdef AS secdef, p.prosrc AS body, p.proconfig::text[] AS config
 FROM pg_trigger t
 JOIN pg_class c ON c.oid = t.tgrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -123,6 +137,7 @@ SELECT p.proname AS name,
        l.lanname AS language,
        p.prosecdef AS secdef,
        p.provolatile AS volatility,
+       p.proconfig::text[] AS config,
        p.prosrc AS body
 FROM pg_proc p
 JOIN pg_namespace ns ON ns.oid = p.pronamespace
@@ -235,6 +250,7 @@ export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionRes
         functionSchema: row.function_schema,
         language: row.language,
         security: row.secdef ? 'definer' : 'invoker',
+        config: parseProconfig(row.config),
         body: row.body ?? '',
       });
     }
@@ -263,6 +279,7 @@ export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionRes
       language: r.language ?? 'plpgsql',
       security: r.secdef ? 'definer' : 'invoker',
       volatility: r.volatility === 'i' ? 'immutable' : r.volatility === 's' ? 'stable' : 'volatile',
+      config: parseProconfig(r.config),
       body: r.body ?? '',
     }));
 
