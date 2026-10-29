@@ -168,6 +168,14 @@ function defineSchemaManual(tables: Record<string, any>): any {
       assertIdentifier(columnName, `column in "${tableName}"`);
     }
 
+    for (const column of normalized.compositePrimaryKey ?? []) {
+      if (!(column in normalized.columns)) {
+        throw new Error(
+          `[AccessNexus] Table "${tableName}": compositePrimaryKey column "${column}" does not exist in columns`
+        );
+      }
+    }
+
     if (normalized.primaryKey && !(normalized.primaryKey in normalized.columns)) {
       throw new Error(
         `[AccessNexus] Table "${tableName}": primaryKey "${normalized.primaryKey}" does not exist in columns`
@@ -225,7 +233,7 @@ function withSoftDeleteTrigger<T extends { softDelete?: string; triggers?: any[]
 }
 
 function assertIdentifier(identifier: string, context: string): void {
-  const valid = /^[a-z][a-z0-9_]*$/.test(identifier);
+  const valid = /^_?[a-z][a-z0-9_]*$/.test(identifier);
   if (!valid) {
     throw new Error(
       `[AccessNexus] Invalid ${context} identifier "${identifier}". Use lowercase snake_case (e.g. "user_profiles").`

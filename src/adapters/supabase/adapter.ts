@@ -4,6 +4,8 @@
 // ============================================
 
 import { baseType, isNullable, normalizeColumn } from '../../core/types/columns.js';
+import { primaryKeyColumns, singlePrimaryKey } from '../../core/types/schema.js';
+import type { RpcArg } from '../../core/types/rpc.js';
 import type {
   Adapter,
   GeneratedOutput,
@@ -214,8 +216,9 @@ export class SupabaseAdapter implements Adapter {
     if (this.options.uuidGeneration === 'v7') {
       const hasUuidPk = orderedTables.some((t) => {
         const def = schema[t];
-        if (!def.primaryKey || !def.columns[def.primaryKey]) return false;
-        const col = normalizeColumn(def.columns[def.primaryKey]);
+        const pk = singlePrimaryKey(def);
+        if (!pk || !def.columns[pk]) return false;
+        const col = normalizeColumn(def.columns[pk]);
         return baseType(col.type) === 'uuid' && col.default === undefined;
       });
       if (hasUuidPk) {
@@ -522,7 +525,7 @@ export class SupabaseAdapter implements Adapter {
 
       case 'soft_delete': {
         const r = rule as any;
-        const pk = tableDef.primaryKey ?? 'id';
+        const pk = singlePrimaryKey(tableDef) ?? 'id';
         const fnName = `${policyPrefix}_${tableName}_soft_delete_fn`;
         const trgName = `${policyPrefix}_${tableName}_soft_delete`;
 
@@ -687,12 +690,15 @@ export class SupabaseAdapter implements Adapter {
           ? [`  WHEN (${r.when})`]
           : [];
 
+        // A body with its own block (DECLARE ... / BEGIN ... END, as imported
+        // from pg_proc.prosrc) is emitted as is; otherwise wrap it.
+        const body = (r.functionBody as string).trim();
+        const hasOwnBlock = /^(<<\w+>>\s*)?(DECLARE|BEGIN)\b/i.test(body);
+
         return [
           `CREATE OR REPLACE FUNCTION ${fnName}()`,
           `RETURNS TRIGGER AS $$`,
-          `BEGIN`,
-          `  ${(r.functionBody as string).trim()}`,
-          `END;`,
+          ...(hasOwnBlock ? [body] : [`BEGIN`, `  ${body}`, `END;`]),
           `$$ LANGUAGE plpgsql`,
           ...(r.security === 'definer' ? [`SECURITY DEFINER`] : []),
           `${searchPath};`,
@@ -761,9 +767,10 @@ export class SupabaseAdapter implements Adapter {
 
       // Build argument list
       const argList = def.args
-        ? Object.entries(def.args).map(([argName, argType]) =>
-          `${argName} ${this.columnTypeToPG(argType)}`
-        ).join(', ')
+        ? Object.entries(def.args).map(([argName, arg]) => {
+          const { type, default: dflt } = normalizeRpcArg(arg);
+          return `${argName} ${this.columnTypeToPG(type)}${dflt !== undefined ? ` DEFAULT ${dflt}` : ''}`;
+        }).join(', ')
         : '';
 
       // Build return type
@@ -791,7 +798,7 @@ export class SupabaseAdapter implements Adapter {
         // Supabase grants EXECUTE on new public functions to anon and
         // authenticated. A definer RPC bypasses RLS: keep it off anon unless
         // the schema says otherwise.
-        const signature = `${name}(${Object.values(def.args ?? {}).map((t) => this.columnTypeToPG(t)).join(', ')})`;
+        const signature = `${name}(${Object.values(def.args ?? {}).map((a) => this.columnTypeToPG(normalizeRpcArg(a).type)).join(', ')})`;
         lines.push(`REVOKE EXECUTE ON FUNCTION ${signature} FROM PUBLIC${def.allowAnon ? '' : ', anon'};`);
         lines.push(`GRANT EXECUTE ON FUNCTION ${signature} TO authenticated, service_role${def.allowAnon ? ', anon' : ''};`);
       }
@@ -864,7 +871,8 @@ export class SupabaseAdapter implements Adapter {
       
       // Get PK for ON CONFLICT
       // If no PK defined in schema (unlikely for Supabase), fallback to 'id'
-      const pk = schema[tableName]?.primaryKey ?? 'id';
+      const pkCols = schema[tableName] ? primaryKeyColumns(schema[tableName]) : [];
+      if (pkCols.length === 0) pkCols.push('id');
 
       for (const row of rows) {
         const keys = Object.keys(row);
@@ -875,7 +883,7 @@ export class SupabaseAdapter implements Adapter {
         
         // Generate DO UPDATE SET clause for non-PK columns
         const updateAssignments = keys
-          .filter((k) => k !== pk)
+          .filter((k) => !pkCols.includes(k))
           .map((k) => `"${k}" = EXCLUDED."${k}"`);
 
         const conflictAction = updateAssignments.length > 0
@@ -883,7 +891,7 @@ export class SupabaseAdapter implements Adapter {
           : `DO NOTHING`;
 
         lines.push(
-          `INSERT INTO "${tableName}" (${columns}) VALUES (${values}) ON CONFLICT ("${pk}") ${conflictAction};`
+          `INSERT INTO "${tableName}" (${columns}) VALUES (${values}) ON CONFLICT (${pkCols.map((c) => `"${c}"`).join(', ')}) ${conflictAction};`
         );
       }
       lines.push('');
@@ -1158,7 +1166,7 @@ export class SupabaseAdapter implements Adapter {
 
     for (const tableName of tableNames) {
       const tableDef = schema[tableName];
-      const pk = tableDef.primaryKey ?? 'id';
+      const pk = singlePrimaryKey(tableDef) ?? 'id';
       const softDeleteColumn = tableDef.softDelete;
       const relations = this.getTableRelations(schema, tableName);
       const includeTypeName = `${this.toPascalCase(tableName)}Include`;
@@ -1260,6 +1268,7 @@ export class SupabaseAdapter implements Adapter {
       serial: 'number',
       float: 'number',
       decimal: 'number',
+      numeric: 'number',
       boolean: 'boolean',
       json: 'Record<string, unknown>',
       jsonb: 'Record<string, unknown>',
@@ -1272,7 +1281,7 @@ export class SupabaseAdapter implements Adapter {
       'uuid[]': 'string[]',
     };
 
-    let tsType = map[base] ?? 'unknown';
+    let tsType = map[base] ?? (base.startsWith('numeric(') ? 'number' : 'unknown');
     if (base.startsWith('enum(')) {
       tsType = this.enumToTsUnion(base) ?? 'string';
     }
@@ -1281,7 +1290,8 @@ export class SupabaseAdapter implements Adapter {
 
   private generateCreateTableSQL(tableName: string, tableDef: TableDef): string {
     const lines: string[] = [];
-    const primaryKey = tableDef.primaryKey;
+    const pkCols = primaryKeyColumns(tableDef);
+    const primaryKey = pkCols.length === 1 ? pkCols[0] : undefined;
     const tableLevelRefs = tableDef.references as Record<string, string> | undefined;
 
     for (const [columnName, rawColumnDef] of Object.entries(tableDef.columns)) {
@@ -1331,6 +1341,10 @@ export class SupabaseAdapter implements Adapter {
       lines.push(colParts.join(' '));
     }
 
+    if (pkCols.length > 1) {
+      lines.push(`  PRIMARY KEY (${pkCols.join(', ')})`);
+    }
+
     return [
       `CREATE TABLE IF NOT EXISTS ${tableName} (`,
       lines.join(',\n'),
@@ -1342,7 +1356,8 @@ export class SupabaseAdapter implements Adapter {
     const explicit = tableDef.indexes ?? [];
     const fkColumns = this.collectForeignKeyColumns(tableDef);
     const policyColumns = this.collectPolicyColumns(tableDef);
-    const hasSoftDelete = Boolean(tableDef.softDelete && tableDef.primaryKey);
+    const singlePk = singlePrimaryKey(tableDef);
+    const hasSoftDelete = Boolean(tableDef.softDelete && singlePk);
     if (explicit.length === 0 && fkColumns.length === 0 && policyColumns.length === 0 && !hasSoftDelete) return [];
 
     const output: string[] = [];
@@ -1360,23 +1375,23 @@ export class SupabaseAdapter implements Adapter {
       const signature = `n|${fkColumn}`;
       if (seenSignatures.has(signature)) continue;
       // The primary key / a UNIQUE column already has an index.
-      if (fkColumn === tableDef.primaryKey || normalizeColumn(tableDef.columns[fkColumn] ?? 'text').unique) continue;
+      if (fkColumn === singlePk || normalizeColumn(tableDef.columns[fkColumn] ?? 'text').unique) continue;
       seenSignatures.add(signature);
       output.push(`CREATE INDEX IF NOT EXISTS idx_${tableName}_${fkColumn}_fk ON ${tableName}(${fkColumn});`);
     }
 
     // Auto-index columns referenced in RLS policies (isOwner, belongsTo, matchesField)
     for (const col of policyColumns) {
-      if (col === tableDef.primaryKey) continue;
+      if (col === singlePk) continue;
       const signature = `n|${col}`;
       if (seenSignatures.has(signature)) continue;
       seenSignatures.add(signature);
       output.push(`CREATE INDEX IF NOT EXISTS idx_${tableName}_${col}_rls ON ${tableName}(${col});`);
     }
 
-    if (tableDef.softDelete && tableDef.primaryKey) {
+    if (tableDef.softDelete && singlePk) {
       output.push(
-        `CREATE INDEX IF NOT EXISTS idx_${tableName}_active_pk ON ${tableName}(${tableDef.primaryKey}) WHERE ${tableDef.softDelete} IS NULL;`,
+        `CREATE INDEX IF NOT EXISTS idx_${tableName}_active_pk ON ${tableName}(${singlePk}) WHERE ${tableDef.softDelete} IS NULL;`,
       );
     }
 
@@ -1743,7 +1758,7 @@ export class SupabaseAdapter implements Adapter {
     const optional: string[] = [];
     for (const [colName, rawColumnDef] of Object.entries(tableDef.columns)) {
       const col = normalizeColumn(rawColumnDef);
-      const isPk = colName === tableDef.primaryKey;
+      const isPk = colName === singlePrimaryKey(tableDef);
       const autoPk = isPk && (baseType(col.type) === 'uuid' || baseType(col.type) === 'bigint');
       if (isNullable(col.type) || col.default !== undefined || autoPk) optional.push(colName);
       else required.push(colName);
@@ -1781,9 +1796,10 @@ export class SupabaseAdapter implements Adapter {
 
       // Create/Update types. On create, nullable columns, columns with a
       // default and an auto-generated primary key (uuid/bigint) are optional.
-      const pk = tableDef.primaryKey ?? 'id';
+      const pkCols = primaryKeyColumns(tableDef);
+      const pk = (pkCols.length > 0 ? pkCols : ['id']).map((c) => `'${c}'`).join(' | ');
       lines.push(`export type ${interfaceName}Create = ${this.createTypeExpr(interfaceName, tableDef)};`);
-      lines.push(`export type ${interfaceName}Update = Partial<Omit<${interfaceName}, '${pk}'>>;`);
+      lines.push(`export type ${interfaceName}Update = Partial<Omit<${interfaceName}, ${pk}>>;`);
       lines.push('');
     }
 
@@ -1804,7 +1820,10 @@ export class SupabaseAdapter implements Adapter {
     lines.push(`    Functions: {`);
     for (const [name, def] of rpcEntries) {
       const argsType = def.args && Object.keys(def.args).length > 0
-        ? `{ ${Object.entries(def.args).map(([k, v]) => `${k}: ${this.columnTypeToTS(v)}`).join('; ')} }`
+        ? `{ ${Object.entries(def.args).map(([k, v]) => {
+          const a = normalizeRpcArg(v);
+          return `${k}${a.default !== undefined ? '?' : ''}: ${this.columnTypeToTS(a.type)}`;
+        }).join('; ')} }`
         : '{}';
       const returnsType = def.returns ? this.columnTypeToTS(def.returns) : 'unknown';
       lines.push(`      ${name}: {`);
@@ -1941,7 +1960,7 @@ export class SupabaseAdapter implements Adapter {
 
     for (const [tableName, tableDef] of Object.entries(schema)) {
       const typeName = this.toPascalCase(tableName);
-      const pk = tableDef.primaryKey ?? 'id';
+      const pk = singlePrimaryKey(tableDef) ?? 'id';
       const softDeleteColumn = tableDef.softDelete;
       const relations = this.getTableRelations(schema, tableName);
       const includeTypeName = `${this.toPascalCase(tableName)}Include`;
@@ -2034,4 +2053,9 @@ export class SupabaseAdapter implements Adapter {
       .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
       .join('');
   }
+}
+
+/** `{ type, default }` for an RPC argument given as a type string or an object. */
+function normalizeRpcArg(arg: RpcArg): { type: string; default?: string } {
+  return typeof arg === 'string' ? { type: arg } : { type: arg.type, default: arg.default };
 }

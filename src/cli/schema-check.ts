@@ -12,11 +12,11 @@ const POLICY_OPERATIONS = ['select', 'insert', 'update', 'delete'] as const;
 
 /** Options accepted by table() / Database-mode table configs. */
 const TABLE_KEYS = [
-  'columns', 'primaryKey', 'references', 'onDelete', 'policies', 'triggers', 'enableRLS', 'indexes', 'softDelete',
+  'columns', 'primaryKey', 'compositePrimaryKey', 'references', 'onDelete', 'policies', 'triggers', 'enableRLS', 'indexes', 'softDelete',
 ] as const;
 
 const SCALAR_TYPES = new Set([
-  'uuid', 'text', 'varchar', 'int', 'smallint', 'bigint', 'serial', 'float', 'decimal',
+  'uuid', 'text', 'varchar', 'int', 'smallint', 'bigint', 'serial', 'float', 'decimal', 'numeric',
   'boolean', 'json', 'jsonb', 'date', 'timestamp', 'timestamptz', 'time',
   'text[]', 'int[]', 'uuid[]',
 ]);
@@ -25,7 +25,9 @@ const TRIGGER_EVENTS = new Set([
   'before_insert', 'after_insert', 'before_update', 'after_update', 'before_delete', 'after_delete',
 ]);
 
-const IDENTIFIER = /^[a-z][a-z0-9_]*$/;
+// One optional leading underscore (`_pix_crc16`, `_internal`): still a valid
+// unquoted Postgres identifier, and common for helper functions.
+const IDENTIFIER = /^_?[a-z][a-z0-9_]*$/;
 
 const FK_ACTIONS = new Set(['cascade', 'set null', 'restrict', 'no action']);
 
@@ -121,7 +123,7 @@ function baseOf(type: string): string {
 
 function isValidType(type: string): boolean {
   const base = baseOf(type);
-  return SCALAR_TYPES.has(base) || /^enum\(.+\)$/.test(base);
+  return SCALAR_TYPES.has(base) || /^enum\(.+\)$/.test(base) || /^numeric\(\d+(,\d+)?\)$/.test(base);
 }
 
 /** Values of an `enum('a','b')` column type, or undefined for other types. */
@@ -352,7 +354,32 @@ function checkTable(ctx: Ctx, tableName: string, def: any): void {
 
   // Primary key
   if (tableHasColumns) {
-    if (def.primaryKey === undefined) {
+    if (def.compositePrimaryKey !== undefined) {
+      const composite = def.compositePrimaryKey;
+      if (def.primaryKey !== undefined || !Array.isArray(composite) || composite.length < 2) {
+        push(ctx, {
+          severity: 'error',
+          code: 'INVALID_PRIMARY_KEY',
+          path: `${path}.compositePrimaryKey`,
+          message: def.primaryKey !== undefined
+            ? `Table "${tableName}" sets both primaryKey and compositePrimaryKey`
+            : `compositePrimaryKey of "${tableName}" must list at least two columns`,
+          hint: "Use primaryKey: 'id' for a single column, or compositePrimaryKey: ['a', 'b'] (not both).",
+        });
+      }
+      for (const column of Array.isArray(composite) ? composite : []) {
+        if (!(column in columns)) unknownColumn(ctx, `${path}.compositePrimaryKey`, tableName, String(column), 'compositePrimaryKey');
+      }
+      if (def.softDelete !== undefined) {
+        push(ctx, {
+          severity: 'error',
+          code: 'INVALID_PRIMARY_KEY',
+          path: `${path}.softDelete`,
+          message: `softDelete on "${tableName}" needs a single-column primaryKey (the soft-delete trigger updates the row by its key)`,
+          hint: 'Add a single id primary key, or drop softDelete on this table.',
+        });
+      }
+    } else if (def.primaryKey === undefined) {
       push(ctx, {
         severity: 'warning',
         code: 'NO_PRIMARY_KEY',
@@ -1235,7 +1262,37 @@ function checkRpc(ctx: Ctx, name: string, def: any): void {
   if (typeof def.body === 'string') {
     checkSqlAuthCalls(ctx, `${path}.body`, def.body, `rpc ${name}`);
   }
-  for (const [arg, type] of Object.entries((def.args ?? {}) as Record<string, unknown>)) {
+  let sawDefault = false;
+  for (const [arg, input] of Object.entries((def.args ?? {}) as Record<string, unknown>)) {
+    const type = input && typeof input === 'object' ? (input as any).type : input;
+    const dflt = input && typeof input === 'object' ? (input as any).default : undefined;
+    if (!IDENTIFIER.test(arg)) {
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_IDENTIFIER',
+        path: `${path}.args.${arg}`,
+        message: `RPC argument name "${arg}" is not lowercase snake_case`,
+      });
+    }
+    if (dflt !== undefined && (typeof dflt !== 'string' || dflt.trim() === '')) {
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_DEFAULT',
+        path: `${path}.args.${arg}.default`,
+        message: `Default of RPC argument "${arg}" must be a non-empty SQL expression string`,
+        hint: "Example: { type: 'int', default: '20' } or { type: 'text', default: \"'pending'\" }.",
+      });
+    }
+    if (dflt !== undefined) sawDefault = true;
+    else if (sawDefault) {
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_DEFAULT',
+        path: `${path}.args.${arg}`,
+        message: `RPC argument "${arg}" has no default but an earlier argument does (Postgres requires defaults on every following argument)`,
+        hint: 'Give it a default, or move the arguments with defaults to the end.',
+      });
+    }
     if (typeof type !== 'string' || !isValidType(type)) {
       push(ctx, {
         severity: 'error',

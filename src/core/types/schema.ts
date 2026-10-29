@@ -17,8 +17,15 @@ export interface TableDef<
   /** Column definitions */
   columns: TColumns;
 
-  /** Primary key column name */
+  /** Primary key column name (single-column key) */
   primaryKey?: keyof TColumns & string;
+
+  /**
+   * Composite primary key, instead of `primaryKey`:
+   * `['org_id', 'user_id']` → `PRIMARY KEY (org_id, user_id)`. Soft delete,
+   * the SDK's `findById`/`update`/`delete` by id need a single `primaryKey`.
+   */
+  compositePrimaryKey?: readonly (keyof TColumns & string)[];
 
   /** Foreign key references: column -> 'table.column' */
   references?: Partial<Record<keyof TColumns & string, string>>;
@@ -146,4 +153,15 @@ export interface SeedSqlOptions {
    * never use a fixed password on a database reachable from the internet.
    */
   authPassword?: string;
+}
+
+/** The primary key columns of a table (empty when none is declared). */
+export function primaryKeyColumns(def: Pick<TableDef, 'primaryKey' | 'compositePrimaryKey'>): string[] {
+  if (def.primaryKey !== undefined) return [def.primaryKey];
+  return [...(def.compositePrimaryKey ?? [])];
+}
+
+/** The primary key when it is a single column, otherwise undefined. */
+export function singlePrimaryKey(def: Pick<TableDef, 'primaryKey'>): string | undefined {
+  return def.primaryKey;
 }
