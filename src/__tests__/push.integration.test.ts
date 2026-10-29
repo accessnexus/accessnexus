@@ -127,12 +127,15 @@ describe.skipIf(!DB_URL)('push against a real Supabase Postgres', () => {
     pg = pg.default ?? pg;
     admin = new pg.Client({ connectionString: DB_URL });
     await admin.connect();
+    // Integration files share the database and reset it: hold a session lock so
+    // vitest's parallel files run one after another.
+    await admin.query('SELECT pg_advisory_lock(727274)');
     // The bare Supabase image has auth.uid() but not auth.jwt() (GoTrue adds it).
     const { rows } = await admin.query(`SELECT to_regprocedure('auth.jwt()') IS NOT NULL AS ok`);
     if (!rows[0].ok) {
       throw new Error('auth.jwt() is missing: create it as supabase_admin (see the comment at the top of this file).');
     }
-  });
+  }, 600_000);
 
   afterAll(async () => {
     await admin?.end();

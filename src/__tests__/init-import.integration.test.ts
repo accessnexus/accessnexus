@@ -199,11 +199,14 @@ describe.skipIf(!DB_URL)('init --db-url round trip against a real Supabase Postg
     pg = pg.default ?? pg;
     admin = new pg.Client({ connectionString: DB_URL });
     await admin.connect();
+    // Integration files share the database and reset it: hold a session lock so
+    // vitest's parallel files run one after another.
+    await admin.query('SELECT pg_advisory_lock(727274)');
     await resetDatabase();
     previousCwd = process.cwd();
     cwd = mkdtempSync(join(tmpdir(), 'accessnexus-import-'));
     process.chdir(cwd);
-  });
+  }, 600_000);
 
   afterAll(async () => {
     process.chdir(previousCwd);
