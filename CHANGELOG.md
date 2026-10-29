@@ -4,6 +4,46 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-29
+
+### Security
+
+- `push` no longer leaves foreign RLS policies in place silently. It reads `pg_policies` for
+  every table the schema manages and refuses with the new `FOREIGN_POLICIES` error (exit 1,
+  nothing applied) while any policy there is not named `<prefix>_<table>_<op>`: Postgres ORs
+  permissive policies, so an imported project's original policies kept granting access next
+  to the generated ones. The new `--replace-foreign-policies` flag drops them in the push
+  transaction (`droppedPolicies` in `--json`); `push --dry-run` lists them (`foreignPolicies`,
+  `wouldRefuse`) when a database URL is set.
+- `push` no longer creates `public.uuid_generate_v7()`, which returned a random v4 UUID and was
+  callable by `anon` through PostgREST. The only UUIDv7 helper is `public.accessnexus_uuidv7()`
+  (a real RFC 9562 v7), now with EXECUTE revoked from `PUBLIC` and `anon` (granted to
+  `authenticated` and `service_role`, and to `anon` only when a v7 table accepts anonymous
+  inserts). Databases pushed with 0.1.0 may still have the old function: check that no column
+  default uses it, then `DROP FUNCTION public.uuid_generate_v7();`. Already-applied migrations
+  are immutable, so an existing `accessnexus_uuidv7()` keeps its grants: run
+  `REVOKE EXECUTE ON FUNCTION public.accessnexus_uuidv7() FROM PUBLIC, anon;
+  GRANT EXECUTE ON FUNCTION public.accessnexus_uuidv7() TO authenticated, service_role;`.
+
+### Fixed
+
+- `push` is atomic: migrations, policies, triggers, RPCs, the `accessnexus_migrations`
+  bookkeeping and foreign-policy drops run in one transaction (still under the advisory lock).
+  A failure anywhere rolls back the whole push; `PUSH_FAILED` now reports `applied: []`,
+  `rolledBack` (the files that had run) and `failed` (the file Postgres rejected). Failed
+  attempts are no longer recorded as `success = false` rows. Limit: a migration cannot use an
+  enum value added earlier in the same push (Postgres forbids it in a transaction).
+- `uuidGeneration: 'v7'` now also applies to tables added in a `__changes` migration (they got
+  `gen_random_uuid()`), and that migration defines the helper before the table.
+- `push` and `seed` accept `--db-url` as an alias of `--url` (the flag `init` uses); passing
+  both with different values is `INVALID_FLAG_VALUE`.
+
+### Docs
+
+- Existing project guide: a safe first push that reviews and replaces the foreign policies.
+- Limits: `diff` compares against the snapshot, not the live database (`diff --against-db` is
+  planned).
+
 ## [0.1.0] - 2026-10-29
 
 First public release.
