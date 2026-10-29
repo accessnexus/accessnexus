@@ -119,7 +119,8 @@ Static checks run by `validate`, `generate`, `diff` and `push`. In Database mode
 
 | Code | Severity | Path | Meaning | Fix |
 | --- | --- | --- | --- | --- |
-| `INVALID_IDENTIFIER` | error | table, column, `rpcs.<name>`, or trigger | A table, column, RPC, `lockColumns` `name` or `custom` trigger `name` is not lowercase snake_case. | Rename, e.g. `user_profiles`. |
+| `INVALID_IDENTIFIER` | error | table, column, `rpcs.<name>`, or trigger | A table, column, RPC, `lockColumns` `name` or `custom` trigger `name` is not lowercase snake_case (one leading `_` is allowed). | Rename, e.g. `user_profiles`. |
+| `INVALID_PRIMARY_KEY` | error | `<table>.compositePrimaryKey` or `<table>.softDelete` | `compositePrimaryKey` lists fewer than two columns, is set together with `primaryKey`, or is combined with `softDelete`. | Use `primaryKey` for one column, `compositePrimaryKey` for several, and a single key for soft delete. |
 | `RESERVED_IDENTIFIER` | error | table or column | A table or column name is a reserved SQL keyword (`order`, `user`, `group`, ...). Identifiers are emitted unquoted. | Rename, e.g. `orders`, `user_id`. |
 
 ### Columns
@@ -183,4 +184,4 @@ Static checks run by `validate`, `generate`, `diff` and `push`. In Database mode
 | --- | --- | --- | --- | --- |
 | `INVALID_RPC` | error | `rpcs.<name>` | An entry of `rpcs` was not created with `rpc()`. | `rpcs: { name: rpc({ ... }) }`. |
 
-RPCs also produce `INVALID_IDENTIFIER` (name), `UNKNOWN_COLUMN_TYPE` (argument type) and `UNWRAPPED_AUTH_CALL` (body).
+RPCs also produce `INVALID_IDENTIFIER` (name or argument name), `UNKNOWN_COLUMN_TYPE` (argument type), `INVALID_DEFAULT` (an argument default that is not a SQL string, or an argument without default after one with a default) and `UNWRAPPED_AUTH_CALL` (body).

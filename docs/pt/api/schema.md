@@ -140,6 +140,7 @@ interface TableDef<TColumns extends Record<string, ColumnInput>> {
 | --- | --- | --- | --- |
 | `columns` | `Record<string, ColumnInput>` | obrigatório (modo manual) | Nome da coluna para uma string de tipo ou um [`ColumnDef`](#columndef). |
 | `primaryKey` | nome de coluna | `undefined` | Primary key de coluna única. Sem ela o `validate` avisa `NO_PRIMARY_KEY`; o SDK, os upserts do seed e o soft delete passam a assumir `id`. |
+| `compositePrimaryKey` | nomes de coluna | `undefined` | No lugar de `primaryKey`: `['org_id', 'user_id']` → `PRIMARY KEY (org_id, user_id)`. Os upserts do seed usam todas; não pode ser usada com `softDelete` (`INVALID_PRIMARY_KEY`). |
 | `references` | `{ [column]: 'table.column' \| 'schema.table.column' }` | `undefined` | Foreign keys. Equivale a `references` num `ColumnDef`; quando os dois estão definidos, vale o da coluna. |
 | `onDelete` | `{ [column]: ForeignKeyAction }` | nenhuma ação | Ação de `ON DELETE` por coluna que referencia. Veja [Foreign keys](#foreign-keys). |
 | `policies` | `TablePolicies` | `undefined` | Uma regra por operação: `{ select?, insert?, update?, delete? }`, cada uma criada com [`policy`](/pt/api/policy) ou [`definePermissions`](/pt/api/permissions). |
@@ -180,6 +181,7 @@ Uma coluna é uma string de tipo ou um objeto [`ColumnDef`](#columndef). Acresce
 | `'serial'` | `SERIAL` | `number` |
 | `'float'` | `DOUBLE PRECISION` | `number` |
 | `'decimal'` | `NUMERIC` | `number` |
+| `'numeric'`, `'numeric(10)'`, `'numeric(10,2)'` | `NUMERIC`, `NUMERIC(10)`, `NUMERIC(10,2)` | `number` |
 | `'boolean'` | `BOOLEAN` | `boolean` |
 | `'json'` | `JSON` | `Record<string, unknown>` |
 | `'jsonb'` | `JSONB` | `Record<string, unknown>` |

@@ -93,9 +93,11 @@ npx accessnexus init --yes    # non-interactive (CI, AI agents)
 Svelte, ...) and CRA to write matching client wrappers (anything else gets a plain Node
 client), offers to install
 Supabase deps, and introspects your database. With a **database URL** it imports everything —
-tables, columns, PK/FK, **RLS policies** (`pg_policies`, keeping each policy's roles and
-PERMISSIVE/RESTRICTIVE kind, never granting more than the database did) and **functions**
-(`pg_proc`) — via a direct Postgres connection; with only a project **URL + secret key** it imports tables/columns/
+tables, exact column types and defaults, PK/FK (composite keys, `auth.users` references),
+**RLS policies** (`pg_policies`, keeping each policy's roles and
+PERMISSIVE/RESTRICTIVE kind, never granting more than the database did), **functions**
+(`pg_proc`, with parameter defaults) and **triggers** (as `trigger.custom`; what cannot be
+expressed is left as a `// WARNING:` comment) — via a direct Postgres connection; with only a project **URL + secret key** it imports tables/columns/
 PK/FK from the PostgREST **OpenAPI** spec (RLS is not exposed over REST). It also detects an
 **existing Supabase client** in your project and wraps it instead of creating a second one,
 scaffolds `accessnexus.schema.ts` and `accessnexus.config.ts`, writes framework client wrappers, adds a
@@ -285,13 +287,13 @@ writes are `TO public` only for an explicit `policy.public()`.
   `lockColumns({ columns | except, unless?, name? })` (BEFORE UPDATE: API users cannot change
   those columns unless the SQL condition holds),
   `custom({ name, events, functionBody, when?, forEach?, security? })`.
-- **`rpc(config?)`** — `{ args?, returns?, body?, language? ('plpgsql'|'sql'), security? ('invoker'|'definer'), allowAnon?, immutable? }`. Marker-only `rpc()` for Database mode; add `body` for full SQL generation. Attach via `defineSchema(tables, { rpcs })`. Definer RPCs get `REVOKE EXECUTE ... FROM PUBLIC, anon` unless `allowAnon: true`.
+- **`rpc(config?)`** — `{ args? (name → type, or `{ type, default }` with a raw SQL default), returns?, body?, language? ('plpgsql'|'sql'), security? ('invoker'|'definer'), allowAnon?, immutable? }`. Marker-only `rpc()` for Database mode; add `body` for full SQL generation. Attach via `defineSchema(tables, { rpcs })`. Definer RPCs get `REVOKE EXECUTE ... FROM PUBLIC, anon` unless `allowAnon: true`.
 - **Columns** — scalar strings (`'uuid'`, `'text'`, `'int'`, `'jsonb'`, `'timestamptz'`,
-  `'text[]'`, …), enum via `` "enum('a','b')" ``, nullable by suffixing `?` (`'text?'`), or the
+  `'text[]'`, `'numeric(10,2)'`, …), enum via `` "enum('a','b')" ``, nullable by suffixing `?` (`'text?'`), or the
   object form `{ type, default, unique, check, references, onDelete }`. `default` and `check`
   are raw SQL: a string/enum literal needs inner quotes (`default: "'todo'"`); `validate`
   reports `INVALID_DEFAULT` for a bare word.
-- **Table options** — `columns`, `primaryKey`, `references`, `onDelete` (`{ col: 'cascade' |
+- **Table options** — `columns`, `primaryKey` (or `compositePrimaryKey: ['a', 'b']`), `references`, `onDelete` (`{ col: 'cascade' |
   'set null' | 'restrict' | 'no action' }`; foreign keys are `NO ACTION` by default),
   `policies`, `triggers`, `enableRLS`, `indexes`, `softDelete`. RLS is enabled and forced on
   every table: a table without `policies` is deny-all for the API (service role only).

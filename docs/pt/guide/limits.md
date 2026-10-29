@@ -10,7 +10,7 @@ O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do q
 | Modo Database | Gera RLS, triggers, RPCs e o SDK, mas não migrations DDL. | Mantenha suas próprias migrations para as tabelas. |
 | Migrations | Geradas a partir de diffs de snapshot; renomeações são detectadas por heurística. | Leia o `diff` antes do push; procure comentários `-- Destructive:`. |
 | `push` | Aplica os arquivos um a um, cada um na própria transação, e não numa transação única. | Uma falha deixa os arquivos anteriores aplicados (`applied[]`); corrija e rode o push de novo. |
-| Identificadores | Emitidos sem aspas: snake_case minúsculo, sem palavras reservadas. | Renomeie (`order` → `orders`). |
+| Identificadores | Emitidos sem aspas: snake_case minúsculo (com um `_` opcional no início), sem palavras reservadas. | Renomeie (`order` → `orders`). |
 | Colunas | RLS não consegue restringir quais colunas são lidas ou atualizadas. | `trigger.lockColumns` para escritas; uma tabela separada para leituras privadas. |
 | Foreign keys | `ON DELETE NO ACTION`, a menos que `onDelete` diga outra coisa. | Defina `onDelete`. |
 | Enums | Cada coluna `enum(...)` ganha seu próprio tipo (`<table>_<column>_enum`). | Faça cast entre eles (`v.role::text::org_members_role_enum`). |
@@ -18,7 +18,8 @@ O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do q
 | Retorno de RPC | Só tipos de coluna escalares ou arrays; sem `SETOF` / `TABLE`. | Retorne `jsonb`. |
 | Triggers e RPCs removidos | Remover um trigger ou uma RPC do schema não remove o objeto do banco; o `generate` não apaga arquivos de saída obsoletos. (Operações de policy removidas *são* apagadas no próximo `push`.) | Remova funções/triggers antigos e arquivos obsoletos à mão. |
 | Seed | Só o mapa `references` no nível da tabela provisiona linhas em `auth.users`. | Declare as referências a usuários ali. |
-| `init --db-url` | Importa só o schema `public`; sem referências a outros schemas, chaves compostas, defaults, checks, índices, triggers ou `ON DELETE`. | Revise antes do primeiro `generate` ([Projetos existentes](/pt/guide/existing-project)). |
+| `init --db-url` | Importa só o schema `public`; sem constraints `CHECK`, índices não únicos, views, FKs de várias colunas ou colunas geradas. Tipos sem equivalente no AccessNexus viram `text`; triggers com argumentos, desabilitados, `INSTEAD OF`/só `TRUNCATE` ou que não são plpgsql ficam de fora. Cada um deixa um comentário `// WARNING:`. Os triggers importados ganham nomes novos, então os originais precisam ser removidos depois do primeiro `push`. | Revise antes do primeiro `generate` ([Projetos existentes](/pt/guide/existing-project)). |
+| Primary keys compostas | `compositePrimaryKey` cria a chave, mas `softDelete` e os helpers por id do SDK precisam de um `primaryKey` de uma coluna. | Use uma chave `id` única onde precisar deles. |
 | Verificação | O `validate` checa estrutura, não intenção; ele não simula acesso. | Teste suas policies com usuários reais. |
 
 ## Roadmap {#roadmap}

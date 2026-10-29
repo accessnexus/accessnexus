@@ -10,7 +10,7 @@ What v0.1.0 does not do, so you can plan around it, and what is planned next. An
 | Database mode | Generates RLS, triggers, RPCs and the SDK, but no DDL migrations. | Keep your own migrations for tables. |
 | Migrations | Generated from snapshot diffs; renames are detected heuristically. | Read `diff` before pushing; look for `-- Destructive:` comments. |
 | `push` | Applies files one by one, each in its own transaction, not as a single transaction. | A failure leaves earlier files applied (`applied[]`); fix and push again. |
-| Identifiers | Emitted unquoted: lowercase snake_case, no reserved keywords. | Rename (`order` → `orders`). |
+| Identifiers | Emitted unquoted: lowercase snake_case (one optional leading `_`), no reserved keywords. | Rename (`order` → `orders`). |
 | Columns | RLS cannot restrict which columns are read or updated. | `trigger.lockColumns` for writes; a separate table for private reads. |
 | Foreign keys | `ON DELETE NO ACTION` unless `onDelete` says otherwise. | Set `onDelete`. |
 | Enums | Each `enum(...)` column gets its own type (`<table>_<column>_enum`). | Cast between them (`v.role::text::org_members_role_enum`). |
@@ -18,7 +18,8 @@ What v0.1.0 does not do, so you can plan around it, and what is planned next. An
 | RPC returns | Scalar or array column types only; no `SETOF` / `TABLE`. | Return `jsonb`. |
 | Removed triggers and RPCs | Removing a trigger or RPC from the schema does not drop it from the database; `generate` does not delete stale output files. (Removed policy operations *are* dropped on the next `push`.) | Drop old functions/triggers and stale files by hand. |
 | Seed | Only the table-level `references` map provisions `auth.users` rows. | Declare user references there. |
-| `init --db-url` | Imports the `public` schema only; no references to other schemas, composite keys, defaults, checks, indexes, triggers or `ON DELETE`. | Review before the first `generate` ([Existing projects](/guide/existing-project)). |
+| `init --db-url` | Imports the `public` schema only; no `CHECK` constraints, non-unique indexes, views, multi-column FKs or generated columns. Types without an AccessNexus equivalent become `text`; triggers with arguments, disabled, `INSTEAD OF`/`TRUNCATE`-only or non-plpgsql ones are left out. Each of these leaves a `// WARNING:` comment. Imported triggers get new names, so the originals must be dropped after the first `push`. | Review before the first `generate` ([Existing projects](/guide/existing-project)). |
+| Composite primary keys | `compositePrimaryKey` creates the key, but `softDelete` and the SDK's by-id helpers need a single `primaryKey`. | Use a single `id` key where you need them. |
 | Verification | `validate` checks structure, not intent; it does not simulate access. | Test your policies with real users. |
 
 ## Roadmap

@@ -28,7 +28,7 @@ RPCs are passed in the second argument of [`defineSchema`](/api/schema#definesch
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `args` | `Record<string, ColumnType>` | `{}` | Argument name to type, in declaration order. Types as in [column types](/api/schema#column-types); a trailing `?` only affects the TS type. |
+| `args` | `Record<string, ColumnType \| { type, default? }>` | `{}` | Argument name to type, in declaration order. Types as in [column types](/api/schema#column-types); a trailing `?` only affects the TS type. `{ type: 'int', default: '20' }` emits `DEFAULT 20` (raw SQL) and makes the argument optional in the client; every argument after one with a default needs one too. |
 | `returns` | `ColumnType \| 'void'` | `'void'` | Return type. Omitted: `RETURNS VOID` in SQL, `unknown` in the SDK. |
 | `body` | `string` | `undefined` | Function body without the `CREATE FUNCTION` wrapper. Without it no SQL is generated. |
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | `LANGUAGE`. |

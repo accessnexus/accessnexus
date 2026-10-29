@@ -4,6 +4,33 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-29
+
+### Fixed
+
+- `init --db-url` imports user triggers as `trigger.custom` (timing, events, `FOR EACH`,
+  `WHEN`, `SECURITY DEFINER` and the function body kept; `UPDATE OF` becomes a `WHEN`).
+  Triggers it cannot express (arguments, disabled, `INSTEAD OF`, `TRUNCATE`-only,
+  non-plpgsql) are left as `// WARNING:` comments instead of being dropped silently.
+- `validate` accepts names with one leading underscore (`_pix_crc16`) for RPCs, tables and
+  columns (`INVALID_IDENTIFIER` rejected functions that `init` had imported).
+- RPC parameter defaults are imported and emitted: `args: { p_limit: { type: 'int',
+  default: '20' } }` → `p_limit INTEGER DEFAULT 20` (optional in the client types), so
+  `CREATE OR REPLACE` works on functions that have defaults. `validate` reports
+  `INVALID_DEFAULT` for an argument without default after one with a default.
+- Column defaults are imported (`now()`, `0`, `gen_random_uuid()`, ...); `nextval` becomes
+  `serial`.
+- `numeric` / `numeric(p,s)` are kept instead of becoming `double precision` (new column types
+  `numeric`, `numeric(p)`, `numeric(p,s)`); enums are imported as `enum(...)`, `text[]` /
+  `int[]` / `uuid[]` arrays keep their type, and unknown types are flagged.
+- Foreign keys to other schemas (`auth.users`) are imported, with their `ON DELETE`.
+- Composite primary keys are imported as the new `compositePrimaryKey: ['a', 'b']` table
+  option (emits `PRIMARY KEY (a, b)`; `validate` reports `INVALID_PRIMARY_KEY` for misuse),
+  and composite UNIQUE constraints as unique `indexes` instead of per-column `unique`.
+- `init --db-url` no longer prints `DeprecationWarning: Calling client.query() when the client
+  is already executing a query`: catalog queries run one at a time.
+- A `trigger.custom` body that has its own `DECLARE` / `BEGIN ... END` block is emitted as is.
+
 ## [0.1.0] - 2026-10-29
 
 First public release.
