@@ -54,7 +54,6 @@ Foreign keys default to `ON DELETE NO ACTION`. Set `onDelete: { column: 'cascade
 ### Policies seem to allow more than the schema says
 
 - Old policies created outside AccessNexus (dashboard, earlier migrations) still exist, and Postgres ORs permissive policies. List them: `SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'public';`
-- You removed an operation key from `policies`. In v0.1.0 the previously pushed `<prefix>_<table>_<op>` policy is not dropped. Set the operation to `policy.none()` instead, or drop the policy by hand.
 
 ### Drift: the database no longer matches the schema
 

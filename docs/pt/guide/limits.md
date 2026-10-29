@@ -16,7 +16,7 @@ O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do q
 | Enums | Cada coluna `enum(...)` ganha seu próprio tipo (`<table>_<column>_enum`). | Faça cast entre eles (`v.role::text::org_members_role_enum`). |
 | Grants | RPCs definer não são executáveis por `anon`, a menos que `allowAnon`. Tabelas e RPCs invoker mantêm os grants padrão do Supabase. | O RLS protege as linhas. |
 | Retorno de RPC | Só tipos de coluna escalares ou arrays; sem `SETOF` / `TABLE`. | Retorne `jsonb`. |
-| Regras removidas | Remover uma operação de policy, um trigger ou uma RPC do schema não remove o objeto do banco; o `generate` não apaga arquivos de saída obsoletos. | Use `policy.none()`; remova objetos antigos e arquivos obsoletos à mão. |
+| Triggers e RPCs removidos | Remover um trigger ou uma RPC do schema não remove o objeto do banco; o `generate` não apaga arquivos de saída obsoletos. (Operações de policy removidas *são* apagadas no próximo `push`.) | Remova funções/triggers antigos e arquivos obsoletos à mão. |
 | Seed | Só o mapa `references` no nível da tabela provisiona linhas em `auth.users`. | Declare as referências a usuários ali. |
 | `init --db-url` | Importa só o schema `public`; sem referências a outros schemas, chaves compostas, defaults, checks, índices, triggers ou `ON DELETE`. | Revise antes do primeiro `generate` ([Projetos existentes](/pt/guide/existing-project)). |
 | Verificação | O `validate` checa estrutura, não intenção; ele não simula acesso. | Teste suas policies com usuários reais. |

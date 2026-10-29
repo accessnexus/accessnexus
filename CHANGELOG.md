@@ -26,6 +26,8 @@ First public release.
 
 ### Secure by default (RLS)
 
+- Removing a rule revokes it: each policy file drops the policies of operations that are no
+  longer in the schema (or of tables with no `policies`), so the next `push` removes them.
 - `(SELECT auth.uid())` initPlan wrapping, `ENABLE` + `FORCE ROW LEVEL SECURITY`, separate
   `USING` / `WITH CHECK`; UPDATE policies always carry an explicit `WITH CHECK`.
 - Fail closed: every table gets `ENABLE` + `FORCE ROW LEVEL SECURITY`; a table without

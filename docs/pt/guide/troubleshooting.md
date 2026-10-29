@@ -54,7 +54,6 @@ Foreign keys usam `ON DELETE NO ACTION` por padrão. Defina `onDelete: { column:
 ### As policies parecem permitir mais do que o schema diz {#policies-seem-to-allow-more-than-the-schema-says}
 
 - Policies antigas criadas fora do AccessNexus (dashboard, migrations anteriores) ainda existem, e o Postgres combina policies permissivas com OR. Liste-as: `SELECT tablename, policyname FROM pg_policies WHERE schemaname = 'public';`
-- Você removeu a chave de uma operação em `policies`. Na v0.1.0, a policy `<prefix>_<table>_<op>` enviada antes não é removida. Defina a operação como `policy.none()`, ou remova a policy à mão.
 
 ### Drift: o banco não bate mais com o schema {#drift-the-database-no-longer-matches-the-schema}
 

@@ -179,6 +179,15 @@ export default defineSchema({
     const { rows } = await admin.query(`SELECT pg_get_expr(polqual, polrelid) AS q FROM pg_policy WHERE polname = 'accessnexus_notes_select'`);
     expect(rows[0].q).toContain('IS NOT NULL');
 
+    // Removing a rule revokes it: the old policy is dropped, not left granting access.
+    writeSchema(notes('policy.isAuthenticated()').replace(", delete: policy.isOwner('owner_id')", ''));
+    expect((await cli('generate')).code).toBe(0);
+    expect((await cli('push')).code).toBe(0);
+    const remaining = await admin.query(`SELECT polname FROM pg_policy WHERE polrelid = 'notes'::regclass ORDER BY polname`);
+    expect(remaining.rows.map((r) => r.polname)).toEqual([
+      'accessnexus_notes_insert', 'accessnexus_notes_select', 'accessnexus_notes_update',
+    ]);
+
     // Schema changed but generate was not run: push refuses.
     writeSchema(notes('policy.isAuthenticated()', `, title: 'text?'`));
     const stale = await cli('push');

@@ -5,6 +5,23 @@ import { policy } from '../core/policy/builders.js';
 import { rpc } from '../core/rpc/builders.js';
 
 describe('Supabase Adapter', () => {
+  it('drops the policies of operations that are not in the schema', () => {
+    const schema = defineSchema({
+      notes: table({ columns: { id: 'uuid', owner_id: 'uuid' }, primaryKey: 'id', policies: { select: policy.isOwner('owner_id') } }),
+      locked: table({ columns: { id: 'uuid' }, primaryKey: 'id' }),
+    });
+    const files = new SupabaseAdapter().generatePolicies(schema);
+    const notes = files.find((f) => f.path.includes('notes'))!.content;
+    for (const op of ['insert', 'update', 'delete']) {
+      expect(notes).toContain(`DROP POLICY IF EXISTS "accessnexus_notes_${op}" ON notes;`);
+      expect(notes).not.toContain(`CREATE POLICY "accessnexus_notes_${op}"`);
+    }
+    const locked = files.find((f) => f.path.includes('locked'))!.content;
+    for (const op of ['select', 'insert', 'update', 'delete']) {
+      expect(locked).toContain(`DROP POLICY IF EXISTS "accessnexus_locked_${op}" ON locked;`);
+    }
+  });
+
   const adapter = new SupabaseAdapter({
     policyPrefix: 'accessnexus',
     timestamps: false, // Disable for deterministic tests

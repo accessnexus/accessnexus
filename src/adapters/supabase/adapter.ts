@@ -270,6 +270,15 @@ export class SupabaseAdapter implements Adapter {
     }
     lines.push('');
 
+    // Drop every operation's policy that is not (or no longer) in the schema: removing a
+    // rule must revoke the access it granted, not leave the old policy behind.
+    const operations: PolicyOperation[] = ['select', 'insert', 'update', 'delete'];
+    const absent = operations.filter((op) => !tableDef.policies?.[op]);
+    for (const op of absent) {
+      lines.push(`DROP POLICY IF EXISTS "${policyPrefix}_${tableName}_${op}" ON ${tableName};`);
+    }
+    if (absent.length > 0) lines.push('');
+
     if (!tableDef.policies) {
       lines.push('-- No policies: deny-all for anon and authenticated (service role only).');
       lines.push('');
@@ -277,7 +286,6 @@ export class SupabaseAdapter implements Adapter {
     }
 
     // Generate each operation's policy
-    const operations: PolicyOperation[] = ['select', 'insert', 'update', 'delete'];
     const helperDefinitions = this.collectPolicyHelpers(tableName, tableDef, operations);
     if (helperDefinitions.length > 0) {
       lines.push(...helperDefinitions);
