@@ -34,7 +34,7 @@ O `init` procura um client existente em `src/` e na raiz do projeto: `lib/supaba
 
 | `schemaSource` | Quando | O que é importado |
 | --- | --- | --- |
-| `database` | `--db-url`, ou uma URL em `ACCESSNEXUS_DB_URL` / `SUPABASE_DB_URL` / `DATABASE_URL` | Tabelas, colunas, chaves, estado do RLS, policies, funções |
+| `database` | `--db-url`, ou uma URL em `ACCESSNEXUS_DB_URL` / `SUPABASE_DB_URL` / `DATABASE_URL` | Tabelas, tipos exatos e defaults das colunas, chaves, estado do RLS, policies, funções, triggers |
 | `rest` | Sem URL de banco, mas com uma URL do Supabase e uma secret key em `.env*` | Só tabelas, colunas, primary keys e foreign keys |
 | `template` | `--no-introspect`, ou nada encontrado | Um exemplo comentado |
 
@@ -51,13 +51,15 @@ Do schema `public`, usando uma conexão direta:
 | Importado | Observações |
 | --- | --- |
 | Tabelas base e colunas, nulabilidade | Tabelas de sistema como `spatial_ref_sys` são puladas |
-| Tipos de coluna | Mapeados para tipos do AccessNexus; qualquer coisa desconhecida vira `text` |
-| Primary key | Uma coluna (veja a lista de revisão) |
-| Foreign keys entre tabelas do `public` | Como `references` |
-| Constraints unique | Como `unique: true` por coluna |
+| Tipos de coluna | Exatos quando o AccessNexus tem o tipo: `numeric(10,2)`, `numeric`, `smallint`, `varchar`, enums como `"enum('a','b')"`, `text[]` / `int[]` / `uuid[]`. O resto vira `text` com um comentário `// WARNING:` |
+| Defaults de coluna | Como `default` (`now()`, `0`, `'{}'::text[]`). `serial` / `nextval(...)` vira `serial`; um literal de enum perde o cast para o nome antigo do tipo |
+| Primary key | Uma coluna como `primaryKey`, várias como `compositePrimaryKey: ['a', 'b']` |
+| Foreign keys | Como `references`, inclusive para outros schemas (`'auth.users.id'`), com o `ON DELETE` em `onDelete`. FKs de várias colunas viram um comentário `// WARNING:` |
+| Constraints unique | Uma coluna: `unique: true`. Várias colunas: `indexes: [{ columns: [...], unique: true }]` |
 | RLS ligado ou desligado | Desligado vira um `enableRLS: false` explícito |
 | Policies (`pg_policies`) | Traduzidas de forma fail-closed, veja abaixo |
-| Funções (`pg_proc`) | Não as funções de trigger, nem as que pertencem a uma extensão |
+| Funções (`pg_proc`) | Não as funções de trigger, nem as que pertencem a uma extensão. Os defaults dos parâmetros são mantidos |
+| Triggers (`pg_trigger`) | Triggers do usuário como `trigger.custom`, veja abaixo. Triggers com nome `<prefix>_...` (criados pelo AccessNexus) são pulados |
 
 ### Como as policies são traduzidas {#how-policies-are-translated}
 
@@ -103,16 +105,28 @@ export default defineSchema({
 
 - Argumentos e tipo de retorno escalares: um `rpc({ args, returns, language, security, body })` completo. O `push` a recria com um `search_path` fixado; uma função definer perde o `EXECUTE` para `anon`, a menos que você adicione `allowAnon: true`.
 - `SETOF`, `TABLE(...)` ou tipos compostos: um marcador `rpc()` só com a assinatura. A função continua como está no banco.
+- Os defaults dos parâmetros são mantidos: `p_limit integer DEFAULT 20` vira `p_limit: { type: 'int', default: '20' }`, então o `CREATE OR REPLACE` bate com a função existente (o Postgres se recusa a substituir uma função removendo seus defaults).
+- Nomes com underscore no início (`_pix_crc16`) são válidos.
 - Overloads: só o primeiro é mantido; os outros viram um comentário.
+
+### Como os triggers são traduzidos {#how-triggers-are-translated}
+
+Cada trigger do usuário vira um `trigger.custom({ name, events, forEach, when, security, functionBody })` com o corpo da sua função (`pg_proc.prosrc`):
+
+- `BEFORE` / `AFTER`, `INSERT` / `UPDATE` / `DELETE`, `FOR EACH ROW` / `STATEMENT`, a condição `WHEN` e o `SECURITY DEFINER` são mantidos.
+- `UPDATE OF col` num trigger de linha que só trata UPDATE vira `when: 'OLD.col IS DISTINCT FROM NEW.col'`; senão ele dispara em todo UPDATE e um `// WARNING:` avisa.
+- Não importados, com um comentário `// WARNING:` e o `CREATE TRIGGER` original: triggers que passam argumentos (`TG_ARGV`), triggers desabilitados, `INSTEAD OF` e os só de `TRUNCATE`, e funções que não são `plpgsql`. Um constraint trigger é importado como trigger comum, com um aviso.
+
+O `push` cria o trigger como `<prefix>_<table>_<name>`, com uma função própria. No mesmo banco, o trigger original continua existindo, então **os dois disparam** até você remover o original (veja abaixo).
 
 ## O que revisar antes do primeiro `generate` {#what-to-review-before-the-first-generate}
 
 Corrija isto **antes** de rodar o `generate` pela primeira vez. A primeira migration usa `CREATE TABLE IF NOT EXISTS`, então as declarações nela não mexem em tabelas existentes. Depois disso, as mesmas edições viram migrations de `ALTER`.
 
-- **Referências a `auth.users`** (e a qualquer outra tabela fora do `public`) não são importadas. Adicione-as: `references: { user_id: 'auth.users.id' }`. O seed e o `include` do SDK dependem delas.
-- **Primary keys compostas** saem como uma única coluna, e **constraints unique compostas** saem como `unique: true` em cada coluna. Corrija a chave e expresse a composição com `indexes: [{ columns: ['org_id', 'user_id'], unique: true }]`.
-- **Tipos**: enums, arrays e tipos desconhecidos viram `text`; `numeric` vira `float`. Use `"enum('a','b')"`, `'text[]'`, `'decimal'`.
-- **Não importados**: defaults, constraints `CHECK`, índices não únicos, ações `ON DELETE`, triggers, views. Eles continuam no banco; adicione-os ao schema se quiser que sejam rastreados.
+- **Comentários `// WARNING:`**: cada um aponta algo que a importação não conseguiu expressar (um tipo desconhecido ou de array importado como `text`, uma coluna gerada, uma FK de várias colunas, um trigger deixado de fora). Corrija o tipo ou recrie o objeto à mão.
+- **Enums**: o AccessNexus cria um tipo enum próprio por coluna (`<table>_<column>_enum`). No banco existente a coluna mantém o tipo dela; funções que fazem cast para o nome antigo continuam funcionando ali, mas não num banco novo.
+- **Tamanhos e precisões sem tipo no AccessNexus**: `varchar(20)` vira `varchar`, `real` vira `float` (um comentário avisa).
+- **Não importados**: constraints `CHECK`, índices não únicos, views. Eles continuam no banco; adicione-os ao schema se quiser que sejam rastreados.
 - **Policies em `policy.custom()`**: troque por builders semânticos quando possível e use o wrapper nas chamadas de auth (o `validate` avisa `UNWRAPPED_AUTH_CALL`).
 - **Comentários `TODO`** de policies só para anon, e todo `enableRLS: false`.
 
@@ -125,6 +139,7 @@ Depois do `init`, as policies originais continuam no banco. O Postgres combina p
 1. `npx accessnexus generate`, e depois leia o que ele escreveu:
    - `__init.sql`: `CREATE TABLE IF NOT EXISTS` (não faz nada em tabelas existentes), `CREATE INDEX IF NOT EXISTS` nas colunas de foreign key e de policy (índices novos), tipos enum se faltarem.
    - `policies/*.sql`: `ENABLE` + `FORCE ROW LEVEL SECURITY` e policies com nome `<prefix>_<table>_<op>`.
+   - `triggers/*.sql`: os triggers importados, como `<prefix>_<table>_<name>`.
    - `rpcs.sql`: `CREATE OR REPLACE` das funções importadas.
 2. `npx accessnexus push --dry-run --json` com a URL do banco definida: `destructive` precisa estar vazio, e `foreignPolicies` lista cada policy original de uma tabela gerenciada (`wouldRefuse: true`). O dry run só lê.
 3. Compare cada policy listada com a regra que o `init` gerou para ela (cada regra tem um comentário com o nome da policy de origem). Leve para o `accessnexus.schema.ts` o que ainda faltar e rode o `generate` de novo.
@@ -135,6 +150,17 @@ Depois desse push, só as policies geradas existem nas tabelas gerenciadas, ent�
 
 ::: danger Remova as originais só depois de revisar, e com consentimento
 O `--replace-foreign-policies` apaga policies que o AccessNexus não escreveu. Passe a flag só depois da etapa 3. Se um agente estiver no controle, ele precisa mostrar a lista do `FOREIGN_POLICIES` e perguntar antes de passar a flag.
+
+Com os triggers importados é igual: o original e o gerado disparam os dois (um `updated_at` duas vezes não faz mal, um insert de auditoria ou um contador faz). Remova o original quando o gerado estiver no lugar:
+
+```sql
+SELECT event_object_table, trigger_name FROM information_schema.triggers
+WHERE trigger_schema = 'public' AND trigger_name NOT LIKE 'accessnexus\_%';
+
+DROP TRIGGER orders_note ON orders;
+```
+
+Se um agente estiver no controle, ele precisa perguntar antes de remover qualquer coisa.
 :::
 
 ## Veja também {#related}

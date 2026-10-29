@@ -34,7 +34,7 @@ npx accessnexus init --yes --db-url "$SUPABASE_DB_URL"
 
 | `schemaSource` | When | What is imported |
 | --- | --- | --- |
-| `database` | `--db-url`, or a URL in `ACCESSNEXUS_DB_URL` / `SUPABASE_DB_URL` / `DATABASE_URL` | Tables, columns, keys, RLS state, policies, functions |
+| `database` | `--db-url`, or a URL in `ACCESSNEXUS_DB_URL` / `SUPABASE_DB_URL` / `DATABASE_URL` | Tables, exact column types and defaults, keys, RLS state, policies, functions, triggers |
 | `rest` | No DB URL, but a Supabase URL and secret key in `.env*` | Tables, columns, primary and foreign keys only |
 | `template` | `--no-introspect`, or nothing found | A commented example |
 
@@ -51,13 +51,15 @@ From the `public` schema, using a direct connection:
 | Imported | Notes |
 | --- | --- |
 | Base tables and columns, nullability | System tables such as `spatial_ref_sys` are skipped |
-| Column types | Mapped to AccessNexus types; anything unknown becomes `text` |
-| Primary key | One column (see review list) |
-| Foreign keys between `public` tables | As `references` |
-| Unique constraints | As `unique: true` per column |
+| Column types | Exact where AccessNexus has the type: `numeric(10,2)`, `numeric`, `smallint`, `varchar`, enums as `"enum('a','b')"`, `text[]` / `int[]` / `uuid[]`. Anything else becomes `text` with a `// WARNING:` comment |
+| Column defaults | As `default` (`now()`, `0`, `'{}'::text[]`). `serial` / `nextval(...)` becomes `serial`; an enum literal loses its cast to the old type name |
+| Primary key | One column as `primaryKey`, several as `compositePrimaryKey: ['a', 'b']` |
+| Foreign keys | As `references`, including other schemas (`'auth.users.id'`), with their `ON DELETE` as `onDelete`. Multi-column FKs become a `// WARNING:` comment |
+| Unique constraints | One column: `unique: true`. Several columns: `indexes: [{ columns: [...], unique: true }]` |
 | RLS on or off | Off becomes an explicit `enableRLS: false` |
 | Policies (`pg_policies`) | Translated fail-closed, see below |
-| Functions (`pg_proc`) | Not trigger functions, not owned by an extension |
+| Functions (`pg_proc`) | Not trigger functions, not owned by an extension. Parameter defaults are kept |
+| Triggers (`pg_trigger`) | User triggers as `trigger.custom`, see below. Triggers named `<prefix>_...` (made by AccessNexus) are skipped |
 
 ### How policies are translated
 
@@ -103,16 +105,28 @@ export default defineSchema({
 
 - Scalar arguments and return type: a full `rpc({ args, returns, language, security, body })`. `push` re-creates it with a pinned `search_path`; a definer function loses `EXECUTE` for `anon` unless you add `allowAnon: true`.
 - `SETOF`, `TABLE(...)` or composite types: a signature-only `rpc()` marker. The function stays as it is in the database.
+- Parameter defaults are kept: `p_limit integer DEFAULT 20` becomes `p_limit: { type: 'int', default: '20' }`, so `CREATE OR REPLACE` matches the existing function (Postgres refuses to replace a function and drop its defaults).
+- Names with a leading underscore (`_pix_crc16`) are valid.
 - Overloads: only the first is kept; the others become a comment.
+
+### How triggers are translated
+
+Each user trigger becomes a `trigger.custom({ name, events, forEach, when, security, functionBody })` with the body of its function (`pg_proc.prosrc`):
+
+- `BEFORE` / `AFTER`, `INSERT` / `UPDATE` / `DELETE`, `FOR EACH ROW` / `STATEMENT`, the `WHEN` condition and `SECURITY DEFINER` are kept.
+- `UPDATE OF col` on a row trigger that only handles UPDATE becomes `when: 'OLD.col IS DISTINCT FROM NEW.col'`; otherwise it fires on every UPDATE and a `// WARNING:` says so.
+- Not imported, with a `// WARNING:` comment and the original `CREATE TRIGGER`: triggers that pass arguments (`TG_ARGV`), disabled triggers, `INSTEAD OF` and `TRUNCATE`-only triggers, and functions not written in `plpgsql`. A constraint trigger is imported as a regular one, with a warning.
+
+`push` creates the trigger as `<prefix>_<table>_<name>` with its own function. On the same database, the original trigger still exists, so **both fire** until you drop the original (see below).
 
 ## What to review before the first `generate`
 
 Fix these **before** you run `generate` for the first time. The first migration uses `CREATE TABLE IF NOT EXISTS`, so declarations in it do not touch existing tables. After that, the same edits turn into `ALTER` migrations.
 
-- **References to `auth.users`** (and any other non-`public` table) are not imported. Add them: `references: { user_id: 'auth.users.id' }`. The seed and the SDK `include` rely on them.
-- **Composite primary keys** come out as a single column, and **composite unique constraints** come out as `unique: true` on each column. Fix the key, and express the composite with `indexes: [{ columns: ['org_id', 'user_id'], unique: true }]`.
-- **Types**: enums, arrays and unknown types become `text`; `numeric` becomes `float`. Use `"enum('a','b')"`, `'text[]'`, `'decimal'`.
-- **Not imported**: defaults, `CHECK` constraints, non-unique indexes, `ON DELETE` actions, triggers, views. They stay in the database; add them to the schema if you want them tracked.
+- **`// WARNING:` comments**: each one names something the import could not express (an unknown or array type imported as `text`, a generated column, a multi-column FK, a trigger left out). Fix the type or recreate the object by hand.
+- **Enums**: AccessNexus creates its own enum type per column (`<table>_<column>_enum`). On the existing database the column keeps its type; functions that cast to the old type name keep working there, but not on a fresh database.
+- **Lengths and precision AccessNexus has no type for**: `varchar(20)` becomes `varchar`, `real` becomes `float` (a comment says so).
+- **Not imported**: `CHECK` constraints, non-unique indexes, views. They stay in the database; add them to the schema if you want them tracked.
 - **Policies in `policy.custom()`**: replace with semantic builders where possible, and wrap auth calls (`validate` warns `UNWRAPPED_AUTH_CALL`).
 - **`TODO` comments** for anon-only policies, and every `enableRLS: false`.
 
@@ -125,6 +139,7 @@ After `init`, the original policies are still in the database. Postgres ORs perm
 1. `npx accessnexus generate`, then read what it wrote:
    - `__init.sql`: `CREATE TABLE IF NOT EXISTS` (no-op for existing tables), `CREATE INDEX IF NOT EXISTS` on foreign-key and policy columns (new indexes), enum types if missing.
    - `policies/*.sql`: `ENABLE` + `FORCE ROW LEVEL SECURITY` and policies named `<prefix>_<table>_<op>`.
+   - `triggers/*.sql`: the imported triggers, as `<prefix>_<table>_<name>`.
    - `rpcs.sql`: `CREATE OR REPLACE` of the imported functions.
 2. `npx accessnexus push --dry-run --json` with the database URL set: `destructive` must be empty, and `foreignPolicies` lists every original policy on a managed table (`wouldRefuse: true`). The dry run only reads.
 3. Compare each listed policy with the rule `init` generated for it (each rule has a comment naming its source policy). Port anything still missing into `accessnexus.schema.ts`, then `generate` again.
@@ -135,6 +150,17 @@ After this push, only the generated policies exist on the managed tables, so the
 
 ::: danger Drop the originals only after review, and with consent
 `--replace-foreign-policies` deletes policies AccessNexus did not write. Pass it only after step 3. If an agent is driving, it must show the `FOREIGN_POLICIES` list and ask before passing the flag.
+
+Imported triggers are the same: the original and the generated one both fire (an `updated_at` touch is harmless twice, an audit insert or a counter is not). Drop the original once the generated one is in place:
+
+```sql
+SELECT event_object_table, trigger_name FROM information_schema.triggers
+WHERE trigger_schema = 'public' AND trigger_name NOT LIKE 'accessnexus\_%';
+
+DROP TRIGGER orders_note ON orders;
+```
+
+If an agent is driving, it must ask before dropping anything.
 :::
 
 ## Related

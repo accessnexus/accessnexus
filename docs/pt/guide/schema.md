@@ -49,6 +49,7 @@ Nomes de tabela e coluna devem estar em `snake_case` minúsculo e não podem ser
 | --- | --- | --- |
 | `columns` | `Record<string, ColumnInput>` | Obrigatório no modo manual. Veja [Colunas](#columns) |
 | `primaryKey` | nome de coluna | A coluna da chave primária |
+| `compositePrimaryKey` | nomes de coluna | Uma chave sobre várias colunas, no lugar de `primaryKey` |
 | `references` | `{ column: 'table.column' }` | Chaves estrangeiras. Use `'schema.table.column'` para outros schemas, por exemplo `'auth.users.id'` |
 | `onDelete` | `{ column: action }` | `ON DELETE` por coluna que referencia: `'cascade'`, `'set null'`, `'restrict'`, `'no action'` |
 | `indexes` | `{ columns, unique?, name? }[]` | Índices extras |
@@ -76,7 +77,7 @@ columns: {
 | --- | --- |
 | `uuid`, `text`, `varchar` | `string` |
 | `date`, `timestamp`, `timestamptz`, `time` | `string` |
-| `int`, `smallint`, `bigint`, `serial`, `float`, `decimal` | `number` |
+| `int`, `smallint`, `bigint`, `serial`, `float`, `decimal`, `numeric`, `numeric(p,s)` | `number` |
 | `boolean` | `boolean` |
 | `json`, `jsonb` | `Record<string, unknown>` |
 | `text[]`, `uuid[]` | `string[]` |

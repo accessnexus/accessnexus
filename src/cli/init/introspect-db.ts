@@ -12,7 +12,6 @@
 
 import { dbConnectTimeoutMs } from '../db-timeout.js';
 import type {
-  IntrospectedColumn,
   IntrospectedPolicy,
   IntrospectedTable,
   IntrospectionResult,
@@ -39,28 +38,68 @@ const SYSTEM_TABLES = new Set([
   'geometry_columns',
   'raster_columns',
   'raster_overviews',
+  // push's own bookkeeping table
+  'accessnexus_migrations',
 ]);
 
+// pg_attribute rather than information_schema: it gives the exact type
+// (format_type: numeric(10,2), varchar(20)), enum labels, identity/generated
+// flags and the default expression.
 const COLUMNS_SQL = `
-SELECT c.table_name, c.column_name, c.udt_name, c.is_nullable,
-       c.column_default, c.ordinal_position
-FROM information_schema.columns c
-JOIN information_schema.tables t
-  ON t.table_schema = c.table_schema AND t.table_name = c.table_name
-WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
-ORDER BY c.table_name, c.ordinal_position;`;
+SELECT c.relname AS table_name, a.attname AS column_name, t.typname AS udt_name,
+       format_type(a.atttypid, a.atttypmod) AS formatted_type,
+       CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+       pg_get_expr(d.adbin, d.adrelid) AS column_default,
+       a.attnum AS ordinal_position,
+       a.attidentity::text AS identity,
+       (a.attgenerated <> '') AS generated,
+       CASE WHEN t.typtype = 'e' THEN
+         (SELECT json_agg(e.enumlabel ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid)
+       END AS enum_values
+FROM pg_attribute a
+JOIN pg_class c ON c.oid = a.attrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_type t ON t.oid = a.atttypid
+LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+  AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY c.relname, a.attnum;`;
 
+// pg_constraint keeps each constraint's columns together (composite PK/UNIQUE/FK)
+// and the referenced schema (FKs to auth.users).
 const CONSTRAINTS_SQL = `
-SELECT tc.table_name, kcu.column_name, tc.constraint_type,
-       ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name
-FROM information_schema.table_constraints tc
-JOIN information_schema.key_column_usage kcu
-  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-LEFT JOIN information_schema.constraint_column_usage ccu
-  ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-WHERE tc.table_schema = 'public'
-  AND tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY', 'UNIQUE')
-ORDER BY tc.table_name;`;
+SELECT c.relname AS table_name, con.conname AS name, con.contype AS type,
+       (SELECT json_agg(a.attname ORDER BY k.ord) FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum) AS columns,
+       fn.nspname AS foreign_schema, fc.relname AS foreign_table,
+       (SELECT json_agg(a.attname ORDER BY k.ord) FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum) AS foreign_columns,
+       con.confdeltype AS on_delete
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+LEFT JOIN pg_class fc ON fc.oid = con.confrelid
+LEFT JOIN pg_namespace fn ON fn.oid = fc.relnamespace
+WHERE n.nspname = 'public' AND con.contype IN ('p', 'f', 'u')
+ORDER BY c.relname, con.conname;`;
+
+// User triggers (not the internal ones that implement FKs).
+const TRIGGERS_SQL = `
+SELECT c.relname AS table_name, t.tgname AS name, t.tgtype::int AS tgtype,
+       pg_get_triggerdef(t.oid) AS definition, t.tgnargs::int AS nargs,
+       (SELECT json_agg(a.attname ORDER BY k.ord) FROM unnest(t.tgattr::int2[]) WITH ORDINALITY k(attnum, ord)
+          JOIN pg_attribute a ON a.attrelid = t.tgrelid AND a.attnum = k.attnum) AS update_columns,
+       (t.tgconstraint <> 0) AS is_constraint, t.tgenabled::text AS enabled,
+       p.proname AS function_name, pn.nspname AS function_schema, l.lanname AS language,
+       p.prosecdef AS secdef, p.prosrc AS body
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_proc p ON p.oid = t.tgfoid
+JOIN pg_namespace pn ON pn.oid = p.pronamespace
+JOIN pg_language l ON l.oid = p.prolang
+WHERE n.nspname = 'public' AND NOT t.tgisinternal
+ORDER BY c.relname, t.tgname;`;
 
 // roles is name[]; return it as text so every pg version parses it the same.
 const POLICIES_SQL = `
@@ -97,22 +136,29 @@ ORDER BY p.proname;`;
 
 interface ConstraintRow {
   table_name: string;
-  column_name: string;
-  constraint_type: 'PRIMARY KEY' | 'FOREIGN KEY' | 'UNIQUE';
-  foreign_table_name: string | null;
-  foreign_column_name: string | null;
+  name: string;
+  type: 'p' | 'f' | 'u';
+  columns: string[] | null;
+  foreign_schema: string | null;
+  foreign_table: string | null;
+  foreign_columns: string[] | null;
+  /** confdeltype: a no action, r restrict, c cascade, n set null, d set default */
+  on_delete: string | null;
 }
+
+const ON_DELETE: Record<string, 'cascade' | 'set null' | 'restrict'> = { c: 'cascade', n: 'set null', r: 'restrict' };
 
 export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionResult> {
   const client = await createPgClient(dbUrl);
   try {
-    const [cols, cons, pols, fns, rls] = await Promise.all([
-      client.query(COLUMNS_SQL),
-      client.query(CONSTRAINTS_SQL),
-      client.query(POLICIES_SQL),
-      client.query(FUNCTIONS_SQL),
-      client.query(RLS_SQL),
-    ]);
+    // One client runs one query at a time: issue them in sequence (pg warns —
+    // and will throw in pg@9 — when queries are queued concurrently).
+    const cols = await client.query(COLUMNS_SQL);
+    const cons = await client.query(CONSTRAINTS_SQL);
+    const pols = await client.query(POLICIES_SQL);
+    const fns = await client.query(FUNCTIONS_SQL);
+    const rls = await client.query(RLS_SQL);
+    const trgs = await client.query(TRIGGERS_SQL);
 
     const tableMap = new Map<string, IntrospectedTable>();
     const ensure = (name: string): IntrospectedTable => {
@@ -124,7 +170,7 @@ export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionRes
       return t;
     };
 
-    for (const row of cols.rows as IntrospectedColumn[]) {
+    for (const row of cols.rows as any[]) {
       if (SYSTEM_TABLES.has(row.table_name)) continue;
       ensure(row.table_name).columns.push({
         table_name: row.table_name,
@@ -132,24 +178,65 @@ export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionRes
         data_type: row.udt_name,
         udt_name: row.udt_name,
         is_nullable: row.is_nullable,
-        column_default: row.column_default,
-        ordinal_position: row.ordinal_position,
+        column_default: row.column_default ?? null,
+        ordinal_position: Number(row.ordinal_position),
+        formatted_type: row.formatted_type ?? undefined,
+        enum_values: Array.isArray(row.enum_values) ? row.enum_values : undefined,
+        identity: row.identity ?? '',
+        generated: Boolean(row.generated),
       });
     }
 
     for (const con of cons.rows as ConstraintRow[]) {
       const t = tableMap.get(con.table_name);
       if (!t) continue;
-      if (con.constraint_type === 'PRIMARY KEY') t.primaryKey = con.column_name;
-      else if (con.constraint_type === 'FOREIGN KEY' && con.foreign_table_name && con.foreign_column_name) {
-        t.foreignKeys.push({
-          column: con.column_name,
-          referencedTable: con.foreign_table_name,
-          referencedColumn: con.foreign_column_name,
-        });
-      } else if (con.constraint_type === 'UNIQUE' && !t.uniqueColumns.includes(con.column_name)) {
-        t.uniqueColumns.push(con.column_name);
+      const columns = con.columns ?? [];
+      if (columns.length === 0) continue;
+      if (con.type === 'p') {
+        if (columns.length === 1) t.primaryKey = columns[0];
+        else t.compositePrimaryKey = columns;
+      } else if (con.type === 'f' && con.foreign_table && con.foreign_columns) {
+        if (columns.length === 1 && con.foreign_columns.length === 1) {
+          const onDelete = ON_DELETE[con.on_delete ?? 'a'];
+          t.foreignKeys.push({
+            column: columns[0],
+            referencedTable: con.foreign_table,
+            referencedColumn: con.foreign_columns[0],
+            ...(con.foreign_schema && con.foreign_schema !== 'public' ? { referencedSchema: con.foreign_schema } : {}),
+            ...(onDelete ? { onDelete } : {}),
+          });
+        } else {
+          const target = `${con.foreign_schema && con.foreign_schema !== 'public' ? `${con.foreign_schema}.` : ''}${con.foreign_table}`;
+          (t.compositeForeignKeys ??= []).push(
+            `${con.name}: FOREIGN KEY (${columns.join(', ')}) REFERENCES ${target}(${con.foreign_columns.join(', ')})`,
+          );
+        }
+      } else if (con.type === 'u') {
+        if (columns.length === 1) {
+          if (!t.uniqueColumns.includes(columns[0])) t.uniqueColumns.push(columns[0]);
+        } else {
+          (t.uniqueGroups ??= []).push(columns);
+        }
       }
+    }
+
+    for (const row of trgs.rows as any[]) {
+      const t = tableMap.get(row.table_name);
+      if (!t) continue;
+      (t.triggers ??= []).push({
+        name: row.name,
+        tgtype: Number(row.tgtype),
+        definition: row.definition ?? '',
+        nargs: Number(row.nargs ?? 0),
+        updateColumns: Array.isArray(row.update_columns) ? row.update_columns : [],
+        isConstraint: Boolean(row.is_constraint),
+        enabled: row.enabled ?? 'O',
+        functionName: row.function_name,
+        functionSchema: row.function_schema,
+        language: row.language,
+        security: row.secdef ? 'definer' : 'invoker',
+        body: row.body ?? '',
+      });
     }
 
     for (const row of pols.rows as any[]) {

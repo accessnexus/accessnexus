@@ -120,7 +120,8 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 
 | Código | Severidade | Path | Significado | Correção |
 | --- | --- | --- | --- | --- |
-| `INVALID_IDENTIFIER` | error | tabela, coluna, `rpcs.<name>` ou trigger | Uma tabela, coluna, RPC, `name` de `lockColumns` ou `name` de trigger `custom` não está em snake_case minúsculo. | Renomeie, ex.: `user_profiles`. |
+| `INVALID_IDENTIFIER` | error | tabela, coluna, `rpcs.<name>` ou trigger | Uma tabela, coluna, RPC, `name` de `lockColumns` ou `name` de trigger `custom` não está em snake_case minúsculo (um `_` no início é permitido). | Renomeie, ex.: `user_profiles`. |
+| `INVALID_PRIMARY_KEY` | error | `<table>.compositePrimaryKey` ou `<table>.softDelete` | `compositePrimaryKey` lista menos de duas colunas, aparece junto com `primaryKey`, ou é combinada com `softDelete`. | Use `primaryKey` para uma coluna, `compositePrimaryKey` para várias, e uma chave única para soft delete. |
 | `RESERVED_IDENTIFIER` | error | tabela ou coluna | Um nome de tabela ou coluna é palavra reservada do SQL (`order`, `user`, `group`, ...). Os identificadores são emitidos sem aspas. | Renomeie, ex.: `orders`, `user_id`. |
 
 ### Colunas {#columns}
@@ -184,4 +185,4 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 | --- | --- | --- | --- | --- |
 | `INVALID_RPC` | error | `rpcs.<name>` | Uma entrada de `rpcs` não foi criada com `rpc()`. | `rpcs: { name: rpc({ ... }) }`. |
 
-As RPCs também produzem `INVALID_IDENTIFIER` (nome), `UNKNOWN_COLUMN_TYPE` (tipo de argumento) e `UNWRAPPED_AUTH_CALL` (body).
+As RPCs também produzem `INVALID_IDENTIFIER` (nome ou nome de argumento), `UNKNOWN_COLUMN_TYPE` (tipo de argumento), `INVALID_DEFAULT` (um default de argumento que não é uma string SQL, ou um argumento sem default depois de um com default) e `UNWRAPPED_AUTH_CALL` (body).

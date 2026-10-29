@@ -3,8 +3,7 @@
 // Fluent API for defining PostgreSQL functions
 // ============================================
 
-import type { ColumnType } from '../types/columns.js';
-import type { RpcDef, RpcLanguage, RpcReturnType, RpcSecurity } from '../types/rpc.js';
+import type { RpcArg, RpcDef, RpcLanguage, RpcReturnType, RpcSecurity } from '../types/rpc.js';
 
 /**
  * Define an RPC (PostgreSQL function), passed to `defineSchema(tables, { rpcs })`.
@@ -31,7 +30,7 @@ import type { RpcDef, RpcLanguage, RpcReturnType, RpcSecurity } from '../types/r
  * ```
  */
 export function rpc(config?: {
-  args?: Record<string, ColumnType>;
+  args?: Record<string, RpcArg>;
   returns?: RpcReturnType;
   body?: string;
   language?: RpcLanguage;

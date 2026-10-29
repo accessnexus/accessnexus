@@ -49,6 +49,7 @@ Table and column names must be lowercase `snake_case` and cannot be reserved SQL
 | --- | --- | --- |
 | `columns` | `Record<string, ColumnInput>` | Required in manual mode. See [Columns](#columns) |
 | `primaryKey` | column name | The primary key column |
+| `compositePrimaryKey` | column names | A key over several columns, instead of `primaryKey` |
 | `references` | `{ column: 'table.column' }` | Foreign keys. Use `'schema.table.column'` for other schemas, e.g. `'auth.users.id'` |
 | `onDelete` | `{ column: action }` | `ON DELETE` per referencing column: `'cascade'`, `'set null'`, `'restrict'`, `'no action'` |
 | `indexes` | `{ columns, unique?, name? }[]` | Extra indexes |
@@ -76,7 +77,7 @@ columns: {
 | --- | --- |
 | `uuid`, `text`, `varchar` | `string` |
 | `date`, `timestamp`, `timestamptz`, `time` | `string` |
-| `int`, `smallint`, `bigint`, `serial`, `float`, `decimal` | `number` |
+| `int`, `smallint`, `bigint`, `serial`, `float`, `decimal`, `numeric`, `numeric(p,s)` | `number` |
 | `boolean` | `boolean` |
 | `json`, `jsonb` | `Record<string, unknown>` |
 | `text[]`, `uuid[]` | `string[]` |

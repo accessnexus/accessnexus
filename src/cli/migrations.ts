@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import type { SupabaseAdapter } from '../adapters/supabase/adapter.js';
 import { baseType, isNullable, normalizeColumn } from '../core/types/columns.js';
 import type { GeneratedOutput, IndexDef, SchemaDef } from '../core/types/index.js';
+import { primaryKeyColumns, singlePrimaryKey } from '../core/types/schema.js';
 
 interface ColumnState {
   readonly type: string;
@@ -22,6 +23,7 @@ interface IndexState {
 }
 
 interface TableState {
+  /** Primary key column(s), comma-joined for a composite key ("a, b"). */
   readonly primaryKey?: string;
   readonly softDelete?: string;
   readonly columns: Record<string, ColumnState>;
@@ -417,6 +419,7 @@ function createTableSQL(tableName: string, table: TableState, uuidDefault: strin
 
     definitions.push(`  ${parts.join(' ')}`);
   }
+  if (table.primaryKey?.includes(',')) definitions.push(`  PRIMARY KEY (${table.primaryKey})`);
 
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n${definitions.join(',\n')}\n);`;
 }
@@ -493,10 +496,10 @@ function buildSchemaState(schema: SchemaDef): SchemaState {
     }
 
     tables[tableName] = {
-      primaryKey: tableDef.primaryKey,
+      primaryKey: primaryKeyColumns(tableDef).join(', ') || undefined,
       softDelete: tableDef.softDelete,
       columns,
-      indexes: normalizeIndexes(tableName, tableDef.indexes, columns, tableDef.primaryKey, tableDef.softDelete),
+      indexes: normalizeIndexes(tableName, tableDef.indexes, columns, singlePrimaryKey(tableDef), tableDef.softDelete),
     };
   }
 
@@ -883,7 +886,9 @@ function applyColumnRenames(table: TableState, renames: Map<string, string>): Ta
     columns: index.columns.map((column) => renames.get(column) ?? column),
   }));
 
-  const primaryKey = table.primaryKey ? (renames.get(table.primaryKey) ?? table.primaryKey) : undefined;
+  const primaryKey = table.primaryKey
+    ? table.primaryKey.split(', ').map((column) => renames.get(column) ?? column).join(', ')
+    : undefined;
   return {
     primaryKey,
     columns,

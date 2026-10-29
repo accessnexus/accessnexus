@@ -5,9 +5,9 @@
 
 import type { ColumnType } from '../../core/types/columns.js';
 import type { SchemaDef, TableDef } from '../../core/types/schema.js';
-import type { IntrospectedPolicy, IntrospectedTable } from './introspect.js';
+import type { IntrospectedColumn, IntrospectedPolicy, IntrospectedTable, IntrospectedTrigger } from './introspect.js';
 import type { IntrospectedFunction } from './introspect-db.js';
-import { pgTypeToAccessNexus } from './pg-type-map.js';
+import { introspectedColumnType, pgTypeToAccessNexus } from './pg-type-map.js';
 
 export interface SchemaGenOptions {
   tables: IntrospectedTable[];
@@ -21,7 +21,10 @@ export interface SchemaGenOptions {
  */
 export function generateSchemaFromIntrospection(options: SchemaGenOptions): string {
   const { tables, functions = [] } = options;
+  const { policyPrefix } = options;
   const imports = ['defineSchema', 'table', 'policy'];
+  const triggerBlocks = new Map(tables.map((t) => [t.name, renderTriggers(t, policyPrefix)]));
+  if ([...triggerBlocks.values()].some((b) => b.usesBuilder)) imports.push('trigger');
   if (functions.length > 0) imports.push('rpc');
   const lines: string[] = [
     '// ============================================',
@@ -44,28 +47,45 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
     // Columns
     lines.push('    columns: {');
     for (const col of t.columns) {
-      const accessNexusType = pgTypeToAccessNexus(col.udt_name, col.is_nullable === 'YES');
-      if (t.uniqueColumns.includes(col.column_name)) {
-        lines.push(`      ${col.column_name}: { type: '${accessNexusType}', unique: true },`);
-      } else {
-        lines.push(`      ${col.column_name}: '${accessNexusType}',`);
-      }
+      lines.push(...renderColumn(t, col));
     }
     lines.push('    },');
 
     // Primary key
     if (t.primaryKey) {
       lines.push(`    primaryKey: '${t.primaryKey}',`);
+    } else if (t.compositePrimaryKey && t.compositePrimaryKey.length > 0) {
+      lines.push(`    compositePrimaryKey: [${t.compositePrimaryKey.map((c) => `'${c}'`).join(', ')}],`);
     }
 
-    // Foreign keys as references
+    // Foreign keys as references (schema-qualified outside public: 'auth.users.id')
     if (t.foreignKeys.length > 0) {
       lines.push('    references: {');
       for (const fk of t.foreignKeys) {
-        lines.push(`      ${fk.column}: '${fk.referencedTable}.${fk.referencedColumn}',`);
+        const schemaPrefix = fk.referencedSchema && fk.referencedSchema !== 'public' ? `${fk.referencedSchema}.` : '';
+        lines.push(`      ${fk.column}: '${schemaPrefix}${fk.referencedTable}.${fk.referencedColumn}',`);
       }
       lines.push('    },');
+      const actions = t.foreignKeys.filter((fk) => fk.onDelete);
+      if (actions.length > 0) {
+        lines.push(`    onDelete: { ${actions.map((fk) => `${fk.column}: '${fk.onDelete}'`).join(', ')} },`);
+      }
     }
+    for (const fk of t.compositeForeignKeys ?? []) {
+      lines.push(`    // WARNING: multi-column foreign key not imported (AccessNexus references are per column): ${fk}`);
+    }
+
+    // Multi-column UNIQUE constraints → unique indexes (same guarantee; a FK may target them).
+    if (t.uniqueGroups && t.uniqueGroups.length > 0) {
+      lines.push('    indexes: [');
+      for (const group of t.uniqueGroups) {
+        lines.push(`      { columns: [${group.map((c) => `'${c}'`).join(', ')}], unique: true },`);
+      }
+      lines.push('    ],');
+    }
+
+    const triggerBlock = triggerBlocks.get(t.name);
+    if (triggerBlock && triggerBlock.lines.length > 0) lines.push(...triggerBlock.lines);
 
     // Existing RLS policies → one rule per operation. Never fails open: roles,
     // RESTRICTIVE policies and "RLS on, no policy" are all kept (see importPolicies).
@@ -134,10 +154,10 @@ function renderRpc(fn: IntrospectedFunction): string[] {
   const rawArgs = parseFunctionArgs(fn.args);
   const mappedArgs: Record<string, string> = {};
   let argsOk = true;
-  for (const [name, pgType] of Object.entries(rawArgs)) {
-    const m = mapScalar(pgType);
+  for (const [name, arg] of Object.entries(rawArgs)) {
+    const m = mapScalar(arg.type);
     if (!m) { argsOk = false; break; }
-    mappedArgs[name] = m;
+    mappedArgs[name] = arg.default !== undefined ? `{ type: '${m}', default: ${tsString(arg.default)} }` : `'${m}'`;
   }
 
   if (mappedReturn === null || !argsOk) {
@@ -147,7 +167,7 @@ function renderRpc(fn: IntrospectedFunction): string[] {
 
   const out: string[] = [`    // ${sig}`, `    ${fn.name}: rpc({`];
   if (Object.keys(mappedArgs).length > 0) {
-    const pairs = Object.entries(mappedArgs).map(([n, t]) => `${n}: '${t}'`);
+    const pairs = Object.entries(mappedArgs).map(([n, t]) => `${n}: ${t}`);
     out.push(`      args: { ${pairs.join(', ')} },`);
   }
   out.push(`      returns: '${mappedReturn}',`);
@@ -162,9 +182,9 @@ function renderRpc(fn: IntrospectedFunction): string[] {
 const PG_SCALAR: Record<string, string> = {
   uuid: 'uuid',
   text: 'text', varchar: 'text', 'character varying': 'text', char: 'text', character: 'text', bpchar: 'text', name: 'text', citext: 'text',
-  int2: 'int', int4: 'int', integer: 'int', smallint: 'int',
+  int2: 'smallint', int4: 'int', integer: 'int', smallint: 'smallint',
   int8: 'bigint', bigint: 'bigint',
-  numeric: 'float', decimal: 'float', real: 'float', 'double precision': 'float', float4: 'float', float8: 'float',
+  numeric: 'numeric', decimal: 'numeric', real: 'float', 'double precision': 'float', float4: 'float', float8: 'float',
   bool: 'boolean', boolean: 'boolean',
   json: 'json', jsonb: 'jsonb',
   date: 'date',
@@ -197,34 +217,46 @@ function mapReturnType(ret: string): string | null {
 }
 
 /**
- * Parse `pg_get_function_arguments` output into a { name: pgType } map.
- * Drops OUT params (they belong to the return), argument modes and DEFAULTs.
+ * Parse `pg_get_function_arguments` output into a { name: { type, default } } map.
+ * Drops OUT params (they belong to the return) and argument modes; keeps the
+ * DEFAULT expression verbatim (e.g. `20`, `'pending'::text`).
  */
-function parseFunctionArgs(argStr: string): Record<string, string> {
-  const args: Record<string, string> = {};
+export function parseFunctionArgs(argStr: string): Record<string, { type: string; default?: string }> {
+  const args: Record<string, { type: string; default?: string }> = {};
   if (!argStr.trim()) return args;
 
   for (const part of splitTopLevel(argStr)) {
     let s = part.trim();
     if (/^OUT\s+/i.test(s)) continue; // OUT param → part of the result
     s = s.replace(/^(IN|INOUT|VARIADIC)\s+/i, '');
-    s = s.replace(/\s+DEFAULT\s+.*$/is, '').trim();
+    let dflt: string | undefined;
+    const d = /\s+DEFAULT\s+([\s\S]*)$/i.exec(s);
+    if (d) {
+      dflt = d[1].trim();
+      s = s.slice(0, d.index).trim();
+    }
     const m = s.match(/^("?[\w]+"?)\s+(.+)$/);
     if (!m) continue;
     const name = m[1].replace(/"/g, '');
-    const type = m[2].trim().replace(/'/g, "\\'");
-    args[name] = type;
+    args[name] = { type: m[2].trim(), ...(dflt !== undefined ? { default: dflt } : {}) };
   }
   return args;
 }
 
-/** Split on commas that are not inside parentheses (for arg lists / DEFAULT exprs). */
+/** Split on commas outside parentheses and quotes (for arg lists / DEFAULT exprs). */
 function splitTopLevel(s: string): string[] {
   const parts: string[] = [];
   let depth = 0;
+  let quote: string | null = null;
   let cur = '';
   for (const ch of s) {
-    if (ch === '(') depth++;
+    if (quote) {
+      if (ch === quote) quote = null;
+      cur += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') quote = ch;
+    else if (ch === '(') depth++;
     else if (ch === ')') depth--;
     if (ch === ',' && depth === 0) {
       parts.push(cur);
@@ -458,4 +490,151 @@ function policyCommandToOp(cmd: string): string | null {
 
 function escapeTemplateString(str: string): string {
   return str.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
+}
+
+/** A TS string literal for `value` (single quotes unless the value has one). */
+function tsString(value: string): string {
+  if (!value.includes("'") && !value.includes('\\') && !value.includes('\n')) return `'${value}'`;
+  return JSON.stringify(value);
+}
+
+/**
+ * One column of an imported table. With a direct DB connection (formatted_type
+ * set) the type is exact (numeric(p,s), enums, arrays) and the DEFAULT is kept;
+ * the REST path only knows the coarse type.
+ */
+function renderColumn(t: IntrospectedTable, col: IntrospectedColumn): string[] {
+  const out: string[] = [];
+  const unique = t.uniqueColumns.includes(col.column_name);
+  if (col.formatted_type === undefined) {
+    const type = pgTypeToAccessNexus(col.udt_name, col.is_nullable === 'YES');
+    out.push(unique
+      ? `      ${col.column_name}: { type: '${type}', unique: true },`
+      : `      ${col.column_name}: '${type}',`);
+    return out;
+  }
+
+  let { type, notes } = introspectedColumnType({
+    udt_name: col.udt_name,
+    is_nullable: col.is_nullable,
+    formatted_type: col.formatted_type,
+    enum_values: col.enum_values,
+  });
+  const isPk = t.primaryKey === col.column_name;
+  let dflt: string | undefined = col.column_default ?? undefined;
+
+  if (col.generated) {
+    notes.push(`WARNING: generated column (GENERATED ALWAYS AS ${dflt ?? '...'} STORED) — not representable; imported as a plain column`);
+    dflt = undefined;
+  } else if (col.identity === 'a' || col.identity === 'd') {
+    const kind = col.identity === 'a' ? 'ALWAYS' : 'BY DEFAULT';
+    if (isPk && col.udt_name === 'int8') {
+      if (col.identity === 'd') notes.push('identity was GENERATED BY DEFAULT; AccessNexus creates GENERATED ALWAYS AS IDENTITY');
+    } else if (col.udt_name === 'int4' && col.is_nullable === 'NO') {
+      type = 'serial';
+      notes.push(`identity column (GENERATED ${kind}) imported as serial`);
+    } else {
+      notes.push(`WARNING: identity column (GENERATED ${kind}) not representable here; values must be supplied`);
+    }
+  } else if (dflt && /^nextval\(/i.test(dflt)) {
+    // serial / bigserial: the sequence belongs to the column.
+    if (col.udt_name === 'int4' && col.is_nullable === 'NO') {
+      type = 'serial';
+    } else if (!(isPk && col.udt_name === 'int8')) {
+      notes.push(`WARNING: default ${dflt} dropped (sequence not managed by AccessNexus)`);
+    }
+    dflt = undefined;
+  }
+
+  if (dflt !== undefined && col.enum_values) {
+    // 'todo'::task_status → 'todo' (AccessNexus names the enum type itself).
+    dflt = dflt.replace(/^('(?:[^']|'')*')::[\w."]+$/, '$1');
+  }
+
+  for (const note of notes) out.push(`      // ${col.column_name}: ${note}`);
+  const props: string[] = [`type: ${tsString(type)}`];
+  if (dflt !== undefined) props.push(`default: ${tsString(dflt)}`);
+  if (unique) props.push('unique: true');
+  out.push(props.length === 1
+    ? `      ${col.column_name}: ${tsString(type)},`
+    : `      ${col.column_name}: { ${props.join(', ')} },`);
+  return out;
+}
+
+const TG_ROW = 1;
+const TG_BEFORE = 2;
+const TG_INSERT = 4;
+const TG_DELETE = 8;
+const TG_UPDATE = 16;
+const TG_TRUNCATE = 32;
+const TG_INSTEAD = 64;
+
+const IDENTIFIER = /^_?[a-z][a-z0-9_]*$/;
+
+/**
+ * A table's user triggers as `trigger.custom()` entries. Triggers AccessNexus
+ * generates itself (`<prefix>_...`) are skipped; anything trigger.custom cannot
+ * express is kept as a WARNING comment with the original definition instead of
+ * being dropped silently.
+ */
+export function renderTriggers(t: Pick<IntrospectedTable, 'name' | 'triggers'>, policyPrefix: string): { lines: string[]; usesBuilder: boolean } {
+  const entries: string[] = [];
+  const comments: string[] = [];
+  const usedNames = new Set<string>();
+
+  for (const trg of t.triggers ?? []) {
+    if (trg.name.startsWith(`${policyPrefix}_`)) continue; // generated by AccessNexus
+    const skip = (why: string) => {
+      comments.push(`    // WARNING: trigger ${trg.name} not imported — ${why}.`);
+      comments.push(`    //   ${trg.definition}`);
+    };
+    const instead = (trg.tgtype & TG_INSTEAD) !== 0;
+    if (instead) { skip('INSTEAD OF triggers are not supported by trigger.custom'); continue; }
+    if (trg.language !== 'plpgsql') { skip(`its function is ${trg.language}, trigger.custom emits plpgsql`); continue; }
+    if (trg.nargs > 0) { skip('it passes arguments to its function (TG_ARGV), which trigger.custom cannot'); continue; }
+    if (trg.enabled === 'D') { skip('it is DISABLED in the database (importing would enable it)'); continue; }
+
+    const timing = (trg.tgtype & TG_BEFORE) !== 0 ? 'before' : 'after';
+    const ops: string[] = [];
+    if (trg.tgtype & TG_INSERT) ops.push('insert');
+    if (trg.tgtype & TG_UPDATE) ops.push('update');
+    if (trg.tgtype & TG_DELETE) ops.push('delete');
+    if (ops.length === 0) { skip('TRUNCATE-only triggers are not supported by trigger.custom'); continue; }
+    const forEach = (trg.tgtype & TG_ROW) !== 0 ? 'row' : 'statement';
+
+    const notes: string[] = [];
+    let when = /\bWHEN \(([\s\S]*)\) EXECUTE (?:FUNCTION|PROCEDURE)\b/.exec(trg.definition)?.[1];
+    if (trg.tgtype & TG_TRUNCATE) notes.push('WARNING: the TRUNCATE event is not supported and was dropped');
+    if (trg.updateColumns.length > 0) {
+      const onlyUpdate = ops.length === 1 && forEach === 'row';
+      if (onlyUpdate && !when) {
+        when = trg.updateColumns.map((c) => `OLD.${c} IS DISTINCT FROM NEW.${c}`).join(' OR ');
+        notes.push(`was UPDATE OF ${trg.updateColumns.join(', ')}; imported as a WHEN on those columns changing`);
+      } else {
+        notes.push(`WARNING: was UPDATE OF ${trg.updateColumns.join(', ')}; now fires on every UPDATE`);
+      }
+    }
+    if (trg.isConstraint) notes.push('WARNING: was a CONSTRAINT trigger (deferrable); imported as a regular trigger');
+
+    let name = trg.name.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+(?=_)/, '');
+    if (!IDENTIFIER.test(name)) name = `trg_${name.replace(/^_+/, '')}`;
+    while (usedNames.has(name)) name = `${name}_2`;
+    usedNames.add(name);
+
+    entries.push(`      // Imported from trigger ${trg.name} (function ${trg.functionSchema}.${trg.functionName}). push creates`);
+    entries.push(`      // ${policyPrefix}_${t.name}_${name}: drop the original after pushing to this database, or both fire.`);
+    for (const note of notes) entries.push(`      // ${note}`);
+    entries.push('      trigger.custom({');
+    entries.push(`        name: '${name}',`);
+    entries.push(`        events: [${ops.map((op) => `'${timing}_${op}'`).join(', ')}],`);
+    if (forEach === 'statement') entries.push(`        forEach: 'statement',`);
+    if (when) entries.push(`        when: ${tsString(when)},`);
+    if (trg.security === 'definer') entries.push(`        security: 'definer',`);
+    entries.push(`        functionBody: \`${escapeTemplateString(trg.body.trim())}\`,`);
+    entries.push('      }),');
+  }
+
+  const lines = [...comments];
+  if (entries.length > 0) lines.push('    triggers: [', ...entries, '    ],');
+  return { lines, usesBuilder: entries.length > 0 };
 }

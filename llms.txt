@@ -74,7 +74,7 @@ empty folder `init --yes` first creates a minimal `package.json` (`"type": "modu
 
 Columns are type strings; append `?` for nullable. The object form adds `default`,
 `unique`, `check`, `references`, `onDelete`. Table names and columns are lowercase snake_case
-and cannot be reserved SQL keywords (`order`, `user`, `group`, `limit`, ... → `orders`, `user_id`).
+(one leading `_` is allowed: `_internal`, `_pix_crc16`) and cannot be reserved SQL keywords (`order`, `user`, `group`, `limit`, ... → `orders`, `user_id`).
 
 `default` and `check` are RAW SQL, emitted verbatim: `default: 'now()'`, `default: '0'`,
 `default: 'false'`. A string or enum literal needs its own single quotes inside the JS string:
@@ -135,11 +135,14 @@ export default defineSchema({
 });
 ```
 
-Column types: `uuid text varchar int smallint bigint serial float decimal boolean json jsonb
-date timestamp timestamptz time text[] int[] uuid[]` and `"enum('a','b')"`; add `?` for NULL.
+Column types: `uuid text varchar int smallint bigint serial float decimal numeric boolean json
+jsonb date timestamp timestamptz time text[] int[] uuid[]`, `numeric(p)` / `numeric(p,s)` (e.g.
+`'numeric(10,2)'`, no space) and `"enum('a','b')"`; add `?` for NULL. `float` is
+`DOUBLE PRECISION`; use `numeric(p,s)` for money.
 A `uuid` primary key defaults to `gen_random_uuid()`; a `bigint` one becomes an identity.
 
-Table options: `columns` (required), `primaryKey`, `references` (`column: 'table.column'`
+Table options: `columns` (required), `primaryKey`, `compositePrimaryKey` (`['org_id', 'user_id']`
+→ `PRIMARY KEY (org_id, user_id)`, instead of `primaryKey`; not with `softDelete`), `references` (`column: 'table.column'`
 or `'schema.table.column'`, e.g. `'auth.users.id'`), `onDelete` (per referencing column:
 `'cascade' | 'set null' | 'restrict' | 'no action'`), `policies` (`select`/`insert`/`update`/
 `delete`), `triggers`, `indexes` (`{ columns, unique?, name? }`), `softDelete` (column; DELETE
@@ -380,6 +383,10 @@ Database mode. `security: 'definer'` bypasses RLS — check `(SELECT auth.uid())
 `anon` and grants it to `authenticated` and `service_role`; pass `allowAnon: true` to keep
 anon. Invoker RPCs keep Supabase's default (callable by `anon` and `authenticated`; RLS
 applies inside). `validate` warns `UNWRAPPED_AUTH_CALL` for a bare `auth.uid()` in a body.
+An argument is a type or `{ type, default }` with a raw SQL default
+(`args: { p_limit: { type: 'int', default: '20' } }` → `p_limit INTEGER DEFAULT 20`; callers may
+omit it, the client type marks it optional). After one argument with a default, every following
+one needs a default too (`INVALID_DEFAULT`).
 
 ```ts
 import { defineSchema, policy, rpc, table } from 'accessnexus';
@@ -546,6 +553,17 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   managed table has a policy not named `<prefix>_<table>_<op>`; once the imported rules are
   reviewed, ask the user, then `push --replace-foreign-policies` drops them in the push
   transaction.
+  `--db-url` also imports exact column types (`numeric(10,2)`, enums as `enum(...)`, `text[]`
+  / `int[]` / `uuid[]`), column defaults, composite primary keys (`compositePrimaryKey`),
+  multi-column UNIQUE (as unique `indexes`), FKs to other schemas (`'auth.users.id'`) with their
+  `ON DELETE`, RPC parameter defaults, and user triggers as `trigger.custom` (timing, events,
+  `FOR EACH`, `WHEN`, `SECURITY DEFINER` kept; `UPDATE OF cols` becomes a WHEN on those columns
+  changing). What cannot be expressed is left as a `// WARNING:` comment in the schema, never
+  dropped silently: triggers with arguments, disabled, INSTEAD OF / TRUNCATE-only or non-plpgsql
+  ones; array/other types with no AccessNexus equivalent (imported as `text`); generated columns;
+  multi-column FKs. Imported triggers are recreated as `<prefix>_<table>_<name>`: after `push`
+  to the same database the original trigger still exists and both fire — ask the user before
+  dropping the original. Enum columns get AccessNexus's own enum type (`<table>_<column>_enum`).
 - `validate` — load + check the schema, write nothing. Flags: `--schema <path>`.
 - `generate` — write migrations, policies, triggers, RPCs and the SDK. Files that only differ
   in the `-- Generated at:` line are left untouched. Flags: `--schema`, `--output <dir>` (every
@@ -1070,6 +1088,8 @@ export default defineSchema({
   `UNKNOWN_POLICY_OPERATION` (`read`/`create` used as policy keys), `EMPTY_COMBINATOR`,
   `MISSING_COLUMNS`, `AUDIT_TABLE_MISMATCH`, `RPC_IN_TABLES`, `INVALID_TRIGGER`,
   `INVALID_REFERENCE`, `INVALID_IDENTIFIER`, `RESERVED_IDENTIFIER` (rename `order` → `orders`),
+  `INVALID_PRIMARY_KEY` (`compositePrimaryKey` with fewer than two columns, together with
+  `primaryKey`, or with `softDelete`),
   `UNKNOWN_TABLE_KEY` (typo such as `polices:`, or tables nested under a `tables:` key —
   pass them directly to `defineSchema`), `INVALID_ENUM_VALUE` (a `belongsTo` `where` value
   that is not in the membership column's enum, e.g. a misspelled role).
@@ -1134,7 +1154,8 @@ export default defineSchema({
 - Migrations are generated from snapshot diffs; renames are detected heuristically — read
   `diff` output before pushing destructive changes (`-- Destructive:` comments).
 - `push` applies files one by one (each in its own transaction), not as a single transaction.
-- Identifiers are emitted unquoted: lowercase snake_case, no reserved keywords.
+- Identifiers are emitted unquoted: lowercase snake_case (one optional leading `_`), no reserved
+  keywords.
 - RLS is row-level: it cannot restrict which columns an UPDATE changes — use
   `trigger.lockColumns` (see the recipe).
 - Foreign keys are `ON DELETE NO ACTION` unless `onDelete` says otherwise.

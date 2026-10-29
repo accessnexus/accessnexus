@@ -19,6 +19,9 @@ export type ScalarType =
   | 'serial'
   | 'float'
   | 'decimal'
+  | 'numeric'
+  | `numeric(${number})`
+  | `numeric(${number},${number})`
   | 'boolean'
   | 'json'
   | 'jsonb'
@@ -46,6 +49,8 @@ export type ColumnTSType<T extends ColumnType> =
   T extends 'uuid?' | 'text?' | 'varchar?' | 'date?' | 'timestamp?' | 'timestamptz?' | 'time?' ? string | null :
   T extends 'int' | 'smallint' | 'bigint' | 'serial' | 'float' | 'decimal' ? number :
   T extends 'int?' | 'smallint?' | 'bigint?' | 'serial?' | 'float?' | 'decimal?' ? number | null :
+  T extends 'numeric' | `numeric(${string})` ? number :
+  T extends 'numeric?' | `numeric(${string})?` ? number | null :
   T extends 'boolean' ? boolean :
   T extends 'boolean?' ? boolean | null :
   T extends 'json' | 'jsonb' ? Record<string, unknown> :

@@ -28,7 +28,7 @@ As RPCs vão no segundo argumento do [`defineSchema`](/pt/api/schema#defineschem
 
 | Opção | Tipo | Padrão | Descrição |
 | --- | --- | --- | --- |
-| `args` | `Record<string, ColumnType>` | `{}` | Nome do argumento para o tipo, na ordem de declaração. Tipos como em [tipos de coluna](/pt/api/schema#column-types); um `?` no final só afeta o tipo TS. |
+| `args` | `Record<string, ColumnType \| { type, default? }>` | `{}` | Nome do argumento para o tipo, na ordem de declaração. Tipos como em [tipos de coluna](/pt/api/schema#column-types); um `?` no final só afeta o tipo TS. `{ type: 'int', default: '20' }` emite `DEFAULT 20` (SQL cru) e torna o argumento opcional no client; todo argumento depois de um com default também precisa de um. |
 | `returns` | `ColumnType \| 'void'` | `'void'` | Tipo de retorno. Omitido: `RETURNS VOID` no SQL, `unknown` no SDK. |
 | `body` | `string` | `undefined` | Corpo da função, sem o invólucro `CREATE FUNCTION`. Sem ele, nenhum SQL é gerado. |
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | `LANGUAGE`. |
