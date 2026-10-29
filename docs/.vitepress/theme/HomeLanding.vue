@@ -18,8 +18,22 @@ const COPY = {
     start: "Get started",
     why: "Why AccessNexus",
     copied: "Copied",
-    codeTitle: "One rule in TypeScript. Correct SQL in Postgres.",
-    codeLead: "Auth calls wrapped for the planner, FORCE RLS, separate USING and WITH CHECK — every time, for every table.",
+    codeTitle: "Hand-written RLS vs. AccessNexus.",
+    codeLead: "The same table, the same intent. One version has four security bugs that only show up in production.",
+    before: "by hand",
+    after: "AccessNexus",
+    drag: "Drag to compare",
+    bugs: [
+      "no FORCE: the table owner bypasses every policy",
+      "bare auth.uid() is re-evaluated for every row",
+      "anyone can insert notes as any user",
+      "no WITH CHECK: a row can be handed to another user",
+    ],
+    goods: [
+      "ENABLE + FORCE RLS, (SELECT auth.uid()) evaluated once",
+      "insert and update pinned to the signed-in user",
+      "no delete rule: deny-all, not forgotten",
+    ],
     bento: [
       { k: "secure", t: "Secure by default", d: "ENABLE + FORCE RLS everywhere. No rule means deny-all. Removing a rule revokes it." },
       { k: "tenant", t: "Multi-tenant RBAC", d: "Org and team roles become policies through recursion-safe SECURITY DEFINER helpers. No self-promotion paths." },
@@ -42,8 +56,22 @@ const COPY = {
     start: "Começar",
     why: "Por que AccessNexus",
     copied: "Copiado",
-    codeTitle: "Uma regra em TypeScript. SQL correto no Postgres.",
-    codeLead: "Chamadas de auth otimizadas para o planner, FORCE RLS, USING e WITH CHECK separados — sempre, em toda tabela.",
+    codeTitle: "RLS à mão vs. AccessNexus.",
+    codeLead: "A mesma tabela, a mesma intenção. Uma das versões tem quatro bugs de segurança que só aparecem em produção.",
+    before: "à mão",
+    after: "AccessNexus",
+    drag: "Arraste para comparar",
+    bugs: [
+      "sem FORCE: o dono da tabela ignora todas as policies",
+      "auth.uid() solto é reavaliado a cada linha",
+      "qualquer um insere notas como qualquer usuário",
+      "sem WITH CHECK: a linha pode ser passada para outro usuário",
+    ],
+    goods: [
+      "ENABLE + FORCE RLS, (SELECT auth.uid()) avaliado uma vez",
+      "insert e update presos ao usuário logado",
+      "sem regra de delete: tudo negado, não esquecido",
+    ],
     bento: [
       { k: "secure", t: "Seguro por padrão", d: "ENABLE + FORCE RLS em tudo. Sem regra, tudo negado. Remover uma regra revoga o acesso." },
       { k: "tenant", t: "RBAC multi-tenant", d: "Papéis de org e time viram policies com helpers SECURITY DEFINER sem recursão. Sem caminho para se autopromover." },
@@ -62,6 +90,35 @@ const COPY = {
 };
 
 const t = computed(() => (pt.value ? COPY.pt : COPY.en));
+
+/** Lucide-style icon paths per bento cell. */
+const ICONS: Record<string, string[]> = {
+  secure: ["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z", "m9 12 2 2 4-4"],
+  tenant: ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 7a4 4 0 1 0 0 .01", "M22 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"],
+  agents: ["m4 17 6-6-6-6", "M12 19h8"],
+  validate: ["M21.8 10A10 10 0 1 1 17 3.34", "m9 11 3 3L22 4"],
+  fast: ["M13 2 3 14h9l-1 8 10-12h-9l1-8z"],
+  drift: ["M6 3v12", "M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 9a9 9 0 0 1-9 9"],
+};
+
+// Before/after comparison: drag anywhere on the panel, or use the keyboard via the range input.
+const pos = ref(50);
+const compare = ref<HTMLElement | null>(null);
+function moveTo(clientX: number) {
+  const box = compare.value?.getBoundingClientRect();
+  if (!box) return;
+  pos.value = Math.min(100, Math.max(0, ((clientX - box.left) / box.width) * 100));
+}
+function startDrag(event: PointerEvent) {
+  moveTo(event.clientX);
+  const move = (e: PointerEvent) => moveTo(e.clientX);
+  const stop = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", stop);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", stop);
+}
 
 const INSTALL = "npx accessnexus init --yes";
 const copied = ref(false);
@@ -106,13 +163,35 @@ async function copy() {
       </div>
     </section>
 
-    <!-- Schema → SQL -->
+    <!-- Before / after -->
     <section class="block">
       <h2>{{ t.codeTitle }}</h2>
       <p class="sub">{{ t.codeLead }}</p>
-      <div class="split">
-        <div class="pane">
-          <div class="pane-head"><span class="dots"><i /><i /><i /></span>accessnexus.schema.ts</div>
+      <div
+        ref="compare"
+        class="compare"
+        :style="{ '--pos': pos + '%' }"
+        @pointerdown="startDrag"
+      >
+        <div class="pane before">
+          <div class="pane-head"><span class="dots"><i /><i /><i /></span>migrations/0042_notes_rls.sql<span class="tag bad">{{ t.before }}</span></div>
+<pre><code><span class="c-k">alter table</span> notes <span class="c-k">enable row level security</span>;
+<span class="c-bad">-- ✗ {{ t.bugs[0] }}</span>
+
+<span class="c-k">create policy</span> <span class="c-s">"read own"</span> <span class="c-k">on</span> notes <span class="c-k">for select</span>
+  <span class="c-k">using</span> (auth.<span class="c-f">uid</span>() = user_id);
+<span class="c-bad">-- ✗ {{ t.bugs[1] }}</span>
+
+<span class="c-k">create policy</span> <span class="c-s">"insert own"</span> <span class="c-k">on</span> notes <span class="c-k">for insert</span>
+  <span class="c-k">with check</span> (<span class="c-k">true</span>);
+<span class="c-bad">-- ✗ {{ t.bugs[2] }}</span>
+
+<span class="c-k">create policy</span> <span class="c-s">"edit own"</span> <span class="c-k">on</span> notes <span class="c-k">for update</span>
+  <span class="c-k">using</span> (auth.<span class="c-f">uid</span>() = user_id);
+<span class="c-bad">-- ✗ {{ t.bugs[3] }}</span></code></pre>
+        </div>
+        <div class="pane after">
+          <div class="pane-head"><span class="dots"><i /><i /><i /></span>accessnexus.schema.ts<span class="tag good">{{ t.after }}</span></div>
 <pre><code><span class="c-k">import</span> { defineSchema, policy, table } <span class="c-k">from</span> <span class="c-s">'accessnexus'</span>;
 
 <span class="c-k">export default</span> defineSchema({
@@ -122,30 +201,37 @@ async function copy() {
     policies: {
       select: policy.<span class="c-f">isOwner</span>(<span class="c-s">'user_id'</span>),
       insert: policy.<span class="c-f">isOwner</span>(<span class="c-s">'user_id'</span>),
+      update: policy.<span class="c-f">isOwner</span>(<span class="c-s">'user_id'</span>),
     },
   }),
-});</code></pre>
+});
+<span class="c-ok">// ✓ {{ t.goods[0] }}</span>
+<span class="c-ok">// ✓ {{ t.goods[1] }}</span>
+<span class="c-ok">// ✓ {{ t.goods[2] }}</span></code></pre>
         </div>
-        <div class="pane">
-          <div class="pane-head"><span class="dots"><i /><i /><i /></span>generated/policies/notes_rls.sql</div>
-<pre><code><span class="c-k">ALTER TABLE</span> notes <span class="c-k">ENABLE ROW LEVEL SECURITY</span>;
-<span class="c-k">ALTER TABLE</span> notes <span class="c-k">FORCE ROW LEVEL SECURITY</span>;
-
-<span class="c-k">CREATE POLICY</span> <span class="c-s">"accessnexus_notes_select"</span>
-  <span class="c-k">ON</span> notes <span class="c-k">FOR SELECT TO</span> authenticated
-  <span class="c-k">USING</span> ((<span class="c-k">SELECT</span> auth.<span class="c-f">uid</span>()) = user_id);
-
-<span class="c-k">CREATE POLICY</span> <span class="c-s">"accessnexus_notes_insert"</span>
-  <span class="c-k">ON</span> notes <span class="c-k">FOR INSERT TO</span> authenticated
-  <span class="c-k">WITH CHECK</span> ((<span class="c-k">SELECT</span> auth.<span class="c-f">uid</span>()) = user_id);</code></pre>
-        </div>
+        <div class="handle" aria-hidden="true"><span class="knob">⟷</span></div>
+        <input
+          class="range"
+          type="range"
+          min="0"
+          max="100"
+          :value="pos"
+          :aria-label="t.drag"
+          @input="pos = Number(($event.target as HTMLInputElement).value)"
+        />
       </div>
+      <p class="hint">{{ t.drag }}</p>
     </section>
 
     <!-- Bento -->
     <section class="block">
       <div class="bento">
         <div v-for="(item, i) in t.bento" :key="item.k" class="cell" :class="{ wide: i === 0 || i === 3 || i === 4 }">
+          <span class="icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path v-for="d in ICONS[item.k]" :key="d" :d="d" />
+            </svg>
+          </span>
           <h3>{{ item.t }}</h3>
           <p>{{ item.d }}</p>
         </div>
@@ -502,6 +588,163 @@ pre code {
 .dark .c-f { color: #a5b4fc; }
 .dark .c-ok { color: #34d399; }
 
+.compare {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--pos) 1fr;
+  margin-top: 48px;
+  border: 1px solid var(--l-line);
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: ew-resize;
+  user-select: none;
+  touch-action: pan-y;
+}
+
+.compare .pane {
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+}
+
+.compare .pane pre {
+  overflow: hidden;
+}
+
+.compare .pane-head {
+  white-space: nowrap;
+}
+
+.compare .after {
+  background:
+    radial-gradient(ellipse 80% 60% at 100% 0%, rgba(16, 185, 129, 0.08), transparent),
+    var(--l-code);
+}
+
+.compare .before {
+  background:
+    radial-gradient(ellipse 80% 60% at 0% 0%, rgba(239, 68, 68, 0.07), transparent),
+    var(--l-code);
+}
+
+.compare .pane-head {
+  position: relative;
+}
+
+.tag {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: "Geist", var(--vp-font-family-base);
+}
+
+.tag.bad {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.tag.good {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--pos);
+  width: 2px;
+  transform: translateX(-1px);
+  background: linear-gradient(180deg, #6366f1, #06b6d4);
+  box-shadow:
+    0 0 8px rgba(99, 102, 241, 0.9),
+    0 0 24px rgba(6, 182, 212, 0.6);
+  pointer-events: none;
+}
+
+.knob {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  font-size: 16px;
+  color: #fff;
+  background: linear-gradient(135deg, #6366f1, #06b6d4);
+  box-shadow:
+    0 0 0 4px rgba(99, 102, 241, 0.18),
+    0 0 18px rgba(99, 102, 241, 0.8),
+    0 0 40px rgba(6, 182, 212, 0.5);
+}
+
+.range {
+  position: absolute;
+  inset: auto 0 0;
+  width: 100%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.range:focus-visible + * {
+  outline: none;
+}
+
+.compare:has(.range:focus-visible) .knob {
+  outline: 2px solid var(--l-fg);
+  outline-offset: 3px;
+}
+
+.hint {
+  margin: 12px 0 0;
+  text-align: center;
+  font-size: 13px;
+  color: var(--l-muted);
+}
+
+.c-bad { color: #ef4444; }
+.dark .c-bad { color: #f87171; }
+
+.icon {
+  display: inline-grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 18px;
+  border: 1px solid var(--l-line);
+  border-radius: 10px;
+  color: #6366f1;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(6, 182, 212, 0.08));
+  transition: box-shadow 0.3s, color 0.3s;
+}
+
+.icon svg {
+  width: 20px;
+  height: 20px;
+  filter: drop-shadow(0 0 6px rgba(99, 102, 241, 0.55));
+}
+
+.dark .icon {
+  color: #a5b4fc;
+}
+
+.dark .icon svg {
+  filter: drop-shadow(0 0 6px rgba(129, 140, 248, 0.9)) drop-shadow(0 0 14px rgba(6, 182, 212, 0.45));
+}
+
+.cell:hover .icon {
+  color: #06b6d4;
+  box-shadow:
+    0 0 14px rgba(99, 102, 241, 0.45),
+    0 0 32px rgba(6, 182, 212, 0.25);
+}
+
 .bento {
   display: grid;
   grid-template-columns: 1fr;
@@ -523,13 +766,36 @@ pre code {
 }
 
 .cell {
+  position: relative;
   padding: 32px;
   background: var(--l-card);
   transition: background 0.2s;
 }
 
+/* Neon edge that lights up on hover. */
+.cell::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, #6366f1, transparent 40%, transparent 60%, #06b6d4);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+}
+
 .cell:hover {
-  background: var(--l-code);
+  background:
+    radial-gradient(ellipse 70% 90% at 0% 0%, rgba(99, 102, 241, 0.08), transparent),
+    var(--l-code);
+}
+
+.cell:hover::after {
+  opacity: 1;
 }
 
 .cell h3 {
