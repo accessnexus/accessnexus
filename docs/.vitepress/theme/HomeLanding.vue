@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { useData, withBase } from "vitepress";
 import HeroRls from "./HeroRls.vue";
 
@@ -21,7 +21,6 @@ const COPY = {
     codeTitle: "One rule in TypeScript. Correct SQL in Postgres.",
     codeLead: "Write the intent. AccessNexus writes the SQL — and gets right the details that break in production.",
     after: "generated SQL",
-    drag: "Drag to compare",
     goods: [
       "ENABLE + FORCE RLS: not even the table owner skips it",
       "(SELECT auth.uid()) is evaluated once per query, not per row",
@@ -53,7 +52,6 @@ const COPY = {
     codeTitle: "Uma regra em TypeScript. SQL correto no Postgres.",
     codeLead: "Escreva a intenção. O AccessNexus escreve o SQL — e acerta os detalhes que quebram em produção.",
     after: "SQL gerado",
-    drag: "Arraste para comparar",
     goods: [
       "ENABLE + FORCE RLS: nem o dono da tabela escapa",
       "(SELECT auth.uid()) avaliado uma vez por consulta, não por linha",
@@ -90,9 +88,9 @@ const ICONS: Record<string, string[]> = {
 };
 
 type Tok = { t: string; c?: string };
-const K = "c-k", S = "c-s", F = "c-f", B = "c-bad";
+const K = "c-k", S = "c-s", F = "c-f";
 
-/** The schema typed live in the "after" pane. */
+/** The schema shown next to the SQL it generates. */
 const TS: Tok[] = [
   { t: "import", c: K }, { t: " { defineSchema, policy, table } " }, { t: "from", c: K }, { t: " " }, { t: "'accessnexus'", c: S }, { t: ";\n\n" },
   { t: "export default", c: K }, { t: " defineSchema({\n  notes: table({\n    columns: { id: " }, { t: "'uuid'", c: S },
@@ -102,86 +100,24 @@ const TS: Tok[] = [
   { t: "),\n      update: policy." }, { t: "isOwner", c: F }, { t: "(" }, { t: "'user_id'", c: S },
   { t: "),\n    },\n  }),\n});" },
 ];
-const TOTAL = TS.reduce((n, tok) => n + tok.t.length, 0);
 
 /** What `generate` writes for that schema (trimmed to the policies). */
 const SQL: Tok[][] = [
   [{ t: "ALTER TABLE", c: K }, { t: " notes " }, { t: "ENABLE ROW LEVEL SECURITY", c: K }, { t: ";" }],
   [{ t: "ALTER TABLE", c: K }, { t: " notes " }, { t: "FORCE ROW LEVEL SECURITY", c: K }, { t: ";" }],
-  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_select"', c: S }, { t: " " }, { t: "ON", c: K }, { t: " notes " }, { t: "FOR SELECT TO", c: K }, { t: " authenticated" }],
+  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_select"', c: S }],
+  [{ t: "  ON", c: K }, { t: " notes " }, { t: "FOR SELECT TO", c: K }, { t: " authenticated" }],
   [{ t: "  USING", c: K }, { t: " ((" }, { t: "SELECT", c: K }, { t: " auth." }, { t: "uid", c: F }, { t: "()) = user_id);" }],
-  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_insert"', c: S }, { t: " " }, { t: "ON", c: K }, { t: " notes " }, { t: "FOR INSERT TO", c: K }, { t: " authenticated" }],
+  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_insert"', c: S }],
+  [{ t: "  ON", c: K }, { t: " notes " }, { t: "FOR INSERT TO", c: K }, { t: " authenticated" }],
   [{ t: "  WITH CHECK", c: K }, { t: " ((" }, { t: "SELECT", c: K }, { t: " auth." }, { t: "uid", c: F }, { t: "()) = user_id);" }],
-  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_update"', c: S }, { t: " " }, { t: "ON", c: K }, { t: " notes " }, { t: "FOR UPDATE TO", c: K }, { t: " authenticated" }],
+  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_update"', c: S }],
+  [{ t: "  ON", c: K }, { t: " notes " }, { t: "FOR UPDATE TO", c: K }, { t: " authenticated" }],
   [{ t: "  USING", c: K }, { t: " ((" }, { t: "SELECT", c: K }, { t: " auth." }, { t: "uid", c: F }, { t: "()) = user_id)" }],
   [{ t: "  WITH CHECK", c: K }, { t: " ((" }, { t: "SELECT", c: K }, { t: " auth." }, { t: "uid", c: F }, { t: "()) = user_id);" }],
   [{ t: "DROP POLICY IF EXISTS", c: K }, { t: " " }, { t: '"accessnexus_notes_delete"', c: S }, { t: " " }, { t: "ON", c: K }, { t: " notes;" }],
 ];
-void B;
 
-const typed = ref(TOTAL);
-const shownSql = ref(SQL.length);
-const typing = computed(() => typed.value < TOTAL);
-const typedTokens = computed(() => {
-  let left = typed.value;
-  const out: Tok[] = [];
-  for (const tok of TS) {
-    if (left <= 0) break;
-    out.push({ t: tok.t.slice(0, left), c: tok.c });
-    left -= tok.t.length;
-  }
-  return out;
-});
-
-/** Type the schema, run "generate", then reveal the SQL — once, when the panel scrolls into view. */
-function play() {
-  typed.value = 0;
-  shownSql.value = 0;
-  const typer = setInterval(() => {
-    typed.value = Math.min(TOTAL, typed.value + 3);
-    if (typed.value >= TOTAL) {
-      clearInterval(typer);
-      setTimeout(() => {
-        const reveal = setInterval(() => {
-          shownSql.value += 1;
-          if (shownSql.value >= SQL.length) clearInterval(reveal);
-        }, 110);
-      }, 450);
-    }
-  }, 18);
-}
-
-onMounted(() => {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !compare.value) return;
-  typed.value = 0;
-  shownSql.value = 0;
-  const io = new IntersectionObserver((entries) => {
-    if (entries.some((e) => e.isIntersecting)) {
-      io.disconnect();
-      play();
-    }
-  }, { threshold: 0.35 });
-  io.observe(compare.value);
-});
-
-// Before/after comparison: drag anywhere on the panel, or use the keyboard via the range input.
-const pos = ref(50);
-const compare = ref<HTMLElement | null>(null);
-function moveTo(clientX: number) {
-  const box = compare.value?.getBoundingClientRect();
-  if (!box) return;
-  pos.value = Math.min(100, Math.max(0, ((clientX - box.left) / box.width) * 100));
-}
-function startDrag(event: PointerEvent) {
-  moveTo(event.clientX);
-  const move = (e: PointerEvent) => moveTo(e.clientX);
-  const stop = () => {
-    window.removeEventListener("pointermove", move);
-    window.removeEventListener("pointerup", stop);
-  };
-  window.addEventListener("pointermove", move);
-  window.addEventListener("pointerup", stop);
-}
 
 const INSTALL = "npx accessnexus init --yes";
 const copied = ref(false);
@@ -227,43 +163,23 @@ async function copy() {
     </section>
 
     <!-- Before / after -->
-    <section class="block versus">
-      <div class="versus-copy">
-        <h2>{{ t.codeTitle }}</h2>
-        <p class="sub left">{{ t.codeLead }}</p>
-        <ul class="bug-list">
-          <li v-for="g in t.goods" :key="g"><span class="v">✓</span>{{ g }}</li>
-        </ul>
-        <p class="hint left">↔ {{ t.drag }}</p>
-      </div>
-      <div class="versus-demo">
-      <div
-        ref="compare"
-        class="compare"
-        :style="{ '--pos': pos + '%' }"
-        @pointerdown="startDrag"
-      >
+    <section class="block">
+      <h2>{{ t.codeTitle }}</h2>
+      <p class="sub">{{ t.codeLead }}</p>
+      <ul class="good-list">
+        <li v-for="g in t.goods" :key="g"><span class="v">✓</span>{{ g }}</li>
+      </ul>
+      <div class="split">
         <div class="pane before">
           <div class="pane-head"><span class="dots"><i /><i /><i /></span>accessnexus.schema.ts<span class="tag ts">TypeScript</span></div>
-<pre><code><template v-for="(tok, i) in typedTokens" :key="i"><span :class="tok.c">{{ tok.t }}</span></template><span v-if="typing" class="caret">▍</span></code></pre>
+<pre><code><template v-for="(tok, i) in TS" :key="i"><span :class="tok.c">{{ tok.t }}</span></template></code></pre>
         </div>
         <div class="pane after">
           <div class="pane-head"><span class="dots"><i /><i /><i /></span>generated/policies/notes_rls.sql<span class="tag good">{{ t.after }}</span></div>
-          <div class="gen-cmd"><span class="c-p">$</span> npx accessnexus generate <span v-if="shownSql > 0" class="c-ok">✓</span></div>
-<pre><code><template v-for="(line, i) in SQL" :key="i"><span v-if="i < shownSql" class="sql-line"><template v-for="(tok, j) in line" :key="j"><span :class="tok.c">{{ tok.t }}</span></template>
+          <div class="gen-cmd"><span class="c-p">$</span> npx accessnexus generate <span class="c-ok">✓</span></div>
+<pre><code><template v-for="(line, i) in SQL" :key="i"><span class="sql-line"><template v-for="(tok, j) in line" :key="j"><span :class="tok.c">{{ tok.t }}</span></template>
 </span></template></code></pre>
         </div>
-        <div class="handle" aria-hidden="true"><span class="knob">⟷</span></div>
-        <input
-          class="range"
-          type="range"
-          min="0"
-          max="100"
-          :value="pos"
-          :aria-label="t.drag"
-          @input="pos = Number(($event.target as HTMLInputElement).value)"
-        />
-      </div>
       </div>
     </section>
 
@@ -561,6 +477,14 @@ h2 {
   text-align: left;
 }
 
+.split .pane-head .tag {
+  margin-left: auto;
+}
+
+.split .gen-cmd {
+  padding-top: 14px;
+}
+
 .split {
   display: grid;
   grid-template-columns: 1fr;
@@ -634,12 +558,6 @@ pre code {
 .dark .c-f { color: #a5b4fc; }
 .dark .c-ok { color: #34d399; }
 
-.versus {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 40px;
-  align-items: center;
-}
 
 .versus h2 {
   text-align: left;
@@ -651,25 +569,28 @@ pre code {
   }
 }
 
-.versus-demo {
-  min-width: 0;
-}
 
-.bug-list {
-  list-style: none;
-  margin: 24px 0 0;
+
+
+.good-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px 28px;
+  max-width: 900px;
+  margin: 28px auto 0;
   padding: 0;
-  font-size: 15px;
-  line-height: 1.5;
+  list-style: none;
+  font-size: 14px;
   color: var(--l-muted);
 }
 
-.bug-list li {
+.good-list li {
   display: flex;
-  gap: 10px;
-  margin-top: 10px;
+  gap: 8px;
 }
 
+.good-list .v,
 .bug-list .v {
   color: #10b981;
   text-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
@@ -680,20 +601,8 @@ pre code {
   background: rgba(99, 102, 241, 0.12);
 }
 
-.hint.left {
-  text-align: left;
-  margin-top: 24px;
-}
 
-.caret {
-  color: #06b6d4;
-  text-shadow: 0 0 8px rgba(6, 182, 212, 0.9);
-  animation: blink 1s steps(1) infinite;
-}
 
-@keyframes blink {
-  50% { opacity: 0; }
-}
 
 .gen {
   border-top: 1px dashed var(--l-line);
@@ -725,53 +634,13 @@ pre code {
   from { text-shadow: 0 0 10px rgba(16, 185, 129, 0.9); }
 }
 
-.compare .pane pre {
-  font-size: 11.5px;
-  padding: 14px 16px;
-}
 
-.compare {
-  position: relative;
-  display: grid;
-  grid-template-columns: var(--pos) 1fr;
-  border: 1px solid var(--l-line);
-  border-radius: 12px;
-  overflow: hidden;
-  cursor: ew-resize;
-  user-select: none;
-  touch-action: pan-y;
-}
 
-.compare .pane {
-  min-width: 0;
-  overflow: hidden;
-  border: 0;
-  border-radius: 0;
-}
 
-.compare .pane pre {
-  overflow: hidden;
-}
 
-.compare .pane-head {
-  white-space: nowrap;
-}
 
-.compare .after {
-  background:
-    radial-gradient(ellipse 80% 60% at 100% 0%, rgba(16, 185, 129, 0.08), transparent),
-    var(--l-code);
-}
 
-.compare .before {
-  background:
-    radial-gradient(ellipse 80% 60% at 0% 0%, rgba(99, 102, 241, 0.08), transparent),
-    var(--l-code);
-}
 
-.compare .pane-head {
-  position: relative;
-}
 
 .tag {
   margin-left: auto;
@@ -792,59 +661,14 @@ pre code {
   background: rgba(16, 185, 129, 0.1);
 }
 
-.handle {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: var(--pos);
-  width: 1px;
-  background: linear-gradient(180deg, transparent, #6366f1 20%, #06b6d4 80%, transparent);
-  box-shadow: 0 0 6px rgba(99, 102, 241, 0.8);
-  animation: neon-pulse 2.4s ease-in-out infinite;
-  pointer-events: none;
-}
 
-.knob {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  transform: translate(-50%, -50%);
-  border: 1px solid rgba(129, 140, 248, 0.9);
-  border-radius: 50%;
-  font-size: 13px;
-  color: #a5b4fc;
-  background: var(--l-card);
-  box-shadow: 0 0 10px rgba(99, 102, 241, 0.55);
-  animation: neon-pulse 2.4s ease-in-out infinite;
-}
 
-.range {
-  position: absolute;
-  inset: auto 0 0;
-  width: 100%;
-  opacity: 0;
-  pointer-events: none;
-}
 
 .range:focus-visible + * {
   outline: none;
 }
 
-.compare:has(.range:focus-visible) .knob {
-  outline: 2px solid var(--l-fg);
-  outline-offset: 3px;
-}
 
-.hint {
-  margin: 12px 0 0;
-  text-align: center;
-  font-size: 13px;
-  color: var(--l-muted);
-}
 
 .c-bad { color: #ef4444; }
 .dark .c-bad { color: #f87171; }
