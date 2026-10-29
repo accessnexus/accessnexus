@@ -56,23 +56,24 @@ const viewerLabel = computed(() => {
 
 const resultLabel = computed(() => {
   if (count.value === 0) return pt.value ? "0 linhas · negado por padrão" : "0 rows · denied by default";
-  return pt.value ? `${count.value} linhas visíveis` : `${count.value} rows visible`;
+  const n = count.value;
+  if (pt.value) return n === 1 ? "1 linha visível" : `${n} linhas visíveis`;
+  return n === 1 ? "1 row visible" : `${n} rows visible`;
 });
 </script>
 
 <template>
   <div class="rls-demo" aria-hidden="true">
-    <div class="rls-rule">
-      <span class="rls-file">accessnexus.schema.ts</span>
-      <code><span class="k">read</span>: { <span class="k">scope</span>: <span class="s">'tenant'</span> }</code>
-    </div>
-
     <div class="rls-card">
+      <div class="rls-rule">
+        <span class="rls-file">accessnexus.schema.ts</span>
+        <code><span class="k">read</span>: { <span class="k">scope</span>: <span class="s">'tenant'</span> }</code>
+      </div>
       <div class="rls-query">
         <code><span class="kw">select</span> * <span class="kw">from</span> projects</code>
         <span class="rls-as">
           <span class="rls-as-label">{{ pt ? "como" : "as" }}</span>
-          <Transition name="swap">
+          <Transition name="swap" mode="out-in">
             <span :key="step" class="rls-viewer" :class="{ anon: !viewer.org }">{{ viewerLabel }}</span>
           </Transition>
         </span>
@@ -94,7 +95,7 @@ const resultLabel = computed(() => {
 
       <div class="rls-footer">
         <span class="rls-dot" :class="{ empty: count === 0 }" />
-        <Transition name="swap">
+        <Transition name="swap" mode="out-in">
           <span :key="step">{{ resultLabel }}</span>
         </Transition>
       </div>
@@ -115,7 +116,6 @@ const resultLabel = computed(() => {
   font-size: 13px;
 }
 
-.rls-rule,
 .rls-card {
   border: 1px solid var(--vp-c-divider);
   border-radius: 12px;
@@ -125,10 +125,14 @@ const resultLabel = computed(() => {
 
 .rls-rule {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 2px 12px;
   padding: 10px 14px;
-  align-self: flex-start;
+  border-bottom: 1px solid var(--vp-c-divider);
+  background: var(--vp-c-bg-soft);
+  border-radius: 12px 12px 0 0;
 }
 
 .rls-file {
@@ -268,15 +272,11 @@ const resultLabel = computed(() => {
   background: #f59e0b;
 }
 
-.swap-leave-active {
-  position: absolute;
-}
-
 .swap-enter-active,
 .swap-leave-active {
   transition:
-    opacity 0.25s ease,
-    transform 0.25s ease;
+    opacity 0.14s ease,
+    transform 0.14s ease;
 }
 
 .swap-enter-from {

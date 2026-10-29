@@ -83,21 +83,23 @@ async function copy() {
 
     <!-- Hero -->
     <section class="hero">
-      <a class="badge" :href="link('/guide/ai-agents')">
-        <span class="badge-dot" />{{ t.badge }}<span class="arrow">→</span>
-      </a>
-      <h1>
-        <span>{{ t.title[0] }}</span>
-        <span class="muted">{{ t.title[1] }}</span>
-      </h1>
-      <p class="lead">{{ t.lead }}</p>
-      <div class="actions">
-        <a class="btn primary" :href="link('/guide/quick-start')">{{ t.start }}</a>
-        <button class="install" type="button" @click="copy">
-          <span class="dollar">$</span>
-          <code>{{ INSTALL }}</code>
-          <span class="copy">{{ copied ? t.copied : "⧉" }}</span>
-        </button>
+      <div class="hero-copy">
+        <a class="badge" :href="link('/guide/ai-agents')">
+          <span class="badge-dot" />{{ t.badge }}<span class="arrow">→</span>
+        </a>
+        <h1>
+          <span>{{ t.title[0] }}</span>
+          <span class="muted">{{ t.title[1] }}</span>
+        </h1>
+        <p class="lead">{{ t.lead }}</p>
+        <div class="actions">
+          <a class="btn primary" :href="link('/guide/quick-start')">{{ t.start }}</a>
+          <button class="install" type="button" @click="copy">
+            <span class="dollar">$</span>
+            <code>{{ INSTALL }}</code>
+            <span class="copy">{{ copied ? t.copied : "⧉" }}</span>
+          </button>
+        </div>
       </div>
       <div class="hero-demo">
         <HeroRls />
@@ -235,11 +237,34 @@ section {
 }
 
 .hero {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 56px;
+  align-items: center;
+  padding-top: 88px;
+}
+
+.hero-copy {
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding-top: 88px;
+}
+
+@media (min-width: 1000px) {
+  .hero {
+    grid-template-columns: 1.15fr 1fr;
+    padding-top: 112px;
+  }
+
+  .hero-copy {
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .hero-copy .actions {
+    justify-content: flex-start;
+  }
 }
 
 .badge {
@@ -278,7 +303,7 @@ section {
 
 h1 {
   margin: 28px 0 0;
-  font-size: clamp(40px, 7vw, 76px);
+  font-size: clamp(40px, 6vw, 68px);
   line-height: 1.02;
   font-weight: 700;
   letter-spacing: -0.045em;
@@ -371,8 +396,8 @@ h1 .muted {
 
 .hero-demo {
   width: 100%;
-  max-width: 480px;
-  margin-top: 64px;
+  max-width: 460px;
+  margin: 0 auto;
 }
 
 .block {
