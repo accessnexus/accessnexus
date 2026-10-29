@@ -45,6 +45,24 @@ describe('CLI migrations snapshot', () => {
     expect(outputs[1].path).toBe('.snapshot.json');
   });
 
+  it('a table added in a __changes migration also defaults to the v7 helper (and defines it)', () => {
+    const dir = createTempDir();
+    const adapter = new SupabaseAdapter({ timestamps: false, uuidGeneration: 'v7' });
+    for (const file of resolveVersionedMigrations(buildSchema(), adapter, dir)) {
+      writeFileSync(join(dir, file.path), file.content, 'utf-8');
+    }
+    const next = defineSchema({
+      ...buildSchema(),
+      tags: table({ columns: { id: 'uuid', name: 'text' }, primaryKey: 'id' }),
+    });
+    const [changes] = resolveVersionedMigrations(next, adapter, dir);
+    expect(changes.path).toMatch(/__changes/);
+    expect(changes.content).toContain('id UUID DEFAULT public.accessnexus_uuidv7() PRIMARY KEY');
+    expect(changes.content.indexOf('CREATE OR REPLACE FUNCTION public.accessnexus_uuidv7()'))
+      .toBeLessThan(changes.content.indexOf('CREATE TABLE IF NOT EXISTS tags'));
+    expect(changes.content).toContain('REVOKE EXECUTE ON FUNCTION public.accessnexus_uuidv7() FROM PUBLIC, anon;');
+  });
+
   it('returns no migration when snapshot hash matches', () => {
     const dir = createTempDir();
     mkdirSync(dir, { recursive: true });

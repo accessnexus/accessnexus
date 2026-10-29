@@ -565,11 +565,28 @@ describe('Supabase Adapter', () => {
 
       const outputs = v7Adapter.generateMigrations(schema);
       const sql = outputs[0].content;
-      expect(sql).toContain('CREATE OR REPLACE FUNCTION accessnexus_uuidv7()');
+      expect(sql).toContain('CREATE OR REPLACE FUNCTION public.accessnexus_uuidv7()');
       expect(sql).toContain('RETURNS uuid');
       expect(sql).toContain('uuid_send(gen_random_uuid())');
-      expect(sql).toContain('DEFAULT accessnexus_uuidv7()');
+      expect(sql).toContain('DEFAULT public.accessnexus_uuidv7()');
       expect(sql).not.toContain('DEFAULT gen_random_uuid()');
+      // Not callable through PostgREST by anon; the inserting roles keep EXECUTE.
+      expect(sql).toContain('REVOKE EXECUTE ON FUNCTION public.accessnexus_uuidv7() FROM PUBLIC, anon;');
+      expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.accessnexus_uuidv7() TO authenticated, service_role;');
+      expect(sql).not.toContain('uuid_generate_v7');
+    });
+
+    it('grants the uuidv7 helper to anon only when a v7 table accepts anonymous inserts', () => {
+      const v7Adapter = new SupabaseAdapter({ timestamps: false, uuidGeneration: 'v7' });
+      const schema = defineSchema({
+        leads: table({
+          columns: { id: 'uuid', email: 'text' },
+          primaryKey: 'id',
+          policies: { insert: policy.public() },
+        }),
+      });
+      const sql = v7Adapter.generateMigrations(schema)[0].content;
+      expect(sql).toContain('GRANT EXECUTE ON FUNCTION public.accessnexus_uuidv7() TO anon, authenticated, service_role;');
     });
 
     it('should not generate uuidv7 function when no UUID PKs exist', () => {

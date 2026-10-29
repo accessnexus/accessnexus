@@ -219,7 +219,7 @@ export class SupabaseAdapter implements Adapter {
         return baseType(col.type) === 'uuid' && col.default === undefined;
       });
       if (hasUuidPk) {
-        lines.push(this.uuidv7FunctionSQL());
+        lines.push(this.uuidv7FunctionSQL(this.uuidv7NeedsAnon(schema, orderedTables)));
         lines.push('');
       }
     }
@@ -1304,7 +1304,7 @@ export class SupabaseAdapter implements Adapter {
         colParts.push('GENERATED ALWAYS AS IDENTITY');
       }
       if (isPk && colType === 'uuid' && col.default === undefined) {
-        const uuidFn = this.options.uuidGeneration === 'v7' ? 'accessnexus_uuidv7()' : 'gen_random_uuid()';
+        const uuidFn = this.uuidDefaultExpression;
         colParts.push(`DEFAULT ${uuidFn}`);
       }
       if (col.default !== undefined) {
@@ -1653,13 +1653,46 @@ export class SupabaseAdapter implements Adapter {
     return `SET search_path = pg_catalog, ${this.options.schemaName}`;
   }
 
+  /** UUID strategy for primary keys without a default (`'v4'` or `'v7'`). */
+  get uuidGeneration(): 'v4' | 'v7' {
+    return this.options.uuidGeneration;
+  }
+
+  /** Default expression for a uuid primary key without an explicit default. */
+  get uuidDefaultExpression(): string {
+    return this.options.uuidGeneration === 'v7' ? `${this.options.schemaName}.accessnexus_uuidv7()` : 'gen_random_uuid()';
+  }
+
   /**
-   * Generate a PL/pgSQL function that creates RFC 9562 UUIDv7 values.
-   * Time-ordered UUIDs avoid B-tree index fragmentation on large tables.
+   * Does any table whose uuid PK defaults to `accessnexus_uuidv7()` let anon
+   * insert? The column default runs as the inserting role, so `anon` then
+   * needs EXECUTE on the function; otherwise it is revoked from anon.
    */
-  private uuidv7FunctionSQL(): string {
+  uuidv7NeedsAnon(schema: SchemaDef, tables: readonly string[] = Object.keys(schema)): boolean {
+    return tables.some((t) => {
+      const def = schema[t];
+      if (!def?.columns || !def.primaryKey || !def.columns[def.primaryKey]) return false;
+      const col = normalizeColumn(def.columns[def.primaryKey]);
+      if (baseType(col.type) !== 'uuid' || col.default !== undefined) return false;
+      const insert = def.policies?.insert;
+      return insert ? this.anonMayWrite(insert) : false;
+    });
+  }
+
+  /**
+   * PL/pgSQL function that creates RFC 9562 UUIDv7 values: a 48-bit Unix
+   * millisecond timestamp, version nibble 7, variant 10, random tail.
+   * Time-ordered UUIDs avoid B-tree index fragmentation on large tables.
+   *
+   * It lives in the exposed schema (column defaults call it), so EXECUTE is
+   * revoked from PUBLIC and anon (PostgREST would otherwise expose it as an
+   * RPC) and granted to the roles that insert rows. `grantAnon` re-grants it
+   * to anon when a v7 table accepts anonymous inserts.
+   */
+  uuidv7FunctionSQL(grantAnon = false): string {
+    const fn = `${this.options.schemaName}.accessnexus_uuidv7()`;
     return [
-      `CREATE OR REPLACE FUNCTION accessnexus_uuidv7()`,
+      `CREATE OR REPLACE FUNCTION ${fn}`,
       `RETURNS uuid`,
       `LANGUAGE plpgsql`,
       `VOLATILE`,
@@ -1677,6 +1710,8 @@ export class SupabaseAdapter implements Adapter {
       `  RETURN encode(uuid_bytes, 'hex')::uuid;`,
       `END`,
       `$$;`,
+      `REVOKE EXECUTE ON FUNCTION ${fn} FROM PUBLIC, anon;`,
+      `GRANT EXECUTE ON FUNCTION ${fn} TO ${grantAnon ? 'anon, ' : ''}authenticated, service_role;`,
     ].join('\n');
   }
 

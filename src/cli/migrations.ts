@@ -103,10 +103,14 @@ export function resolveVersionedMigrations(
   }
 
   const filename = nextTimestampMigrationFilename(outputBase, 'changes');
+  const uuidOptions: UuidOptions = {
+    defaultExpression: adapter.uuidDefaultExpression,
+    functionSql: adapter.uuidGeneration === 'v7' ? adapter.uuidv7FunctionSQL(adapter.uuidv7NeedsAnon(schema)) : null,
+  };
   const incrementalSql = snapshot.version === 2
-    ? generateIncrementalMigration(snapshot.schemaState, schemaState)
+    ? generateIncrementalMigration(snapshot.schemaState, schemaState, uuidOptions)
     : snapshot.version === 3
-    ? generateIncrementalMigration(snapshot.schemaState, schemaState)
+    ? generateIncrementalMigration(snapshot.schemaState, schemaState, uuidOptions)
     : fallbackSql;
 
   const content = incrementalSql.trim().length > 0 ? incrementalSql : '-- No DDL changes detected.\n';
@@ -126,7 +130,14 @@ export function resolveVersionedMigrations(
   ];
 }
 
-function generateIncrementalMigration(previous: SchemaState, current: SchemaState): string {
+interface UuidOptions {
+  /** Default for a uuid primary key without one (`gen_random_uuid()` or the v7 helper). */
+  defaultExpression: string;
+  /** `CREATE OR REPLACE` of the v7 helper (+ grants), emitted before a new table needs it. */
+  functionSql: string | null;
+}
+
+function generateIncrementalMigration(previous: SchemaState, current: SchemaState, uuid: UuidOptions): string {
   const lines: string[] = [];
 
   lines.push('-- ============================================');
@@ -141,7 +152,7 @@ function generateIncrementalMigration(previous: SchemaState, current: SchemaStat
 
   emitEnumChanges(lines, normalizedPrevious, current);
   emitRemovedTables(lines, normalizedPrevious, current);
-  emitAddedTables(lines, current, normalizedPrevious);
+  emitAddedTables(lines, current, normalizedPrevious, uuid);
   emitChangedTables(lines, normalizedPrevious, current);
 
   return `${lines.join('\n').trimEnd()}\n`;
@@ -200,13 +211,23 @@ function emitRemovedTables(lines: string[], previous: SchemaState, current: Sche
   }
 }
 
-function emitAddedTables(lines: string[], current: SchemaState, previous: SchemaState): void {
+function emitAddedTables(lines: string[], current: SchemaState, previous: SchemaState, uuid: UuidOptions): void {
   const ordered = orderTablesByDependencies(current);
+  const needsUuidFn = uuid.functionSql !== null && ordered.some((tableName) => {
+    if (previous.tables[tableName]) return false;
+    const table = current.tables[tableName];
+    const pk = table.primaryKey ? table.columns[table.primaryKey] : undefined;
+    return pk?.type === 'uuid' && pk.default === undefined;
+  });
+  if (needsUuidFn) {
+    lines.push(uuid.functionSql as string);
+    lines.push('');
+  }
 
   for (const tableName of ordered) {
     if (previous.tables[tableName]) continue;
     const table = current.tables[tableName];
-    lines.push(createTableSQL(tableName, table));
+    lines.push(createTableSQL(tableName, table, uuid.defaultExpression));
     const indexStatements = createIndexesSQL(tableName, table.indexes);
     if (indexStatements.length > 0) {
       lines.push(...indexStatements);
@@ -372,7 +393,7 @@ function emitIndexChanges(lines: string[], tableName: string, before: TableState
   }
 }
 
-function createTableSQL(tableName: string, table: TableState): string {
+function createTableSQL(tableName: string, table: TableState, uuidDefault: string): string {
   const definitions: string[] = [];
   for (const [columnName, column] of Object.entries(table.columns)) {
     const parts: string[] = [columnName, columnTypeToPG(column.type, tableName, columnName)];
@@ -383,7 +404,7 @@ function createTableSQL(tableName: string, table: TableState): string {
       parts.push('GENERATED ALWAYS AS IDENTITY');
     }
     if (isPrimary && column.type === 'uuid' && column.default === undefined) {
-      parts.push('DEFAULT gen_random_uuid()');
+      parts.push(`DEFAULT ${uuidDefault}`);
     }
     if (column.default !== undefined) parts.push(`DEFAULT ${column.default}`);
     if (column.unique) parts.push('UNIQUE');
