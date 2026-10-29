@@ -140,6 +140,7 @@ Apply the generated SQL to the database.
 | `--schema <path>` | string | `config.schema` or `./accessnexus.schema.ts` | Schema file (used by the staleness check). |
 | `--allow-destructive` | boolean | `false` | Apply pending migrations that drop tables/columns, drop types, truncate or change column types. |
 | `--replace-foreign-policies` | boolean | `false` | Drop the RLS policies on managed tables that AccessNexus did not generate, in the push transaction (see step 7). |
+| `--replace-foreign-triggers` | boolean | `false` | Drop the triggers on managed tables that AccessNexus did not generate, in the push transaction (`FOREIGN_TRIGGERS` otherwise). |
 | `--seed` | boolean | `false` | Also run the seed after pushing. |
 | `--allow-remote-seed` | boolean | `false` | With `--seed`: allow seeding a hosted Supabase database. |
 

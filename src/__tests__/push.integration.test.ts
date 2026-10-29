@@ -587,6 +587,36 @@ export default defineSchema({
     expect((await cli('push')).code).toBe(0);
   }, 60_000);
 
+  it('refuses foreign triggers on managed tables, and replaces them only with --replace-foreign-triggers', async () => {
+    // An imported project: the original trigger would fire next to its generated copy.
+    await admin.query(`
+      CREATE TABLE public.notes (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), owner_id uuid, body text NOT NULL);
+      CREATE TABLE public.note_log (n int);
+      INSERT INTO public.note_log VALUES (0);
+      CREATE FUNCTION public.count_note() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN UPDATE public.note_log SET n = n + 1; RETURN NEW; END; $$;
+      CREATE TRIGGER count_note AFTER INSERT ON public.notes FOR EACH ROW EXECUTE FUNCTION public.count_note();
+    `);
+    writeSchema(notesSchema());
+    expect((await cli('generate')).code).toBe(0);
+
+    const dry = await cli('push', '--dry-run');
+    expect(dry.json.wouldRefuse).toBe(true);
+    expect(dry.json.foreignTriggers).toEqual([{ schema: 'public', table: 'notes', trigger: 'count_note' }]);
+
+    const refused = await cli('push');
+    expect(refused.code).toBe(1);
+    expect(refused.json.error.code).toBe('FOREIGN_TRIGGERS');
+    expect(refused.json.error.hint).toContain('--replace-foreign-triggers');
+    expect((await admin.query(`SELECT to_regclass('public.accessnexus_migrations') IS NULL AS absent`)).rows[0].absent).toBe(true);
+
+    const replaced = await cli('push', '--replace-foreign-triggers');
+    expect(replaced.code).toBe(0);
+    expect(replaced.json.droppedTriggers).toEqual([{ schema: 'public', table: 'notes', trigger: 'count_note' }]);
+    const left = await admin.query(`SELECT tgname FROM pg_trigger WHERE tgrelid = 'public.notes'::regclass AND NOT tgisinternal`);
+    expect(left.rows.map((r) => r.tgname)).not.toContain('count_note');
+  }, 60_000);
+
   it('push is atomic: a failing RPC file rolls back migrations, policies and bookkeeping', async () => {
     writeSchema(notesSchema());
     expect((await cli('generate')).code).toBe(0);

@@ -48,7 +48,8 @@ Rules:
 - \`npx accessnexus push\` changes the real database. Run \`npx accessnexus push --dry-run --json\`
   first and only push when the user asked for it. Never add \`--allow-destructive\` (drops
   tables/columns), \`--replace-foreign-policies\` (drops the database's own RLS policies that
-  FOREIGN_POLICIES lists) or \`--seed\` without the user's explicit OK.
+  FOREIGN_POLICIES lists), \`--replace-foreign-triggers\` (drops the triggers FOREIGN_TRIGGERS
+  lists) or \`--seed\` without the user's explicit OK.
 - Every table the app reads or writes must have \`policies\` for select/insert/update/delete.
   No policies = deny-all (the client gets nothing). Use \`policy.none()\` to block an
   operation; never add \`enableRLS: false\` (it opens the table to anyone with the anon key).

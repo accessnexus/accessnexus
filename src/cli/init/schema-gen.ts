@@ -622,7 +622,7 @@ export function renderTriggers(t: Pick<IntrospectedTable, 'name' | 'triggers'>, 
     usedNames.add(name);
 
     entries.push(`      // Imported from trigger ${trg.name} (function ${trg.functionSchema}.${trg.functionName}). push creates`);
-    entries.push(`      // ${policyPrefix}_${t.name}_${name}: drop the original after pushing to this database, or both fire.`);
+    entries.push(`      // ${policyPrefix}_${t.name}_${name}: push refuses (FOREIGN_TRIGGERS) until --replace-foreign-triggers drops the original.`);
     for (const note of notes) entries.push(`      // ${note}`);
     entries.push('      trigger.custom({');
     entries.push(`        name: '${name}',`);

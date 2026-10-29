@@ -140,6 +140,7 @@ Aplica o SQL gerado no banco.
 | `--schema <path>` | string | `config.schema` ou `./accessnexus.schema.ts` | Arquivo de schema (usado na verificação de defasagem). |
 | `--allow-destructive` | boolean | `false` | Aplica migrations pendentes que removem tabelas/colunas, removem tipos, fazem truncate ou mudam tipos de coluna. |
 | `--replace-foreign-policies` | boolean | `false` | Remove as policies de RLS das tabelas gerenciadas que o AccessNexus não gerou, dentro da transação do push (veja a etapa 7). |
+| `--replace-foreign-triggers` | boolean | `false` | Remove os triggers das tabelas gerenciadas que o AccessNexus não gerou, dentro da transação do push (sem a flag: `FOREIGN_TRIGGERS`). |
 | `--seed` | boolean | `false` | Roda também o seed depois do push. |
 | `--allow-remote-seed` | boolean | `false` | Com `--seed`: permite rodar seed num banco Supabase hospedado. |
 

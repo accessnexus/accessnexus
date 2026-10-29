@@ -117,7 +117,7 @@ Cada trigger do usuário vira um `trigger.custom({ name, events, forEach, when, 
 - `UPDATE OF col` num trigger de linha que só trata UPDATE vira `when: 'OLD.col IS DISTINCT FROM NEW.col'`; senão ele dispara em todo UPDATE e um `// WARNING:` avisa.
 - Não importados, com um comentário `// WARNING:` e o `CREATE TRIGGER` original: triggers que passam argumentos (`TG_ARGV`), triggers desabilitados, `INSTEAD OF` e os só de `TRUNCATE`, e funções que não são `plpgsql`. Um constraint trigger é importado como trigger comum, com um aviso.
 
-O `push` cria o trigger como `<prefix>_<table>_<name>`, com uma função própria. No mesmo banco, o trigger original continua existindo, então **os dois disparam** até você remover o original (veja abaixo).
+O `push` cria o trigger como `<prefix>_<table>_<name>`, com uma função própria. No mesmo banco, o trigger original continua existindo, então o `push` recusa com `FOREIGN_TRIGGERS` até você passar `--replace-foreign-triggers` (veja abaixo).
 
 ## O que revisar antes do primeiro `generate` {#what-to-review-before-the-first-generate}
 
@@ -151,14 +151,7 @@ Depois desse push, só as policies geradas existem nas tabelas gerenciadas, ent�
 ::: danger Remova as originais só depois de revisar, e com consentimento
 O `--replace-foreign-policies` apaga policies que o AccessNexus não escreveu. Passe a flag só depois da etapa 3. Se um agente estiver no controle, ele precisa mostrar a lista do `FOREIGN_POLICIES` e perguntar antes de passar a flag.
 
-Com os triggers importados é igual: o original e o gerado disparam os dois (um `updated_at` duas vezes não faz mal, um insert de auditoria ou um contador faz). Remova o original quando o gerado estiver no lugar:
-
-```sql
-SELECT event_object_table, trigger_name FROM information_schema.triggers
-WHERE trigger_schema = 'public' AND trigger_name NOT LIKE 'accessnexus\_%';
-
-DROP TRIGGER orders_note ON orders;
-```
+Com os triggers importados é igual: o original dispararia junto com a cópia gerada (um `updated_at` duas vezes não faz mal, um insert de auditoria ou um contador faz), então o `push` recusa com `FOREIGN_TRIGGERS` e lista quais são. Depois de revisar as entradas `trigger.custom` importadas, `npx accessnexus push --replace-foreign-triggers` remove os originais na mesma transação.
 
 Se um agente estiver no controle, ele precisa perguntar antes de remover qualquer coisa.
 :::

@@ -153,7 +153,7 @@ describe('trigger import', () => {
     expect(out).toContain("security: 'definer',");
     expect(out).toContain("events: ['after_delete'],");
     expect(out).toContain("forEach: 'statement',");
-    expect(out).toContain('drop the original after pushing');
+    expect(out).toContain('--replace-foreign-triggers');
   });
 
   it('skips its own triggers and warns about what trigger.custom cannot express', () => {

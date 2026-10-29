@@ -15,6 +15,10 @@ All notable changes to `accessnexus` are documented here. The format follows
   to the generated ones. The new `--replace-foreign-policies` flag drops them in the push
   transaction (`droppedPolicies` in `--json`); `push --dry-run` lists them (`foreignPolicies`,
   `wouldRefuse`) when a database URL is set.
+- Same for triggers: after `init --db-url`, an imported trigger and the original would both
+  fire (an audit insert or a counter running twice). `push` refuses with `FOREIGN_TRIGGERS`
+  while a managed table has a trigger not named `<prefix>_<table>_...`; `--replace-foreign-triggers`
+  drops them in the push transaction (`droppedTriggers`).
 - `push` no longer creates `public.uuid_generate_v7()`, which returned a random v4 UUID and was
   callable by `anon` through PostgREST. The only UUIDv7 helper is `public.accessnexus_uuidv7()`
   (a real RFC 9562 v7), now with EXECUTE revoked from `PUBLIC` and `anon` (granted to

@@ -117,7 +117,7 @@ Each user trigger becomes a `trigger.custom({ name, events, forEach, when, secur
 - `UPDATE OF col` on a row trigger that only handles UPDATE becomes `when: 'OLD.col IS DISTINCT FROM NEW.col'`; otherwise it fires on every UPDATE and a `// WARNING:` says so.
 - Not imported, with a `// WARNING:` comment and the original `CREATE TRIGGER`: triggers that pass arguments (`TG_ARGV`), disabled triggers, `INSTEAD OF` and `TRUNCATE`-only triggers, and functions not written in `plpgsql`. A constraint trigger is imported as a regular one, with a warning.
 
-`push` creates the trigger as `<prefix>_<table>_<name>` with its own function. On the same database, the original trigger still exists, so **both fire** until you drop the original (see below).
+`push` creates the trigger as `<prefix>_<table>_<name>` with its own function. On the same database, the original trigger still exists, so `push` refuses with `FOREIGN_TRIGGERS` until you pass `--replace-foreign-triggers` (see below).
 
 ## What to review before the first `generate`
 
@@ -151,14 +151,7 @@ After this push, only the generated policies exist on the managed tables, so the
 ::: danger Drop the originals only after review, and with consent
 `--replace-foreign-policies` deletes policies AccessNexus did not write. Pass it only after step 3. If an agent is driving, it must show the `FOREIGN_POLICIES` list and ask before passing the flag.
 
-Imported triggers are the same: the original and the generated one both fire (an `updated_at` touch is harmless twice, an audit insert or a counter is not). Drop the original once the generated one is in place:
-
-```sql
-SELECT event_object_table, trigger_name FROM information_schema.triggers
-WHERE trigger_schema = 'public' AND trigger_name NOT LIKE 'accessnexus\_%';
-
-DROP TRIGGER orders_note ON orders;
-```
+Imported triggers work the same way: the original would fire next to its generated copy (an `updated_at` touch is harmless twice, an audit insert or a counter is not), so `push` refuses with `FOREIGN_TRIGGERS` and lists them. Once the imported `trigger.custom` entries are reviewed, `npx accessnexus push --replace-foreign-triggers` drops the originals in the same transaction.
 
 If an agent is driving, it must ask before dropping anything.
 :::
