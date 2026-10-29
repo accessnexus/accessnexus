@@ -45,6 +45,17 @@ import {
   type SchemaIssue,
 } from './output.js';
 import { checkSchema, summarizeSchema } from './schema-check.js';
+import {
+  captureSnapshot,
+  diffSnapshots,
+  findRiskyChanges,
+  functionsDefinedIn,
+  renderPlan,
+  summarizeChanges,
+  type PlanChange,
+  type RiskyChange,
+  type SnapshotScope,
+} from './plan.js';
 
 const DEFAULT_SCHEMA_PATH = './accessnexus.schema.ts';
 const DEFAULT_SEED_PATH = './accessnexus.seed.ts';
@@ -94,9 +105,17 @@ export const COMMANDS: Readonly<Record<CommandName, { summary: string; flags: Fl
     flags: {
       schema: SCHEMA_FLAG,
       ...OUTPUT_FLAGS,
-      check: { kind: 'boolean', description: 'Exit 1 when generated files are out of date (for CI)' },
+      check: { kind: 'boolean', description: 'Exit 1 when generated files are out of date (with --against-db: when the database would change) (for CI)' },
+      'against-db': { kind: 'boolean', description: 'Rehearse the push against the live database in a rolled-back transaction and list catalog changes + riskyChanges' },
+      url: DB_FLAGS.url,
+      'db-url': DB_FLAGS['db-url'],
+      adapter: DB_FLAGS.adapter,
+      target: DB_FLAGS.target,
+      'allow-destructive': { kind: 'boolean', description: 'With --against-db: plan as push --allow-destructive would' },
+      'replace-foreign-policies': { kind: 'boolean', description: 'With --against-db: plan as push --replace-foreign-policies would (drops included)' },
+      'replace-foreign-triggers': { kind: 'boolean', description: 'With --against-db: plan as push --replace-foreign-triggers would (drops included)' },
     },
-    examples: ['npx accessnexus diff', 'npx accessnexus diff --json', 'npx accessnexus diff --check'],
+    examples: ['npx accessnexus diff', 'npx accessnexus diff --json', 'npx accessnexus diff --check', 'npx accessnexus diff --against-db --json'],
   },
   validate: {
     summary: 'Check the schema for errors without writing anything',
@@ -715,7 +734,7 @@ async function runGenerate(opts: ParsedFlags): Promise<CommandResult> {
 async function runDiff(opts: ParsedFlags): Promise<CommandResult> {
   log(`\n${brand()} diff...\n`);
 
-  const { config } = await loadConfigWithSource(opts);
+  const { config, fileConfig } = await loadConfigWithSource(opts);
   const schema = await loadSchema(config.schema);
   const warnings = assertSchemaValid(schema, { schemaPath: config.schema });
 
@@ -729,6 +748,19 @@ async function runDiff(opts: ParsedFlags): Promise<CommandResult> {
   const scopes = generated.map((group) => group.scope);
   const currentFiles = collectExistingFiles(scopes, expected);
   const changes = buildDiff(expected, currentFiles);
+
+  if (opts['against-db'] === true) {
+    return runDiffAgainstDb(opts, { config, fileConfig, schema, generated, warnings, generatedUpToDate: changes.length === 0 });
+  }
+  let dbConfigured = false;
+  try {
+    dbConfigured = resolveDbUrl(opts, resolveAdapterSelection(opts, config, fileConfig)).dbUrl !== undefined;
+  } catch {
+    // adapter/target errors surface in push; the file diff does not need them
+  }
+  const liveHint = dbConfigured
+    ? 'This compares the schema with the generated files, not the database. Run `npx accessnexus diff --against-db --json` to see what push would change in the live database (riskyChanges).'
+    : null;
 
   const summary = { added: 0, modified: 0, removed: 0 };
   for (const change of changes) summary[change.status] += 1;
@@ -749,6 +781,7 @@ async function runDiff(opts: ParsedFlags): Promise<CommandResult> {
       diff: renderUnifiedDiff(change),
     })),
     warnings,
+    ...(liveHint ? { hint: liveHint } : {}),
   };
 
   if (changes.length === 0) {
@@ -772,6 +805,8 @@ async function runDiff(opts: ParsedFlags): Promise<CommandResult> {
     reportDestructive(destructive, 'The pending migration');
   }
 
+  if (liveHint) log(`  ${paint.gray(`Database URL found: run \`npx accessnexus diff --against-db\` to see what push would change in the live database.`)}\n`);
+
   if (opts.check === true && changes.length > 0) {
     throw new CliError('GENERATED_OUT_OF_DATE', `${changes.length} generated file(s) are out of date`, {
       hint: 'Run `npx accessnexus generate` and commit the result.',
@@ -779,6 +814,84 @@ async function runDiff(opts: ParsedFlags): Promise<CommandResult> {
     });
   }
 
+  return result;
+}
+
+/**
+ * `diff --against-db`: rehearse the push of the SQL the current schema
+ * generates (what `generate` + `push` would apply) against the live database.
+ */
+async function runDiffAgainstDb(
+  opts: ParsedFlags,
+  input: {
+    config: ResolvedConfig;
+    fileConfig: LoadedConfig['fileConfig'];
+    schema: SchemaDef;
+    generated: GeneratedGroup[];
+    warnings: SchemaIssue[];
+    generatedUpToDate: boolean;
+  },
+): Promise<CommandResult> {
+  const { config, schema, generated } = input;
+  const selection = resolveAdapterSelection(opts, config, input.fileConfig);
+  const { dbUrl, configuredEnv } = resolveDbUrl(opts, selection);
+  if (!dbUrl) {
+    const envs = [...new Set([configuredEnv, 'ACCESSNEXUS_DB_URL', 'SUPABASE_DB_URL', 'DATABASE_URL'].filter(Boolean))].join(', ');
+    throw new CliError('DB_URL_MISSING', 'diff --against-db needs a database URL, and none was found', {
+      hint: `Pass --url <postgres-url> or set one of ${envs} (in the shell, .env or .env.local). `
+        + 'Without a database, `npx accessnexus diff` compares the schema with the generated files.',
+    });
+  }
+  await loadPgModule();
+
+  const groups: PushGroup[] = ['migrations', 'policies', 'triggers', 'rpcs'].map((key) => {
+    const group = generated.find((g) => g.category === key);
+    const files = (group?.files ?? [])
+      .filter((file) => file.absolutePath.endsWith('.sql'))
+      .sort((a, b) => a.absolutePath.localeCompare(b.absolutePath))
+      .map((file) => ({ path: file.displayPath, sql: file.content }));
+    return { key, title: group?.title ?? key, files };
+  });
+  const migrationDestructive = groups[0].files.flatMap((file) => findDestructiveStatements(file.path, file.sql));
+  const defaultSchema = (config.adapterOptions as { schemaName?: string } | undefined)?.schemaName ?? 'public';
+  const base: CommandResult = {
+    schemaPath: config.schema,
+    againstDb: true,
+    adapter: selection.adapter,
+    target: selection.targetName ?? null,
+    generatedUpToDate: input.generatedUpToDate,
+  };
+  const ctx: PushContext = {
+    groups,
+    targets: managedPolicyTargets(schema, config.naming.policyPrefix, defaultSchema),
+    policyPrefix: config.naming.policyPrefix,
+    replaceForeign: opts['replace-foreign-policies'] === true,
+    replaceForeignTriggers: opts['replace-foreign-triggers'] === true,
+    allowDestructive: opts['allow-destructive'] === true,
+    migrationDestructive,
+    base,
+  };
+
+  const plan = await rehearsePush(dbUrl, ctx, defaultSchema);
+  const result: CommandResult = { ...base, ...plan, warnings: input.warnings };
+
+  if (!input.generatedUpToDate) {
+    log(`  ${paint.gray('Planned from the schema (generated files are out of date: run `npx accessnexus generate` before push).')}\n`);
+  }
+  reportLivePlan(plan);
+
+  if (plan.failed) {
+    throw new CliError('PUSH_WOULD_FAIL', `push would fail${plan.failed.file ? ` at ${plan.failed.file}` : ''}: ${plan.failed.message}`, {
+      hint: 'Nothing was persisted (the rehearsal was rolled back). Fix the cause in accessnexus.schema.ts or the database, then run the plan again.',
+      data: result,
+    });
+  }
+  if (opts.check === true && plan.changed) {
+    throw new CliError('LIVE_DB_CHANGES', `push would change ${plan.changes.length} database object(s)`, {
+      hint: 'Review `changes` and `riskyChanges`, then push (or fix the schema) and run the check again.',
+      data: result,
+    });
+  }
   return result;
 }
 
@@ -1383,35 +1496,46 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
   }
   log('');
 
+  const ctx: PushContext = {
+    groups: readPushGroups(plan),
+    targets,
+    policyPrefix: config.naming.policyPrefix,
+    replaceForeign,
+    replaceForeignTriggers,
+    allowDestructive,
+    migrationDestructive,
+    base,
+  };
+  const defaultSchema = (config.adapterOptions as { schemaName?: string } | undefined)?.schemaName ?? 'public';
+
   if (dryRun) {
     reportDestructive(migrationDestructive, 'Migration files (applied only if not yet applied)');
-    // Read-only look at the live policies when a database is reachable.
-    let foreignPolicies: ForeignPolicy[] | null = null;
-    let foreignTriggers: ForeignTrigger[] | null = null;
+    // With a database: rehearse the push in a rolled-back transaction (live plan).
+    let livePlan: LivePlan | null = null;
     if (dbUrl) {
-      let client: any;
       try {
-        client = await createPgClient(dbUrl);
-        foreignPolicies = await findForeignPolicies(client, targets);
-        foreignTriggers = await findForeignTriggers(client, targets, config.naming.policyPrefix);
+        livePlan = await rehearsePush(dbUrl, ctx, defaultSchema);
       } catch (err) {
-        log(`  ${paint.yellow('!')} Could not inspect the database for foreign policies: ${toCliError(err).message}\n`);
-      } finally {
-        if (client) await client.end().catch(() => {});
+        log(`  ${paint.yellow('!')} Could not rehearse the push against the database: ${toCliError(err).message}\n`);
       }
     } else {
-      log(`  ${paint.gray('No database URL: foreign policies not checked (pass --url to check them).')}\n`);
+      log(`  ${paint.gray('No database URL: live plan and foreign policies not checked (pass --url to rehearse the push).')}\n`);
     }
+    const foreignPolicies = livePlan ? livePlan.foreignPolicies : null;
+    const foreignTriggers = livePlan ? livePlan.foreignTriggers : null;
     if (foreignPolicies) reportForeignPolicies(foreignPolicies, replaceForeign);
     if (foreignTriggers) reportForeignTriggers(foreignTriggers, replaceForeignTriggers);
-    log(`  ${paint.green('✓')} Dry run — execution skipped\n`);
+    if (livePlan) reportLivePlan(livePlan);
+    log(`  ${paint.green('✓')} Dry run — nothing was persisted\n`);
     return {
       ...base,
       destructive: migrationDestructive,
       foreignPolicies,
       foreignTriggers,
       wouldRefuse: (foreignPolicies !== null && foreignPolicies.length > 0 && !replaceForeign)
-        || (foreignTriggers !== null && foreignTriggers.length > 0 && !replaceForeignTriggers),
+        || (foreignTriggers !== null && foreignTriggers.length > 0 && !replaceForeignTriggers)
+        || (livePlan !== null && (livePlan.blockers.length > 0 || livePlan.failed !== null)),
+      livePlan,
       applied: [],
       skipped: [],
       droppedPolicies: [],
@@ -1423,20 +1547,14 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
   if (!dbUrl) throw missingDbUrlError('push', configuredEnv);
   if (opts.seed === true) assertSeedTargetAllowed(dbUrl, opts);
 
-  const applied: string[] = [];
-  const skipped: Array<{ path: string; reason: string }> = [];
-  const droppedPolicies: ForeignPolicy[] = [];
-  const droppedTriggers: ForeignTrigger[] = [];
-  const progress = () => ({ ...base, applied: [...applied], skipped: [...skipped], droppedPolicies: [...droppedPolicies], droppedTriggers: [...droppedTriggers] });
-  // After a rollback nothing from this push stays in the database.
-  const rolledBack = () => ({ ...base, applied: [], skipped: [...skipped], droppedPolicies: [], droppedTriggers: [], rolledBack: [...applied] });
+  const state = newPushState();
+  const progress = () => pushProgress(base, state);
 
   const client = await createPgClient(dbUrl);
   let lockAcquired = false;
   let inTransaction = false;
   try {
-    const needsBypass = plan.some((group) => group.files.some((file) => /SECURITY DEFINER/i.test(readFileSync(file, 'utf-8'))));
-    if (needsBypass) await assertRoleBypassesRls(client);
+    if (pushNeedsBypass(ctx.groups)) await assertRoleBypassesRls(client);
     await acquirePushLock(client);
     lockAcquired = true;
 
@@ -1444,121 +1562,7 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
     // migrations, policies, triggers and RPCs commit together or not at all.
     await client.query('BEGIN');
     inTransaction = true;
-    await ensureMigrationsTable(client);
-
-    // Foreign policies: permissive policies OR together, so a policy we did not
-    // generate keeps granting access next to ours. Never keep or drop silently.
-    const foreign = await findForeignPolicies(client, targets);
-    if (foreign.length > 0 && !replaceForeign) {
-      reportForeignPolicies(foreign, false);
-      throw new CliError('FOREIGN_POLICIES', `${foreign.length} RLS polic${foreign.length === 1 ? 'y' : 'ies'} on managed tables were not generated by AccessNexus and would keep granting access: ${describeForeignPolicies(foreign)}`, {
-        hint: 'Nothing was applied. Review them (`foreignPolicies` in --json). Port any rule you still need into accessnexus.schema.ts, '
-          + 'then re-run with --replace-foreign-policies to drop them in the same transaction as the push.',
-        data: { ...progress(), foreignPolicies: foreign },
-      });
-    }
-
-    // Foreign triggers: an imported trigger and its generated copy would both fire.
-    const foreignTriggers = await findForeignTriggers(client, targets, config.naming.policyPrefix);
-    if (foreignTriggers.length > 0 && !replaceForeignTriggers) {
-      reportForeignTriggers(foreignTriggers, false);
-      throw new CliError('FOREIGN_TRIGGERS', `${foreignTriggers.length} trigger(s) on managed tables were not generated by AccessNexus and would fire next to the generated ones: ${describeForeignTriggers(foreignTriggers)}`, {
-        hint: 'Nothing was applied. Review them (`foreignTriggers` in --json). Port any trigger you still need into accessnexus.schema.ts '
-          + '(init --db-url imports them as trigger.custom), then re-run with --replace-foreign-triggers to drop them in the same transaction as the push.',
-        data: { ...progress(), foreignTriggers },
-      });
-    }
-
-    // Data-loss guard: look at pending migrations before applying anything.
-    const pendingDestructive: DestructiveStatement[] = [];
-    for (const file of plan[0].files) {
-      const display = relativePathFromCwd(file);
-      if (await findAppliedMigration(client, 'migrations', display)) continue;
-      pendingDestructive.push(...migrationDestructive.filter((statement) => statement.file === display));
-    }
-    if (pendingDestructive.length > 0 && !allowDestructive) {
-      reportDestructive(pendingDestructive, 'Pending migrations');
-      throw new CliError('DESTRUCTIVE_MIGRATION', `${pendingDestructive.length} pending statement(s) would delete data (DROP TABLE/COLUMN or a column type change)`, {
-        hint: 'Nothing was applied. If a column or table was renamed, rename it in the schema instead of remove+add. '
-          + 'When the data loss is intended (and backed up), re-run with --allow-destructive.',
-        data: { ...progress(), destructive: pendingDestructive },
-      });
-    }
-
-    if (foreign.length > 0) {
-      reportForeignPolicies(foreign, true);
-      for (const p of foreign) {
-        await client.query(`DROP POLICY ${quoteIdent(p.policy)} ON ${quoteIdent(p.schema)}.${quoteIdent(p.table)};`);
-        droppedPolicies.push(p);
-      }
-    }
-
-    if (foreignTriggers.length > 0) {
-      reportForeignTriggers(foreignTriggers, true);
-      for (const t of foreignTriggers) {
-        await client.query(`DROP TRIGGER ${quoteIdent(t.trigger)} ON ${quoteIdent(t.schema)}.${quoteIdent(t.table)};`);
-        droppedTriggers.push(t);
-      }
-    }
-
-    for (const group of plan) {
-      if (group.files.length === 0) continue;
-      log(paint.bold(`  ${group.title}:`));
-      for (const file of group.files) {
-        const display = relativePathFromCwd(file);
-        const sql = readFileSync(file, 'utf-8');
-        const fileChecksum = checksum(normalizeSqlForChecksum(sql));
-        const appliedRecord = await findAppliedMigration(client, group.key, display);
-
-        if (appliedRecord) {
-          if (appliedRecord.checksum !== fileChecksum) {
-            if (group.key === 'migrations') {
-              throw new CliError('MIGRATION_DRIFT', `Migration ${display} changed after it was applied`, {
-                hint: 'Nothing was applied. Applied migrations are immutable. Restore the file (e.g. `git checkout -- '
-                  + `${display}\`), change accessnexus.schema.ts instead and run \`npx accessnexus generate\` to get a new __changes migration.`,
-                data: rolledBack(),
-              });
-            }
-
-            if (appliedRecord.hashStrategy !== 'normalized_sql_v1') {
-              await refreshAppliedMigrationChecksum(client, group.key, display, fileChecksum);
-              skipped.push({ path: display, reason: 'checksum_normalized' });
-              log(`  ${paint.gray('-')} ${display} (checksum normalized)`);
-              continue;
-            }
-          } else {
-            skipped.push({ path: display, reason: 'already_applied' });
-            log(`  ${paint.gray('-')} ${display} (already applied)`);
-            continue;
-          }
-        }
-
-        const startedAt = Date.now();
-        try {
-          await client.query(sql);
-        } catch (error: any) {
-          const pgMessage = String(error?.message ?? 'unknown SQL error');
-          throw new CliError('PUSH_FAILED', `Postgres rejected ${display}: ${pgMessage}`, {
-            hint: 'The whole push was rolled back: nothing from it was applied (not the files in "rolledBack", not the foreign-policy drops). '
-              + 'Fix the cause in accessnexus.schema.ts (or the database state), run `npx accessnexus generate`, then push again.',
-            data: { ...rolledBack(), failed: display },
-            cause: error,
-          });
-        }
-        const record = {
-          category: group.key,
-          filename: display,
-          checksum: fileChecksum,
-          executionTimeMs: Date.now() - startedAt,
-        };
-        if (appliedRecord) await updateAppliedMigration(client, record);
-        else await recordMigration(client, { ...record, success: true });
-        applied.push(display);
-        log(`  ${paint.green('✓')} ${display}${appliedRecord ? paint.gray(' (re-applied: changed)') : ''}`);
-      }
-      log('');
-    }
-
+    await applyPushInTransaction(client, ctx, state, false);
     await client.query('COMMIT');
     inTransaction = false;
   } catch (err) {
@@ -1573,7 +1577,7 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
     const message = String((err as any)?.message ?? err);
     throw new CliError('PUSH_FAILED', `push failed and was rolled back: ${message}`, {
       hint: 'Nothing from this push was applied. Fix the cause (database state or connection), then push again.',
-      data: rolledBack(),
+      data: pushRolledBack(base, state),
       cause: err,
     });
   } finally {
@@ -1586,7 +1590,7 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
     }
     await client.end();
   }
-
+  const { applied, skipped } = state;
   log(`${paint.green('✓ Push complete!')} Applied ${applied.length} SQL file(s), skipped ${skipped.length}.\n`);
 
   // The seed only runs when asked for: it writes rows (and auth.users) to the
@@ -1617,6 +1621,318 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
 
   return { ...progress(), seed };
 }
+
+// ---------- push core (shared by push and the live-database rehearsal) ----------
+
+type PushFile = { path: string; sql: string };
+type PushGroup = { key: string; title: string; files: PushFile[] };
+
+interface PushContext {
+  groups: PushGroup[];
+  targets: ReturnType<typeof managedPolicyTargets>;
+  policyPrefix: string;
+  replaceForeign: boolean;
+  replaceForeignTriggers: boolean;
+  allowDestructive: boolean;
+  migrationDestructive: DestructiveStatement[];
+  base: CommandResult;
+}
+
+interface PushState {
+  applied: string[];
+  skipped: Array<{ path: string; reason: string }>;
+  droppedPolicies: ForeignPolicy[];
+  droppedTriggers: ForeignTrigger[];
+  foreignPolicies: ForeignPolicy[] | null;
+  foreignTriggers: ForeignTrigger[] | null;
+  /** Rehearsal only: the refusals a real push would stop at (it would apply nothing). */
+  blockers: Array<{ code: string; message: string; hint?: string }>;
+}
+
+function newPushState(): PushState {
+  return { applied: [], skipped: [], droppedPolicies: [], droppedTriggers: [], foreignPolicies: null, foreignTriggers: null, blockers: [] };
+}
+
+function pushProgress(base: CommandResult, state: PushState): CommandResult {
+  return { ...base, applied: [...state.applied], skipped: [...state.skipped], droppedPolicies: [...state.droppedPolicies], droppedTriggers: [...state.droppedTriggers] };
+}
+
+/** After a rollback nothing from this push stays in the database. */
+function pushRolledBack(base: CommandResult, state: PushState): CommandResult {
+  return { ...base, applied: [], skipped: [...state.skipped], droppedPolicies: [], droppedTriggers: [], rolledBack: [...state.applied] };
+}
+
+function readPushGroups(plan: Array<{ key: string; title: string; files: string[] }>): PushGroup[] {
+  return plan.map((group) => ({
+    key: group.key,
+    title: group.title,
+    files: group.files.map((file) => ({ path: relativePathFromCwd(file), sql: readFileSync(file, 'utf-8') })),
+  }));
+}
+
+function pushNeedsBypass(groups: PushGroup[]): boolean {
+  return groups.some((group) => group.files.some((file) => /SECURITY DEFINER/i.test(file.sql)));
+}
+
+/**
+ * Everything push does inside its transaction. With `rehearse`, the refusals
+ * (foreign policies/triggers, destructive migrations) are recorded in
+ * `state.blockers` instead of thrown, and nothing is logged: the caller rolls
+ * the transaction back and reports the catalog difference.
+ */
+async function applyPushInTransaction(client: any, ctx: PushContext, state: PushState, rehearse: boolean): Promise<void> {
+  const say = rehearse ? () => {} : log;
+  const refuse = (error: CliError, report: () => void) => {
+    if (!rehearse) {
+      report();
+      throw error;
+    }
+    state.blockers.push({ code: error.code, message: error.message, ...(error.hint ? { hint: error.hint } : {}) });
+  };
+  const progress = () => pushProgress(ctx.base, state);
+
+  await ensureMigrationsTable(client);
+
+  // Foreign policies: permissive policies OR together, so a policy we did not
+  // generate keeps granting access next to ours. Never keep or drop silently.
+  const foreign = await findForeignPolicies(client, ctx.targets);
+  state.foreignPolicies = foreign;
+  if (foreign.length > 0 && !ctx.replaceForeign) {
+    refuse(new CliError('FOREIGN_POLICIES', `${foreign.length} RLS polic${foreign.length === 1 ? 'y' : 'ies'} on managed tables were not generated by AccessNexus and would keep granting access: ${describeForeignPolicies(foreign)}`, {
+      hint: 'Nothing was applied. Review them (`foreignPolicies` in --json). Port any rule you still need into accessnexus.schema.ts, '
+        + 'then re-run with --replace-foreign-policies to drop them in the same transaction as the push.',
+      data: { ...progress(), foreignPolicies: foreign },
+    }), () => reportForeignPolicies(foreign, false));
+  }
+
+  // Foreign triggers: an imported trigger and its generated copy would both fire.
+  const foreignTriggers = await findForeignTriggers(client, ctx.targets, ctx.policyPrefix);
+  state.foreignTriggers = foreignTriggers;
+  if (foreignTriggers.length > 0 && !ctx.replaceForeignTriggers) {
+    refuse(new CliError('FOREIGN_TRIGGERS', `${foreignTriggers.length} trigger(s) on managed tables were not generated by AccessNexus and would fire next to the generated ones: ${describeForeignTriggers(foreignTriggers)}`, {
+      hint: 'Nothing was applied. Review them (`foreignTriggers` in --json). Port any trigger you still need into accessnexus.schema.ts '
+        + '(init --db-url imports them as trigger.custom), then re-run with --replace-foreign-triggers to drop them in the same transaction as the push.',
+      data: { ...progress(), foreignTriggers },
+    }), () => reportForeignTriggers(foreignTriggers, false));
+  }
+
+  // Data-loss guard: look at pending migrations before applying anything.
+  const migrations = ctx.groups.find((group) => group.key === 'migrations')?.files ?? [];
+  const pendingDestructive: DestructiveStatement[] = [];
+  for (const file of migrations) {
+    if (await findAppliedMigration(client, 'migrations', file.path)) continue;
+    pendingDestructive.push(...ctx.migrationDestructive.filter((statement) => statement.file === file.path));
+  }
+  if (pendingDestructive.length > 0 && !ctx.allowDestructive) {
+    refuse(new CliError('DESTRUCTIVE_MIGRATION', `${pendingDestructive.length} pending statement(s) would delete data (DROP TABLE/COLUMN or a column type change)`, {
+      hint: 'Nothing was applied. If a column or table was renamed, rename it in the schema instead of remove+add. '
+        + 'When the data loss is intended (and backed up), re-run with --allow-destructive.',
+      data: { ...progress(), destructive: pendingDestructive },
+    }), () => reportDestructive(pendingDestructive, 'Pending migrations'));
+  }
+
+  // Drops happen only when the real push would do them (the --replace-* flags).
+  if (foreign.length > 0 && ctx.replaceForeign) {
+    if (!rehearse) reportForeignPolicies(foreign, true);
+    for (const p of foreign) {
+      await client.query(`DROP POLICY ${quoteIdent(p.policy)} ON ${quoteIdent(p.schema)}.${quoteIdent(p.table)};`);
+      state.droppedPolicies.push(p);
+    }
+  }
+
+  if (foreignTriggers.length > 0 && ctx.replaceForeignTriggers) {
+    if (!rehearse) reportForeignTriggers(foreignTriggers, true);
+    for (const t of foreignTriggers) {
+      await client.query(`DROP TRIGGER ${quoteIdent(t.trigger)} ON ${quoteIdent(t.schema)}.${quoteIdent(t.table)};`);
+      state.droppedTriggers.push(t);
+    }
+  }
+
+  for (const group of ctx.groups) {
+    if (group.files.length === 0) continue;
+    say(paint.bold(`  ${group.title}:`));
+    for (const file of group.files) {
+      const display = file.path;
+      const sql = file.sql;
+      const fileChecksum = checksum(normalizeSqlForChecksum(sql));
+      const appliedRecord = await findAppliedMigration(client, group.key, display);
+
+      if (appliedRecord) {
+        if (appliedRecord.checksum !== fileChecksum) {
+          if (group.key === 'migrations') {
+            throw new CliError('MIGRATION_DRIFT', `Migration ${display} changed after it was applied`, {
+              hint: 'Nothing was applied. Applied migrations are immutable. Restore the file (e.g. `git checkout -- '
+                + `${display}\`), change accessnexus.schema.ts instead and run \`npx accessnexus generate\` to get a new __changes migration.`,
+              data: { ...pushRolledBack(ctx.base, state), failed: display },
+            });
+          }
+
+          if (appliedRecord.hashStrategy !== 'normalized_sql_v1') {
+            await refreshAppliedMigrationChecksum(client, group.key, display, fileChecksum);
+            state.skipped.push({ path: display, reason: 'checksum_normalized' });
+            say(`  ${paint.gray('-')} ${display} (checksum normalized)`);
+            continue;
+          }
+        } else {
+          state.skipped.push({ path: display, reason: 'already_applied' });
+          say(`  ${paint.gray('-')} ${display} (already applied)`);
+          continue;
+        }
+      }
+
+      const startedAt = Date.now();
+      try {
+        await client.query(sql);
+      } catch (error: any) {
+        const pgMessage = String(error?.message ?? 'unknown SQL error');
+        throw new CliError('PUSH_FAILED', `Postgres rejected ${display}: ${pgMessage}`, {
+          hint: 'The whole push was rolled back: nothing from it was applied (not the files in "rolledBack", not the foreign-policy drops). '
+            + 'Fix the cause in accessnexus.schema.ts (or the database state), run `npx accessnexus generate`, then push again.',
+          data: { ...pushRolledBack(ctx.base, state), failed: display, sqlState: error?.code ?? null },
+          cause: error,
+        });
+      }
+      const record = {
+        category: group.key,
+        filename: display,
+        checksum: fileChecksum,
+        executionTimeMs: Date.now() - startedAt,
+      };
+      if (appliedRecord) await updateAppliedMigration(client, record);
+      else await recordMigration(client, { ...record, success: true });
+      state.applied.push(display);
+      say(`  ${paint.green('✓')} ${display}${appliedRecord ? paint.gray(' (re-applied: changed)') : ''}`);
+    }
+    say('');
+  }
+}
+
+/** Names of the tables and functions a live plan snapshots. */
+function planScope(ctx: PushContext, defaultSchema: string): SnapshotScope {
+  const functions: SnapshotScope['functions'] = [];
+  for (const group of ctx.groups) {
+    for (const file of group.files) {
+      for (const fn of functionsDefinedIn(file.sql, defaultSchema)) {
+        if (!functions.some((f) => f.schema === fn.schema && f.name === fn.name)) functions.push(fn);
+      }
+    }
+  }
+  return { tables: ctx.targets.tables, functions };
+}
+
+export interface LivePlan {
+  database: string;
+  /** Files the push would execute (not yet applied, or changed policy/trigger/RPC files). */
+  wouldApply: string[];
+  skipped: Array<{ path: string; reason: string }>;
+  droppedPolicies: ForeignPolicy[];
+  droppedTriggers: ForeignTrigger[];
+  foreignPolicies: ForeignPolicy[];
+  foreignTriggers: ForeignTrigger[];
+  /** Refusals the real push stops at before applying anything. */
+  blockers: Array<{ code: string; message: string; hint?: string }>;
+  /** The push would fail: the file Postgres rejected and its error. Nothing persisted. */
+  failed: { file: string | null; code: string; message: string; sqlState: string | null } | null;
+  changed: boolean;
+  summary: { added: number; modified: number; removed: number };
+  changes: PlanChange[];
+  riskyChanges: RiskyChange[];
+  persisted: false;
+}
+
+/**
+ * Compute what push would change in the live database by REHEARSAL: lock,
+ * BEGIN, snapshot, apply exactly what push applies, snapshot, ROLLBACK.
+ */
+async function rehearsePush(dbUrl: string, ctx: PushContext, defaultSchema: string): Promise<LivePlan> {
+  const state = newPushState();
+  const scope = planScope(ctx, defaultSchema);
+  const client = await createPgClient(dbUrl);
+  let lockAcquired = false;
+  let failed: LivePlan['failed'] = null;
+  let changes: PlanChange[] = [];
+  try {
+    if (pushNeedsBypass(ctx.groups)) {
+      try {
+        await assertRoleBypassesRls(client);
+      } catch (err) {
+        const error = toCliError(err);
+        state.blockers.push({ code: error.code, message: error.message, ...(error.hint ? { hint: error.hint } : {}) });
+      }
+    }
+    const attempt = await client.query(`SELECT pg_try_advisory_lock(hashtext('accessnexus_push_lock')) AS locked;`);
+    if (attempt.rows?.[0]?.locked !== true) {
+      throw new CliError('PUSH_LOCKED', 'Another accessnexus push is running on this database; the plan was not computed', {
+        hint: 'Nothing was touched. Wait for the other push to finish, then run the plan again.',
+      });
+    }
+    lockAcquired = true;
+
+    await client.query('BEGIN');
+    try {
+      const before = await captureSnapshot(client, scope);
+      try {
+        await applyPushInTransaction(client, ctx, state, true);
+      } catch (err) {
+        const error = toCliError(err);
+        const data = (error.data ?? {}) as Record<string, unknown>;
+        failed = {
+          file: (data.failed as string | undefined) ?? null,
+          code: error.code,
+          message: error.message,
+          sqlState: (data.sqlState as string | null | undefined) ?? null,
+        };
+      }
+      if (!failed) changes = diffSnapshots(before, await captureSnapshot(client, scope));
+    } finally {
+      await client.query('ROLLBACK').catch(() => {});
+    }
+  } finally {
+    if (lockAcquired) await releasePushLock(client).catch(() => {});
+    await client.end().catch(() => {});
+  }
+
+  return {
+    database: redactUrl(dbUrl),
+    wouldApply: failed ? [] : state.applied,
+    skipped: state.skipped,
+    droppedPolicies: state.droppedPolicies,
+    droppedTriggers: state.droppedTriggers,
+    foreignPolicies: state.foreignPolicies ?? [],
+    foreignTriggers: state.foreignTriggers ?? [],
+    blockers: state.blockers,
+    failed,
+    changed: changes.length > 0,
+    summary: summarizeChanges(changes),
+    changes,
+    riskyChanges: findRiskyChanges(changes),
+    persisted: false,
+  };
+}
+
+function reportLivePlan(plan: LivePlan): void {
+  log(paint.bold(`  Live plan against ${plan.database} (rehearsed in a rolled-back transaction):\n`));
+  if (plan.failed) {
+    log(`  ${paint.red('✗ The push would fail:')} ${plan.failed.message}`);
+    if (plan.failed.file) log(`    file: ${plan.failed.file}`);
+    log(`  ${paint.gray('Nothing was persisted.')}\n`);
+    return;
+  }
+  if (plan.wouldApply.length > 0) {
+    log(`  Would apply ${plan.wouldApply.length} file(s), skip ${plan.skipped.length} already applied.`);
+  }
+  if (!plan.changed) {
+    log(`  ${paint.green('✓')} No catalog changes: the database already matches what push would apply\n`);
+  } else {
+    log(`  ${paint.green('+')} added: ${plan.summary.added}   ${paint.yellow('~')} modified: ${plan.summary.modified}   ${paint.red('-')} removed: ${plan.summary.removed}\n`);
+    for (const line of renderPlan(plan.changes, plan.riskyChanges)) log(line);
+  }
+  for (const blocker of plan.blockers) {
+    log(`  ${paint.yellow('!')} push would refuse [${blocker.code}]: ${blocker.message}`);
+  }
+  if (plan.blockers.length > 0) log('');
+}
+
 
 /** Generated SQL files on disk that differ from what the current schema produces. */
 async function staleGeneratedSql(config: ResolvedConfig): Promise<Array<{ path: string; status: string }>> {
