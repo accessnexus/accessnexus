@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="AccessNexus">
+  <defs>
+    <linearGradient id="an-grad" x1="6" y1="4" x2="42" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6366f1" />
+      <stop offset="1" stop-color="#06b6d4" />
+    </linearGradient>
+  </defs>
+  <path
+    d="M24 3.5 41.8 13.75v20.5L24 44.5 6.2 34.25v-20.5Z"
+    fill="none"
+    stroke="url(#an-grad)"
+    stroke-width="3.2"
+    stroke-linejoin="round"
+  />
+  <g stroke="url(#an-grad)" stroke-width="2.6" stroke-linecap="round" opacity=".55">
+    <path d="M24 24 24 11" />
+    <path d="M24 24 35.3 30.5" />
+    <path d="M24 24 12.7 30.5" />
+  </g>
+  <g fill="url(#an-grad)">
+    <circle cx="24" cy="11" r="3" />
+    <circle cx="35.3" cy="30.5" r="3" />
+    <circle cx="12.7" cy="30.5" r="3" />
+    <circle cx="24" cy="24" r="6" />
+  </g>
+  <path d="M24 21.2a1.6 1.6 0 0 1 .9 2.92V27h-1.8v-2.88A1.6 1.6 0 0 1 24 21.2Z" fill="#fff" />
+</svg>

@@ -57,7 +57,8 @@ src/
                  #   (push.integration.test.ts runs only with ACCESSNEXUS_TEST_DB_URL)
 examples/        # fullstack-saas.schema.ts + seed — reference schema exercising all features
 generated/       # committed generated output (migrations, policies, triggers, rpcs, sdk)
-docs/            # landing page (index.html); private notes in docs/ are gitignored
+docs/            # VitePress site (English at the root, Portuguese under docs/pt/); private
+                 #   notes in docs/ are gitignored and excluded from the build
 llms.txt         # agent reference shipped to users (every ts snippet must typecheck)
 dist/            # build output — NOT committed (built by `prepare` / `prepublishOnly`)
 ```
@@ -77,6 +78,8 @@ npm run generate:example    # build + regenerate generated/ from accessnexus.con
 node dist/cli/index.js <cmd>  # CLI from a build: init | generate | diff | push | seed | validate | help
 npm run build               # clean tsc build to dist/
 npm run typecheck           # tsc --noEmit for src/ and examples/
+npm run docs:snippets       # typecheck every ts snippet importing 'accessnexus' (llms.txt, README, docs/)
+npm run docs:dev            # docs site locally (docs:build fails on dead links)
 # Integration tests against a real Supabase Postgres (see the file header for the docker setup):
 ACCESSNEXUS_TEST_DB_URL=postgres://postgres:postgres@127.0.0.1:55439/postgres npx vitest run push.integration
 ```
@@ -130,5 +133,6 @@ ACCESSNEXUS_TEST_DB_URL=postgres://postgres:postgres@127.0.0.1:55439/postgres np
 2. If a generator changed: `npm run generate:example` run, `generated/` diff reviewed (only
    intended SQL changes).
 3. `npm run typecheck` clean; `npm run build` and `npm pack --dry-run` succeed.
-4. Docs still true: `README.md`, `llms.txt` (snippets typecheck), `CHANGELOG.md`.
+4. Docs still true: `README.md`, `llms.txt`, `docs/` (English and Portuguese pages together),
+   `CHANGELOG.md`; `npm run docs:snippets` and `npm run docs:build` pass.
 5. Commit message follows Conventional Commits with **no AI co-author / attribution**.

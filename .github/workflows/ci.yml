@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    strategy:
+      matrix:
+        node-version: [20, 22, 24]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Generated output is up to date
+        run: npm run generate:example && git diff --exit-code generated/
+
+      - name: Package contents
+        run: npm pack --dry-run
+
+  integration:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: ghcr.io/supabase/postgres:15.19.0.007
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55439:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare Supabase auth stand-ins
+        run: |
+          docker exec ${{ job.services.postgres.id }} psql -U supabase_admin -d postgres -c "
+            CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS \$\$
+              SELECT coalesce(nullif(current_setting('request.jwt.claim', true), ''),
+                              nullif(current_setting('request.jwt.claims', true), ''))::jsonb \$\$;
+            GRANT EXECUTE ON FUNCTION auth.jwt() TO anon, authenticated;
+            ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS email_confirmed_at timestamptz;"
+
+      - name: Integration tests
+        env:
+          ACCESSNEXUS_TEST_DB_URL: postgres://postgres:postgres@127.0.0.1:55439/postgres
+        run: npx vitest run push.integration

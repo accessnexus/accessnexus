@@ -46,3 +46,6 @@ bin/
 docs/STRATEGY.md
 docs/FIREBASE_PLAN.md
 docs/supabase-postgres-best-practices/
+.snippets-tmp/
+docs/.vitepress/dist/
+docs/.vitepress/cache/

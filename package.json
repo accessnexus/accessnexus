@@ -43,7 +43,11 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.examples.json",
     "prepublishOnly": "npm run typecheck && npm test",
     "prepare": "npm run build",
-    "generate:example": "npm run build && node dist/cli/index.js generate"
+    "generate:example": "npm run build && node dist/cli/index.js generate",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs",
+    "docs:snippets": "node scripts/check-doc-snippets.mjs"
   },
   "keywords": [
     "supabase",
@@ -89,6 +93,7 @@
     "@types/node": "^22.15.18",
     "pg": "^8.18.0",
     "typescript": "^5.8.3",
+    "vitepress": "^1.6.4",
     "vitest": "^3.1.4"
   }
 }
