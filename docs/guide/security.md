@@ -190,7 +190,7 @@ The complete list, with fixes, is in [Troubleshooting](/guide/troubleshooting#sc
 
 - [Policies](/guide/policies) and [Permissions](/guide/permissions)
 - [RPCs](/guide/rpcs): checking the caller in definer code
-- [Cookbook](/guide/cookbook): the rules above, applied
+- [Examples](/guide/cookbook): the rules above, applied
 - [Existing projects](/guide/existing-project): how imported policies are kept fail-closed
 - [Troubleshooting](/guide/troubleshooting)
 - [Limits & roadmap](/guide/limits)

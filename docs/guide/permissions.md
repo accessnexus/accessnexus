@@ -288,16 +288,16 @@ What each piece does:
 App flow: `db.teams.create({ name, created_by: user.id })` makes the user an owner; owners then add people with `db.team_members.create({ team_id, user_id, role })`.
 
 ::: warning Visibility derived from sharing a tenant needs consent
-If co-members can read each other's personal data (a profile with name and email), adding someone to a team must require their consent. Otherwise anyone can create a team, add a stranger by user id and read their data as a "co-member". In that case set the membership table's `insert` to `policy.none()` and add people only through an accepted invitation, for example a `security: 'definer'` RPC that checks the invited, confirmed email. See the [Cookbook](/guide/cookbook).
+If co-members can read each other's personal data (a profile with name and email), adding someone to a team must require their consent. Otherwise anyone can create a team, add a stranger by user id and read their data as a "co-member". In that case set the membership table's `insert` to `policy.none()` and add people only through an accepted invitation, for example a `security: 'definer'` RPC that checks the invited, confirmed email. See the [Examples](/guide/cookbook).
 :::
 
 ::: tip Child rows need a same-tenant guard
-RLS checks each row against its own tenant column, and foreign keys are checked without RLS. A `tasks` row with its own `team_id` that points at a project of another team passes both. Add a guard trigger that checks the parent's tenant; `validate` warns `TENANT_PARENT_UNCHECKED` when it is missing. The pattern is in the [Cookbook](/guide/cookbook).
+RLS checks each row against its own tenant column, and foreign keys are checked without RLS. A `tasks` row with its own `team_id` that points at a project of another team passes both. Add a guard trigger that checks the parent's tenant; `validate` warns `TENANT_PARENT_UNCHECKED` when it is missing. The pattern is in the [Examples](/guide/cookbook).
 :::
 
 ## Next steps
 
 - [Policies](/guide/policies) - the builders permissions compile to
 - [Triggers](/guide/triggers) - `lockColumns` and definer triggers used above
-- [Cookbook](/guide/cookbook) - invitations, child resources, column-scoped updates
+- [Examples](/guide/cookbook) - invitations, child resources, column-scoped updates
 - [Permissions API](/api/permissions) - full types

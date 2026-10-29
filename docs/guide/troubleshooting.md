@@ -151,4 +151,4 @@ Errors make `validate` fail; warnings should be fixed unless the choice is delib
 - [Error codes reference](/api/errors)
 - [CLI](/guide/cli)
 - [Security model](/guide/security)
-- [Cookbook](/guide/cookbook)
+- [Examples](/guide/cookbook)

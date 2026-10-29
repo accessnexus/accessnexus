@@ -335,11 +335,11 @@ export const addCreator = trigger.custom({
 A definer body skips every policy, so it must decide what is allowed from `NEW`, `OLD` and `(SELECT auth.uid())` alone. Schema-qualify every table (`public.team_members`). Prefer this over a "bootstrap" INSERT rule on the membership table ("the creator may add themselves as owner"), which stays valid forever and lets a removed creator rejoin.
 :::
 
-An invoker trigger is the right choice for guards that should respect RLS. For example, a `BEFORE INSERT OR UPDATE` trigger that checks a task's project belongs to the same org: a project of another org is invisible through RLS, so it is reported like a project that does not exist. The full pattern is in the [Cookbook](/guide/cookbook).
+An invoker trigger is the right choice for guards that should respect RLS. For example, a `BEFORE INSERT OR UPDATE` trigger that checks a task's project belongs to the same org: a project of another org is invisible through RLS, so it is reported like a project that does not exist. The full pattern is in the [Examples](/guide/cookbook).
 
 ## Next steps
 
 - [Policies](/guide/policies) - row-level rules that triggers complement
 - [Permissions](/guide/permissions) - multi-tenant walkthrough using `lockColumns` and a definer trigger
-- [Cookbook](/guide/cookbook) - same-tenant guards and column-scoped updates
+- [Examples](/guide/cookbook) - same-tenant guards and column-scoped updates
 - [Trigger API](/api/trigger) - full signatures and types

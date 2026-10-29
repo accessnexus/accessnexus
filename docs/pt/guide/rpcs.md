@@ -247,7 +247,7 @@ Depois de mudar os argumentos de uma RPC definer ou removê-la, a versão anteri
 ## Veja também {#related}
 
 - [Modelo de segurança](/pt/guide/security): o que o gerador garante e o que o código definer precisa fazer
-- [Cookbook](/pt/guide/cookbook): convites, restaurar após soft delete
+- [Exemplos](/pt/guide/cookbook): convites, restaurar após soft delete
 - [Triggers](/pt/guide/triggers): triggers com `security: 'definer'` seguem as mesmas regras
 - [Referência da API `rpc()`](/pt/api/rpc)
 - [SDK gerado](/pt/api/sdk)

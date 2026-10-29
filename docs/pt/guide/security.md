@@ -190,7 +190,7 @@ O `validate` não consegue provar que uma policy expressa o que você quis dizer
 
 - [Policies](/pt/guide/policies) e [Permissões](/pt/guide/permissions)
 - [RPCs](/pt/guide/rpcs): checando quem chama em código definer
-- [Cookbook](/pt/guide/cookbook): as regras acima, aplicadas
+- [Exemplos](/pt/guide/cookbook): as regras acima, aplicadas
 - [Projetos existentes](/pt/guide/existing-project): como as policies importadas continuam fail-closed
 - [Solução de problemas](/pt/guide/troubleshooting)
 - [Limites e roadmap](/pt/guide/limits)

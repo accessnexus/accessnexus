@@ -335,11 +335,11 @@ export const addCreator = trigger.custom({
 Um corpo definer pula todas as policies, então precisa decidir o que é permitido apenas a partir de `NEW`, `OLD` e `(SELECT auth.uid())`. Qualifique toda tabela com o schema (`public.team_members`). Prefira isso a uma regra de INSERT de "bootstrap" na tabela de membros ("quem criou pode se adicionar como owner"), que continua válida para sempre e deixa um criador removido voltar.
 :::
 
-Um trigger invoker é a escolha certa para proteções que devem respeitar o RLS. Por exemplo, um trigger `BEFORE INSERT OR UPDATE` que verifica se o projeto de uma tarefa pertence à mesma org: um projeto de outra org é invisível pelo RLS, então é reportado como um projeto que não existe. O padrão completo está no [Cookbook](/pt/guide/cookbook).
+Um trigger invoker é a escolha certa para proteções que devem respeitar o RLS. Por exemplo, um trigger `BEFORE INSERT OR UPDATE` que verifica se o projeto de uma tarefa pertence à mesma org: um projeto de outra org é invisível pelo RLS, então é reportado como um projeto que não existe. O padrão completo está no [Exemplos](/pt/guide/cookbook).
 
 ## Próximos passos {#next-steps}
 
 - [Policies](/pt/guide/policies) - regras por linha que os triggers complementam
 - [Permissões](/pt/guide/permissions) - passo a passo multi-tenant usando `lockColumns` e um trigger definer
-- [Cookbook](/pt/guide/cookbook) - proteções de mesmo tenant e updates restritos a colunas
+- [Exemplos](/pt/guide/cookbook) - proteções de mesmo tenant e updates restritos a colunas
 - [API de triggers](/pt/api/trigger) - assinaturas e tipos completos

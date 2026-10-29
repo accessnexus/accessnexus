@@ -288,16 +288,16 @@ O que cada parte faz:
 Fluxo no app: `db.teams.create({ name, created_by: user.id })` torna o usuário um owner; depois os owners adicionam pessoas com `db.team_members.create({ team_id, user_id, role })`.
 
 ::: warning Visibilidade derivada de compartilhar um tenant exige consentimento
-Se membros do mesmo time podem ler dados pessoais uns dos outros (um perfil com nome e e-mail), adicionar alguém a um time precisa exigir o consentimento dessa pessoa. Do contrário, qualquer um pode criar um time, adicionar um desconhecido pelo id de usuário e ler os dados dele como "colega de time". Nesse caso, defina o `insert` da tabela de membros como `policy.none()` e adicione pessoas só por meio de um convite aceito, por exemplo uma RPC `security: 'definer'` que verifica o e-mail convidado e confirmado. Veja o [Cookbook](/pt/guide/cookbook).
+Se membros do mesmo time podem ler dados pessoais uns dos outros (um perfil com nome e e-mail), adicionar alguém a um time precisa exigir o consentimento dessa pessoa. Do contrário, qualquer um pode criar um time, adicionar um desconhecido pelo id de usuário e ler os dados dele como "colega de time". Nesse caso, defina o `insert` da tabela de membros como `policy.none()` e adicione pessoas só por meio de um convite aceito, por exemplo uma RPC `security: 'definer'` que verifica o e-mail convidado e confirmado. Veja o [Exemplos](/pt/guide/cookbook).
 :::
 
 ::: tip Linhas filhas precisam de uma proteção de mesmo tenant
-O RLS verifica cada linha contra sua própria coluna de tenant, e foreign keys são verificadas sem RLS. Uma linha de `tasks` com seu próprio `team_id` que aponta para um projeto de outro time passa nas duas verificações. Adicione um trigger de proteção que verifica o tenant do pai; o `validate` emite o aviso `TENANT_PARENT_UNCHECKED` quando ele falta. O padrão está no [Cookbook](/pt/guide/cookbook).
+O RLS verifica cada linha contra sua própria coluna de tenant, e foreign keys são verificadas sem RLS. Uma linha de `tasks` com seu próprio `team_id` que aponta para um projeto de outro time passa nas duas verificações. Adicione um trigger de proteção que verifica o tenant do pai; o `validate` emite o aviso `TENANT_PARENT_UNCHECKED` quando ele falta. O padrão está no [Exemplos](/pt/guide/cookbook).
 :::
 
 ## Próximos passos {#next-steps}
 
 - [Policies](/pt/guide/policies) - os builders para os quais as permissões compilam
 - [Triggers](/pt/guide/triggers) - `lockColumns` e triggers definer usados acima
-- [Cookbook](/pt/guide/cookbook) - convites, recursos filhos, updates restritos a colunas
+- [Exemplos](/pt/guide/cookbook) - convites, recursos filhos, updates restritos a colunas
 - [API de permissões](/pt/api/permissions) - tipos completos

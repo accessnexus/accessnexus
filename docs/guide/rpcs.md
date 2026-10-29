@@ -247,7 +247,7 @@ After you change a definer RPC's arguments or remove it, the previous version is
 ## Related
 
 - [Security model](/guide/security): what the generator guarantees and what definer code must do
-- [Cookbook](/guide/cookbook): invitations, restore after soft delete
+- [Examples](/guide/cookbook): invitations, restore after soft delete
 - [Triggers](/guide/triggers): `security: 'definer'` triggers follow the same rules
 - [`rpc()` API reference](/api/rpc)
 - [Generated SDK](/api/sdk)

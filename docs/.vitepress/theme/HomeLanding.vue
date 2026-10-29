@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useData, withBase } from "vitepress";
 import HeroRls from "./HeroRls.vue";
 
@@ -18,21 +18,15 @@ const COPY = {
     start: "Get started",
     why: "Why AccessNexus",
     copied: "Copied",
-    codeTitle: "Hand-written RLS vs. AccessNexus.",
-    codeLead: "The same table, the same intent. One version has four security bugs that only show up in production.",
-    before: "by hand",
-    after: "AccessNexus",
+    codeTitle: "One rule in TypeScript. Correct SQL in Postgres.",
+    codeLead: "Write the intent. AccessNexus writes the SQL — and gets right the details that break in production.",
+    after: "generated SQL",
     drag: "Drag to compare",
-    bugs: [
-      "no FORCE: the table owner bypasses every policy",
-      "bare auth.uid() is re-evaluated for every row",
-      "anyone can insert notes as any user",
-      "no WITH CHECK: a row can be handed to another user",
-    ],
     goods: [
-      "ENABLE + FORCE RLS, (SELECT auth.uid()) evaluated once",
-      "insert and update pinned to the signed-in user",
-      "no delete rule: deny-all, not forgotten",
+      "ENABLE + FORCE RLS: not even the table owner skips it",
+      "(SELECT auth.uid()) is evaluated once per query, not per row",
+      "inserts and updates are pinned with WITH CHECK",
+      "no delete rule? The policy is dropped: deny-all",
     ],
     bento: [
       { k: "secure", t: "Secure by default", d: "ENABLE + FORCE RLS everywhere. No rule means deny-all. Removing a rule revokes it." },
@@ -56,21 +50,15 @@ const COPY = {
     start: "Começar",
     why: "Por que AccessNexus",
     copied: "Copiado",
-    codeTitle: "RLS à mão vs. AccessNexus.",
-    codeLead: "A mesma tabela, a mesma intenção. Uma das versões tem quatro bugs de segurança que só aparecem em produção.",
-    before: "à mão",
-    after: "AccessNexus",
+    codeTitle: "Uma regra em TypeScript. SQL correto no Postgres.",
+    codeLead: "Escreva a intenção. O AccessNexus escreve o SQL — e acerta os detalhes que quebram em produção.",
+    after: "SQL gerado",
     drag: "Arraste para comparar",
-    bugs: [
-      "sem FORCE: o dono da tabela ignora todas as policies",
-      "auth.uid() solto é reavaliado a cada linha",
-      "qualquer um insere notas como qualquer usuário",
-      "sem WITH CHECK: a linha pode ser passada para outro usuário",
-    ],
     goods: [
-      "ENABLE + FORCE RLS, (SELECT auth.uid()) avaliado uma vez",
-      "insert e update presos ao usuário logado",
-      "sem regra de delete: tudo negado, não esquecido",
+      "ENABLE + FORCE RLS: nem o dono da tabela escapa",
+      "(SELECT auth.uid()) avaliado uma vez por consulta, não por linha",
+      "insert e update travados com WITH CHECK",
+      "sem regra de delete? A policy é removida: tudo negado",
     ],
     bento: [
       { k: "secure", t: "Seguro por padrão", d: "ENABLE + FORCE RLS em tudo. Sem regra, tudo negado. Remover uma regra revoga o acesso." },
@@ -100,6 +88,81 @@ const ICONS: Record<string, string[]> = {
   fast: ["M13 2 3 14h9l-1 8 10-12h-9l1-8z"],
   drift: ["M6 3v12", "M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 9a9 9 0 0 1-9 9"],
 };
+
+type Tok = { t: string; c?: string };
+const K = "c-k", S = "c-s", F = "c-f", B = "c-bad";
+
+/** The schema typed live in the "after" pane. */
+const TS: Tok[] = [
+  { t: "import", c: K }, { t: " { defineSchema, policy, table } " }, { t: "from", c: K }, { t: " " }, { t: "'accessnexus'", c: S }, { t: ";\n\n" },
+  { t: "export default", c: K }, { t: " defineSchema({\n  notes: table({\n    columns: { id: " }, { t: "'uuid'", c: S },
+  { t: ", user_id: " }, { t: "'uuid'", c: S }, { t: ", body: " }, { t: "'text'", c: S }, { t: " },\n    primaryKey: " }, { t: "'id'", c: S },
+  { t: ",\n    policies: {\n      select: policy." }, { t: "isOwner", c: F }, { t: "(" }, { t: "'user_id'", c: S },
+  { t: "),\n      insert: policy." }, { t: "isOwner", c: F }, { t: "(" }, { t: "'user_id'", c: S },
+  { t: "),\n      update: policy." }, { t: "isOwner", c: F }, { t: "(" }, { t: "'user_id'", c: S },
+  { t: "),\n    },\n  }),\n});" },
+];
+const TOTAL = TS.reduce((n, tok) => n + tok.t.length, 0);
+
+/** What `generate` writes for that schema (trimmed to the policies). */
+const SQL: Tok[][] = [
+  [{ t: "ALTER TABLE", c: K }, { t: " notes " }, { t: "ENABLE ROW LEVEL SECURITY", c: K }, { t: ";" }],
+  [{ t: "ALTER TABLE", c: K }, { t: " notes " }, { t: "FORCE ROW LEVEL SECURITY", c: K }, { t: ";" }],
+  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_select"', c: S }, { t: " " }, { t: "ON", c: K }, { t: " notes " }, { t: "FOR SELECT TO", c: K }, { t: " authenticated" }],
+  [{ t: "  USING", c: K }, { t: " ((" }, { t: "SELECT", c: K }, { t: " auth." }, { t: "uid", c: F }, { t: "()) = user_id);" }],
+  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_insert"', c: S }, { t: " " }, { t: "ON", c: K }, { t: " notes " }, { t: "FOR INSERT TO", c: K }, { t: " authenticated" }],
+  [{ t: "  WITH CHECK", c: K }, { t: " ((" }, { t: "SELECT", c: K }, { t: " auth." }, { t: "uid", c: F }, { t: "()) = user_id);" }],
+  [{ t: "CREATE POLICY", c: K }, { t: " " }, { t: '"accessnexus_notes_update"', c: S }, { t: " " }, { t: "ON", c: K }, { t: " notes " }, { t: "FOR UPDATE TO", c: K }, { t: " authenticated" }],
+  [{ t: "  USING", c: K }, { t: " ((" }, { t: "SELECT", c: K }, { t: " auth." }, { t: "uid", c: F }, { t: "()) = user_id)" }],
+  [{ t: "  WITH CHECK", c: K }, { t: " ((" }, { t: "SELECT", c: K }, { t: " auth." }, { t: "uid", c: F }, { t: "()) = user_id);" }],
+  [{ t: "DROP POLICY IF EXISTS", c: K }, { t: " " }, { t: '"accessnexus_notes_delete"', c: S }, { t: " " }, { t: "ON", c: K }, { t: " notes;" }],
+];
+void B;
+
+const typed = ref(TOTAL);
+const shownSql = ref(SQL.length);
+const typing = computed(() => typed.value < TOTAL);
+const typedTokens = computed(() => {
+  let left = typed.value;
+  const out: Tok[] = [];
+  for (const tok of TS) {
+    if (left <= 0) break;
+    out.push({ t: tok.t.slice(0, left), c: tok.c });
+    left -= tok.t.length;
+  }
+  return out;
+});
+
+/** Type the schema, run "generate", then reveal the SQL — once, when the panel scrolls into view. */
+function play() {
+  typed.value = 0;
+  shownSql.value = 0;
+  const typer = setInterval(() => {
+    typed.value = Math.min(TOTAL, typed.value + 3);
+    if (typed.value >= TOTAL) {
+      clearInterval(typer);
+      setTimeout(() => {
+        const reveal = setInterval(() => {
+          shownSql.value += 1;
+          if (shownSql.value >= SQL.length) clearInterval(reveal);
+        }, 110);
+      }, 450);
+    }
+  }, 18);
+}
+
+onMounted(() => {
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !compare.value) return;
+  typed.value = 0;
+  shownSql.value = 0;
+  const io = new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting)) {
+      io.disconnect();
+      play();
+    }
+  }, { threshold: 0.35 });
+  io.observe(compare.value);
+});
 
 // Before/after comparison: drag anywhere on the panel, or use the keyboard via the range input.
 const pos = ref(50);
@@ -164,9 +227,16 @@ async function copy() {
     </section>
 
     <!-- Before / after -->
-    <section class="block">
-      <h2>{{ t.codeTitle }}</h2>
-      <p class="sub">{{ t.codeLead }}</p>
+    <section class="block versus">
+      <div class="versus-copy">
+        <h2>{{ t.codeTitle }}</h2>
+        <p class="sub left">{{ t.codeLead }}</p>
+        <ul class="bug-list">
+          <li v-for="g in t.goods" :key="g"><span class="v">✓</span>{{ g }}</li>
+        </ul>
+        <p class="hint left">↔ {{ t.drag }}</p>
+      </div>
+      <div class="versus-demo">
       <div
         ref="compare"
         class="compare"
@@ -174,40 +244,14 @@ async function copy() {
         @pointerdown="startDrag"
       >
         <div class="pane before">
-          <div class="pane-head"><span class="dots"><i /><i /><i /></span>migrations/0042_notes_rls.sql<span class="tag bad">{{ t.before }}</span></div>
-<pre><code><span class="c-k">alter table</span> notes <span class="c-k">enable row level security</span>;
-<span class="c-bad">-- ✗ {{ t.bugs[0] }}</span>
-
-<span class="c-k">create policy</span> <span class="c-s">"read own"</span> <span class="c-k">on</span> notes <span class="c-k">for select</span>
-  <span class="c-k">using</span> (auth.<span class="c-f">uid</span>() = user_id);
-<span class="c-bad">-- ✗ {{ t.bugs[1] }}</span>
-
-<span class="c-k">create policy</span> <span class="c-s">"insert own"</span> <span class="c-k">on</span> notes <span class="c-k">for insert</span>
-  <span class="c-k">with check</span> (<span class="c-k">true</span>);
-<span class="c-bad">-- ✗ {{ t.bugs[2] }}</span>
-
-<span class="c-k">create policy</span> <span class="c-s">"edit own"</span> <span class="c-k">on</span> notes <span class="c-k">for update</span>
-  <span class="c-k">using</span> (auth.<span class="c-f">uid</span>() = user_id);
-<span class="c-bad">-- ✗ {{ t.bugs[3] }}</span></code></pre>
+          <div class="pane-head"><span class="dots"><i /><i /><i /></span>accessnexus.schema.ts<span class="tag ts">TypeScript</span></div>
+<pre><code><template v-for="(tok, i) in typedTokens" :key="i"><span :class="tok.c">{{ tok.t }}</span></template><span v-if="typing" class="caret">▍</span></code></pre>
         </div>
         <div class="pane after">
-          <div class="pane-head"><span class="dots"><i /><i /><i /></span>accessnexus.schema.ts<span class="tag good">{{ t.after }}</span></div>
-<pre><code><span class="c-k">import</span> { defineSchema, policy, table } <span class="c-k">from</span> <span class="c-s">'accessnexus'</span>;
-
-<span class="c-k">export default</span> defineSchema({
-  notes: table({
-    columns: { id: <span class="c-s">'uuid'</span>, user_id: <span class="c-s">'uuid'</span>, body: <span class="c-s">'text'</span> },
-    primaryKey: <span class="c-s">'id'</span>,
-    policies: {
-      select: policy.<span class="c-f">isOwner</span>(<span class="c-s">'user_id'</span>),
-      insert: policy.<span class="c-f">isOwner</span>(<span class="c-s">'user_id'</span>),
-      update: policy.<span class="c-f">isOwner</span>(<span class="c-s">'user_id'</span>),
-    },
-  }),
-});
-<span class="c-ok">// ✓ {{ t.goods[0] }}</span>
-<span class="c-ok">// ✓ {{ t.goods[1] }}</span>
-<span class="c-ok">// ✓ {{ t.goods[2] }}</span></code></pre>
+          <div class="pane-head"><span class="dots"><i /><i /><i /></span>generated/policies/notes_rls.sql<span class="tag good">{{ t.after }}</span></div>
+          <div class="gen-cmd"><span class="c-p">$</span> npx accessnexus generate <span v-if="shownSql > 0" class="c-ok">✓</span></div>
+<pre><code><template v-for="(line, i) in SQL" :key="i"><span v-if="i < shownSql" class="sql-line"><template v-for="(tok, j) in line" :key="j"><span :class="tok.c">{{ tok.t }}</span></template>
+</span></template></code></pre>
         </div>
         <div class="handle" aria-hidden="true"><span class="knob">⟷</span></div>
         <input
@@ -220,19 +264,21 @@ async function copy() {
           @input="pos = Number(($event.target as HTMLInputElement).value)"
         />
       </div>
-      <p class="hint">{{ t.drag }}</p>
+      </div>
     </section>
 
     <!-- Bento -->
     <section class="block">
       <div class="bento">
         <div v-for="(item, i) in t.bento" :key="item.k" class="cell" :class="{ wide: i === 0 || i === 3 || i === 4 }">
+          <div class="cell-head">
           <span class="icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path v-for="d in ICONS[item.k]" :key="d" :d="d" />
             </svg>
           </span>
           <h3>{{ item.t }}</h3>
+          </div>
           <p>{{ item.d }}</p>
         </div>
       </div>
@@ -588,11 +634,106 @@ pre code {
 .dark .c-f { color: #a5b4fc; }
 .dark .c-ok { color: #34d399; }
 
+.versus {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 40px;
+  align-items: center;
+}
+
+.versus h2 {
+  text-align: left;
+}
+
+@media (min-width: 1000px) {
+  .versus {
+    grid-template-columns: 1fr 2fr;
+  }
+}
+
+.versus-demo {
+  min-width: 0;
+}
+
+.bug-list {
+  list-style: none;
+  margin: 24px 0 0;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--l-muted);
+}
+
+.bug-list li {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.bug-list .v {
+  color: #10b981;
+  text-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+}
+
+.tag.ts {
+  color: #6366f1;
+  background: rgba(99, 102, 241, 0.12);
+}
+
+.hint.left {
+  text-align: left;
+  margin-top: 24px;
+}
+
+.caret {
+  color: #06b6d4;
+  text-shadow: 0 0 8px rgba(6, 182, 212, 0.9);
+  animation: blink 1s steps(1) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.gen {
+  border-top: 1px dashed var(--l-line);
+  opacity: 0.35;
+  transition: opacity 0.3s;
+}
+
+.gen.on {
+  opacity: 1;
+}
+
+.gen-cmd {
+  padding: 10px 16px 0;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  color: var(--l-fg);
+}
+
+.sub-head {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.sql-line {
+  animation: line-in 0.25s ease;
+}
+
+@keyframes line-in {
+  from { text-shadow: 0 0 10px rgba(16, 185, 129, 0.9); }
+}
+
+.compare .pane pre {
+  font-size: 11.5px;
+  padding: 14px 16px;
+}
+
 .compare {
   position: relative;
   display: grid;
   grid-template-columns: var(--pos) 1fr;
-  margin-top: 48px;
   border: 1px solid var(--l-line);
   border-radius: 12px;
   overflow: hidden;
@@ -624,7 +765,7 @@ pre code {
 
 .compare .before {
   background:
-    radial-gradient(ellipse 80% 60% at 0% 0%, rgba(239, 68, 68, 0.07), transparent),
+    radial-gradient(ellipse 80% 60% at 0% 0%, rgba(99, 102, 241, 0.08), transparent),
     var(--l-code);
 }
 
@@ -656,12 +797,10 @@ pre code {
   top: 0;
   bottom: 0;
   left: var(--pos);
-  width: 2px;
-  transform: translateX(-1px);
-  background: linear-gradient(180deg, #6366f1, #06b6d4);
-  box-shadow:
-    0 0 8px rgba(99, 102, 241, 0.9),
-    0 0 24px rgba(6, 182, 212, 0.6);
+  width: 1px;
+  background: linear-gradient(180deg, transparent, #6366f1 20%, #06b6d4 80%, transparent);
+  box-shadow: 0 0 6px rgba(99, 102, 241, 0.8);
+  animation: neon-pulse 2.4s ease-in-out infinite;
   pointer-events: none;
 }
 
@@ -671,17 +810,16 @@ pre code {
   left: 50%;
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   transform: translate(-50%, -50%);
+  border: 1px solid rgba(129, 140, 248, 0.9);
   border-radius: 50%;
-  font-size: 16px;
-  color: #fff;
-  background: linear-gradient(135deg, #6366f1, #06b6d4);
-  box-shadow:
-    0 0 0 4px rgba(99, 102, 241, 0.18),
-    0 0 18px rgba(99, 102, 241, 0.8),
-    0 0 40px rgba(6, 182, 212, 0.5);
+  font-size: 13px;
+  color: #a5b4fc;
+  background: var(--l-card);
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.55);
+  animation: neon-pulse 2.4s ease-in-out infinite;
 }
 
 .range {
@@ -711,12 +849,18 @@ pre code {
 .c-bad { color: #ef4444; }
 .dark .c-bad { color: #f87171; }
 
+.cell-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
 .icon {
   display: inline-grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
-  margin-bottom: 18px;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
   border: 1px solid var(--l-line);
   border-radius: 10px;
   color: #6366f1;
@@ -725,8 +869,8 @@ pre code {
 }
 
 .icon svg {
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   filter: drop-shadow(0 0 6px rgba(99, 102, 241, 0.55));
 }
 
@@ -736,6 +880,38 @@ pre code {
 
 .dark .icon svg {
   filter: drop-shadow(0 0 6px rgba(129, 140, 248, 0.9)) drop-shadow(0 0 14px rgba(6, 182, 212, 0.45));
+}
+
+.cell:nth-child(2)::after { animation-delay: -1.2s; }
+.cell:nth-child(3)::after { animation-delay: -2.4s; }
+.cell:nth-child(4)::after { animation-delay: -3.6s; }
+.cell:nth-child(5)::after { animation-delay: -4.8s; }
+.cell:nth-child(6)::after { animation-delay: -6s; }
+
+.icon {
+  animation: neon-breathe 3.2s ease-in-out infinite;
+}
+
+@keyframes neon-spin {
+  to { --neon-angle: 360deg; }
+}
+
+@keyframes neon-pulse {
+  50% { box-shadow: 0 0 14px rgba(6, 182, 212, 0.85); }
+}
+
+@keyframes neon-breathe {
+  50% { box-shadow: 0 0 10px rgba(99, 102, 241, 0.35); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cell::after,
+  .icon,
+  .handle,
+  .knob,
+  .caret {
+    animation: none;
+  }
 }
 
 .cell:hover .icon {
@@ -779,11 +955,12 @@ pre code {
   inset: 0;
   padding: 1px;
   border-radius: inherit;
-  background: linear-gradient(135deg, #6366f1, transparent 40%, transparent 60%, #06b6d4);
+  background: conic-gradient(from var(--neon-angle), transparent 0 72%, #6366f1 84%, #06b6d4 94%, transparent);
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
-  opacity: 0;
+  opacity: 0.45;
+  animation: neon-spin 7s linear infinite;
   transition: opacity 0.3s;
   pointer-events: none;
 }

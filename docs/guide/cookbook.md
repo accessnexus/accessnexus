@@ -1,4 +1,4 @@
-# Cookbook
+# Examples
 
 Complete schemas for common access patterns. Each one is a full `accessnexus.schema.ts`: copy it, run `npx accessnexus validate`, then `diff` and `generate`. They follow the [rules you must not break](/guide/security#rules-you-must-not-break).
 

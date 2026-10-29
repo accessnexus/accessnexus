@@ -151,4 +151,4 @@ Erros fazem o `validate` falhar; warnings devem ser corrigidos, a menos que a es
 - [Referência de códigos de erro](/pt/api/errors)
 - [CLI](/pt/guide/cli)
 - [Modelo de segurança](/pt/guide/security)
-- [Cookbook](/pt/guide/cookbook)
+- [Exemplos](/pt/guide/cookbook)

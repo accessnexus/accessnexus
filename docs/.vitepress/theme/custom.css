@@ -67,3 +67,10 @@
   max-width: none;
   padding: 0;
 }
+
+/* Animatable angle for the landing page's neon borders. */
+@property --neon-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}

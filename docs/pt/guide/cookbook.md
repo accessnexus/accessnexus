@@ -1,4 +1,4 @@
-# Cookbook
+# Exemplos
 
 Schemas completos para padrões de acesso comuns. Cada um é um `accessnexus.schema.ts` inteiro: copie, rode `npx accessnexus validate` e depois `diff` e `generate`. Eles seguem as [regras que você não pode quebrar](/pt/guide/security#rules-you-must-not-break).
 
