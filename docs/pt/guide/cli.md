@@ -140,7 +140,7 @@ npx accessnexus push
 npx accessnexus push --url "$SUPABASE_DB_URL"
 ```
 
-O `push` é o único comando que altera o banco. Ele aplica os arquivos gerados nesta ordem: migrations, policies, triggers, RPCs, e registra cada um em `public.accessnexus_migrations` com um checksum. O push inteiro é uma única transação: se qualquer arquivo falhar (`PUSH_FAILED`), nada desse push fica aplicado, nem os registros de controle.
+O `push` é o único comando que altera o banco. Ele aplica os arquivos gerados nesta ordem: migrations, RPCs, policies, triggers, e registra cada um em `public.accessnexus_migrations` com um checksum. O push inteiro é uma única transação: se qualquer arquivo falhar (`PUSH_FAILED`), nada desse push fica aplicado, nem os registros de controle.
 
 Antes de mexer em qualquer coisa, ele se recusa a continuar quando:
 

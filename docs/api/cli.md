@@ -178,7 +178,7 @@ Steps, in order:
 6. Take an advisory lock (waits, with a notice, if another push holds it), then `BEGIN` one transaction for everything below. Create `public.accessnexus_migrations` (RLS enabled and forced) if absent.
 7. Read `pg_policies` for every table the schema manages. A policy whose name is not one AccessNexus generates (`<prefix>_<table>_<op>`) is foreign: Postgres ORs permissive policies, so it would keep granting access next to the generated ones. Without `--replace-foreign-policies`: `FOREIGN_POLICIES` (message and `foreignPolicies` list table + policy), nothing applied. With it: they are dropped (`droppedPolicies`) in the transaction.
 8. If a not-yet-applied migration contains a destructive statement and `--allow-destructive` is not set: `DESTRUCTIVE_MIGRATION`, nothing applied.
-9. Apply files in the order migrations, policies, triggers, rpcs, recording each in `accessnexus_migrations`. Checksum: SHA-256 of the SQL without the `-- Generated at:` line.
+9. Apply files in the order migrations, rpcs, policies, triggers (RPCs first so policies and triggers can call them), recording each in `accessnexus_migrations`. Checksum: SHA-256 of the SQL without the `-- Generated at:` line.
    - unchanged and applied: skipped (`already_applied`);
    - an applied migration whose content changed: `MIGRATION_DRIFT`;
    - a changed policy, trigger or RPC file: re-applied;

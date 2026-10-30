@@ -178,7 +178,7 @@ Etapas, em ordem:
 6. Obtém um advisory lock (espera, com um aviso, se outro push estiver com ele) e abre (`BEGIN`) uma única transação para tudo o que vem abaixo. Cria `public.accessnexus_migrations` (RLS habilitado e forçado), se não existir.
 7. Lê `pg_policies` de cada tabela que o schema gerencia. Uma policy cujo nome não é um dos que o AccessNexus gera (`<prefix>_<table>_<op>`) é estranha: o Postgres combina policies permissivas com OR, então ela continuaria concedendo acesso ao lado das geradas. Sem `--replace-foreign-policies`: `FOREIGN_POLICIES` (a mensagem e `foreignPolicies` listam tabela + policy), nada é aplicado. Com a flag: elas são removidas (`droppedPolicies`) dentro da transação.
 8. Se uma migration ainda não aplicada contém um statement destrutivo e `--allow-destructive` não foi passado: `DESTRUCTIVE_MIGRATION`, nada é aplicado.
-9. Aplica os arquivos na ordem migrations, policies, triggers, rpcs, registrando cada um em `accessnexus_migrations`. Checksum: SHA-256 do SQL sem a linha `-- Generated at:`.
+9. Aplica os arquivos na ordem migrations, rpcs, policies, triggers (RPCs primeiro, para que policies e triggers possam chamá-las), registrando cada um em `accessnexus_migrations`. Checksum: SHA-256 do SQL sem a linha `-- Generated at:`.
    - inalterado e já aplicado: pulado (`already_applied`);
    - uma migration aplicada cujo conteúdo mudou: `MIGRATION_DRIFT`;
    - um arquivo de policy, trigger ou RPC alterado: reaplicado;

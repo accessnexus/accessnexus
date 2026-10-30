@@ -1503,9 +1503,10 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
 
   const plan: Array<{ key: string; title: string; files: string[] }> = [
     { key: 'migrations', title: 'Migrations', files: collectSqlFiles(config.output.migrations) },
+    // RPCs before policies: policies (and triggers) may call functions declared as rpc().
+    { key: 'rpcs', title: 'RPCs', files: collectSqlFiles(config.output.rpcs) },
     { key: 'policies', title: 'Policies', files: collectSqlFiles(config.output.policies) },
     { key: 'triggers', title: 'Triggers', files: collectSqlFiles(config.output.triggers) },
-    { key: 'rpcs', title: 'RPCs', files: collectSqlFiles(config.output.rpcs) },
   ];
 
   const planJson = plan.map((group) => ({

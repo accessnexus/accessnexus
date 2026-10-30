@@ -8,6 +8,9 @@ All notable changes to `accessnexus` are documented here. The format follows
 
 ### Fixed
 
+- `push` applies RPCs before policies and triggers (migrations → rpcs → policies → triggers).
+  On a fresh database a policy calling an `rpc()` helper failed because the function did not
+  exist yet.
 - `init --db-url` no longer takes `anon` away from definer functions. It emitted
   `rpc({ security: 'definer' })` without `allowAnon`, so `push` revoked `anon` from every
   SECURITY DEFINER function anon could execute (directly or via `PUBLIC`): `TO public`

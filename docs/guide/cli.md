@@ -140,7 +140,7 @@ npx accessnexus push
 npx accessnexus push --url "$SUPABASE_DB_URL"
 ```
 
-`push` is the only command that changes the database. It applies the generated files in this order: migrations, policies, triggers, RPCs, and records each in `public.accessnexus_migrations` with a checksum. The whole push is one transaction: if any file fails (`PUSH_FAILED`), nothing from that push stays applied, including the bookkeeping rows.
+`push` is the only command that changes the database. It applies the generated files in this order: migrations, RPCs, policies, triggers, and records each in `public.accessnexus_migrations` with a checksum. The whole push is one transaction: if any file fails (`PUSH_FAILED`), nothing from that push stays applied, including the bookkeeping rows.
 
 Before touching anything, it refuses to continue when:
 

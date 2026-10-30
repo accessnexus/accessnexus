@@ -19,7 +19,7 @@ accessnexus.schema.ts  (+ accessnexus.config.ts, accessnexus.seed.ts)
   generated/rpcs/        rpcs.sql
   <sdk dir>/             types.ts, client.ts
         │
-        │  push: migrations → policies → triggers → rpcs
+        │  push: migrations → rpcs → policies → triggers
         ▼
   Postgres  (applied files tracked in public.accessnexus_migrations)
 ```
@@ -104,7 +104,7 @@ O `push` executa estes passos, nesta ordem:
 | Pega o lock do push | Espera, e imprime um aviso em vez de travar em silêncio |
 | Abre uma única transação; recusa policies de RLS em tabelas gerenciadas que o AccessNexus não gerou, a menos que haja `--replace-foreign-policies` (aí as remove) | `FOREIGN_POLICIES` |
 | Recusa migrations pendentes que destroem dados, a menos que haja `--allow-destructive` | `DESTRUCTIVE_MIGRATION` |
-| Aplica os arquivos: migrations → policies → triggers → rpcs, e faz o commit | `PUSH_FAILED` (o push inteiro sofre rollback) |
+| Aplica os arquivos: migrations → rpcs → policies → triggers, e faz o commit | `PUSH_FAILED` (o push inteiro sofre rollback) |
 
 Nada é aplicado se qualquer checagem antes do último passo falhar. O `push --dry-run` para depois da checagem do schema: ele lista o plano e eventuais statements destrutivos sem conectar.
 

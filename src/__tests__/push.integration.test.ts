@@ -645,6 +645,35 @@ export default defineSchema({
     expect(left.rows.map((r) => r.tgname)).not.toContain('count_note');
   }, 60_000);
 
+  it('applies RPCs before policies, so a policy can call an rpc() on a fresh database', async () => {
+    writeSchema(`
+export default defineSchema({
+  notes: table({
+    columns: { id: 'uuid', owner_id: 'uuid', body: 'text' },
+    primaryKey: 'id',
+    policies: {
+      select: policy.custom('public.can_read_note(owner_id)'),
+      insert: policy.isOwner('owner_id'),
+      update: policy.isOwner('owner_id'),
+      delete: policy.none(),
+    },
+  }),
+}, {
+  rpcs: {
+    can_read_note: rpc({ args: { p_owner: 'uuid' }, returns: 'boolean', language: 'sql', volatility: 'stable', security: 'definer', allowAnon: true, body: 'SELECT p_owner = (SELECT auth.uid())' }),
+  },
+});`);
+    expect((await cli('generate')).code).toBe(0);
+    const pushed = await cli('push');
+    expect(pushed.json.error ?? null).toBeNull();
+    expect(pushed.code).toBe(0);
+    const order = pushed.json.applied.map((f: string) => f.split('/')[1]);
+    expect(order.indexOf('rpcs')).toBeLessThan(order.indexOf('policies'));
+    await admin.query(`INSERT INTO notes (id, owner_id, body) VALUES (gen_random_uuid(), '${ALICE}', 'mine')`);
+    expect((await asUser(ALICE, 'SELECT * FROM notes')).rowCount).toBe(1);
+    expect((await asUser(null, 'SELECT * FROM notes')).rowCount).toBe(0);
+  }, 60_000);
+
   it('push is atomic: a failing RPC file rolls back migrations, policies and bookkeeping', async () => {
     writeSchema(notesSchema());
     expect((await cli('generate')).code).toBe(0);

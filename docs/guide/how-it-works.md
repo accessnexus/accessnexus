@@ -19,7 +19,7 @@ accessnexus.schema.ts  (+ accessnexus.config.ts, accessnexus.seed.ts)
   generated/rpcs/        rpcs.sql
   <sdk dir>/             types.ts, client.ts
         │
-        │  push: migrations → policies → triggers → rpcs
+        │  push: migrations → rpcs → policies → triggers
         ▼
   Postgres  (applied files tracked in public.accessnexus_migrations)
 ```
@@ -104,7 +104,7 @@ Renames are detected heuristically. A statement that drops a table or column, or
 | Take the push lock | Waits, and prints a notice instead of hanging silently |
 | Open one transaction; refuse RLS policies on managed tables that AccessNexus did not generate, unless `--replace-foreign-policies` (then drop them) | `FOREIGN_POLICIES` |
 | Refuse pending migrations that destroy data, unless `--allow-destructive` | `DESTRUCTIVE_MIGRATION` |
-| Apply files: migrations → policies → triggers → rpcs, then commit | `PUSH_FAILED` (the whole push is rolled back) |
+| Apply files: migrations → rpcs → policies → triggers, then commit | `PUSH_FAILED` (the whole push is rolled back) |
 
 Nothing is applied when any check before the last step fails. `push --dry-run` stops after the schema check: it lists the plan and any destructive statements without connecting.
 

@@ -607,7 +607,7 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   are reported in `blockers`. `--allow-destructive` likewise. `--check` exits 1
   (`LIVE_DB_CHANGES`) when the database would change; a push Postgres would reject exits 1
   (`PUSH_WOULD_FAIL`) with `failed: { file, message, sqlState }`.
-- `push` — apply generated SQL in order migrations → policies → triggers → rpcs, tracked in
+- `push` — apply generated SQL in order migrations → rpcs → policies → triggers, tracked in
   `public.accessnexus_migrations`. The whole push (bookkeeping, foreign-policy drops and every
   file) runs in ONE transaction under an advisory lock: if anything fails, nothing from that
   push stays applied. (Exception: a migration that adds an enum value cannot use that value in
