@@ -5,6 +5,7 @@
 // Postgres error at push time (or worse, as an open table in production).
 // ============================================
 
+import { withExpandedPolicies } from '../core/policy/expand.js';
 import { closest } from './args.js';
 import type { SchemaIssue } from './output.js';
 
@@ -172,7 +173,13 @@ export function checkSchema(schema: unknown): SchemaIssue[] {
     return issues;
   }
 
-  const record = schema as Record<string, any>;
+  // `policies.all` is expanded by table()/defineSchema; expand it here too for
+  // a schema object built by hand, so every check sees one rule per operation.
+  const record = Object.fromEntries(
+    Object.entries(schema as Record<string, any>).map(([name, def]) => [name, withExpandedPolicies(def)]),
+  ) as Record<string, any>;
+  const rawRpcs = (schema as any).__rpcs;
+  if (rawRpcs) Object.defineProperty(record, '__rpcs', { value: rawRpcs, enumerable: false });
   const entries = Object.entries(record);
   if (entries.length === 0) {
     issues.push({
@@ -491,13 +498,13 @@ function checkTable(ctx: Ctx, tableName: string, def: any): void {
       code: 'INVALID_POLICIES',
       path: `${path}.policies`,
       message: 'policies must be an object like { select: policy.isAuthenticated() }',
-      hint: 'Use one key per operation: select, insert, update, delete.',
+      hint: 'Use one key per operation (select, insert, update, delete), or all for every operation.',
     });
   } else {
     for (const [op, rule] of Object.entries(def.policies as Record<string, unknown>)) {
       const opPath = `${path}.policies.${op}`;
       if (!(POLICY_OPERATIONS as readonly string[]).includes(op)) {
-        const mapped: Record<string, string> = { read: 'select', create: 'insert', write: 'update', all: 'select/insert/update/delete' };
+        const mapped: Record<string, string> = { read: 'select', create: 'insert', write: 'update' };
         push(ctx, {
           severity: 'error',
           code: 'UNKNOWN_POLICY_OPERATION',
@@ -505,7 +512,7 @@ function checkTable(ctx: Ctx, tableName: string, def: any): void {
           message: `"${op}" is not a policy operation`,
           hint: mapped[op]
             ? `Use "${mapped[op]}" (read/create/update/delete are only used inside definePermissions resources).`
-            : 'Valid keys: select, insert, update, delete.',
+            : 'Valid keys: select, insert, update, delete, and all (one rule for every operation).',
         });
         continue;
       }

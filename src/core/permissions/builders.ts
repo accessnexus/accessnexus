@@ -154,6 +154,18 @@ const ACTION_TO_OP = {
 /**
  * Check if any resource uses tenant scoping.
  */
+function expandAllLevel(perms: ResourcePermissions): ResourcePermissions {
+  if (!perms || typeof perms !== 'object' || perms.all === undefined) return perms;
+  const { all, ...rest } = perms;
+  return {
+    ...rest,
+    read: rest.read ?? all,
+    create: rest.create ?? all,
+    update: rest.update ?? all,
+    delete: rest.delete ?? all,
+  };
+}
+
 function usesTenantScope(resources: Record<string, ResourcePermissions>): boolean {
   for (const perms of Object.values(resources)) {
     for (const action of ['read', 'create', 'update', 'delete'] as const) {
@@ -222,7 +234,14 @@ function collectReferencedRoles(level: PermissionLevel): string[] {
  * // projects: permissions.policiesFor('projects')
  * ```
  */
-export function definePermissions<R extends string>(input: PermissionsInput<R>): PermissionsDef<R> {
+export function definePermissions<R extends string>(rawInput: PermissionsInput<R>): PermissionsDef<R> {
+  // `all` fills every action that has no level of its own.
+  const input: PermissionsInput<R> = {
+    ...rawInput,
+    resources: Object.fromEntries(
+      Object.entries(rawInput.resources as Record<string, ResourcePermissions>).map(([name, perms]) => [name, expandAllLevel(perms)]),
+    ) as PermissionsInput<R>['resources'],
+  };
   // Validate: tenant config required if any resource uses tenant scope
   if (!input.tenant && usesTenantScope(input.resources)) {
     throw new Error(

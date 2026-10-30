@@ -3,6 +3,7 @@
 // Developer-facing API for defining schemas
 // ============================================
 
+import { withExpandedPolicies } from '../policy/expand.js';
 import type { ColumnInput } from '../types/columns.js';
 import type { RpcDef } from '../types/rpc.js';
 import type { SchemaDef, TableDef } from '../types/schema.js';
@@ -40,10 +41,10 @@ export interface SchemaOptions {
 export function table<TColumns extends Record<string, ColumnInput>>(
   def: TableDef<TColumns>
 ): TableDef<TColumns> {
-  return withSoftDeleteTrigger({
+  return withSoftDeleteTrigger(withExpandedPolicies({
     enableRLS: def.policies ? true : def.enableRLS,
     ...def,
-  });
+  }));
 }
 
 /**
@@ -123,11 +124,11 @@ function defineSchemaFromDatabase(tables: Record<string, any>): SchemaDef {
 
   for (const [tableName, def] of Object.entries(tables)) {
     assertIdentifier(tableName, 'table');
-    schema[tableName] = withSoftDeleteTrigger({
+    schema[tableName] = withSoftDeleteTrigger(withExpandedPolicies({
       columns: {},
       ...def,
       enableRLS: def.policies ? true : def.enableRLS,
-    });
+    }));
 
     // Validate references (skip column existence since columns come from DB)
     if (def.references) {
@@ -161,7 +162,7 @@ function defineSchemaManual(tables: Record<string, any>): any {
 
   for (const [tableName, tableDef] of Object.entries(tables)) {
     assertIdentifier(tableName, 'table');
-    const normalized = withSoftDeleteTrigger(tableDef);
+    const normalized = withSoftDeleteTrigger(withExpandedPolicies(tableDef));
     tables[tableName] = normalized;
 
     for (const columnName of Object.keys(normalized.columns ?? {})) {

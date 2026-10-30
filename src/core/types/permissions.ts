@@ -78,6 +78,13 @@ export interface ResourcePermissions {
   update?: PermissionLevel;
   /** Who can delete (DELETE) */
   delete?: PermissionLevel;
+
+  /**
+   * Level for every action (read, create, update, delete) without its own
+   * key: `{ all: 'own', read: '*' }`. The write pins (`pinOwnerOnCreate`,
+   * `pinTenant`) apply to the expanded create/update exactly as if written out.
+   */
+  all?: PermissionLevel;
 }
 
 /**
