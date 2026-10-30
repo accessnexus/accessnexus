@@ -22,8 +22,29 @@ export type RpcArg = ColumnType | { readonly type: ColumnType; readonly default?
 /** Function volatility (`CREATE FUNCTION ... VOLATILE | STABLE | IMMUTABLE`). */
 export type RpcVolatility = 'volatile' | 'stable' | 'immutable';
 
-/** Return type for an RPC function */
-export type RpcReturnType = ColumnType | 'void';
+/**
+ * `RETURNS TABLE(...)`: output column name → column type. The SDK types the
+ * result as an array of rows (`{ col: type }[]`), like `supabase gen types`.
+ */
+export interface RpcTableReturn {
+  readonly table: Readonly<Record<string, ColumnType>>;
+}
+
+/**
+ * `RETURNS SETOF <x>`: a table name of the schema (SDK: that table's `Row[]`)
+ * or a column type (SDK: an array of that type, e.g. `{ setof: 'uuid' }` →
+ * `string[]`).
+ */
+export interface RpcSetofReturn {
+  readonly setof: string;
+}
+
+/**
+ * Return type for an RPC function: a column type, `'void'`, a row set
+ * (`{ table: { col: 'type' } }`) or a set of rows of a table / values of a
+ * type (`{ setof: 'bookings' }`).
+ */
+export type RpcReturnType = ColumnType | 'void' | RpcTableReturn | RpcSetofReturn;
 
 /**
  * RPC (PostgreSQL function) definition.
@@ -40,7 +61,7 @@ export interface RpcDef {
   /** Function arguments: name → ColumnType, or `{ type, default }` */
   readonly args?: Record<string, RpcArg>;
 
-  /** Return type */
+  /** Return type: a column type, `'void'`, `{ table: {...} }` or `{ setof: '...' }` */
   readonly returns?: RpcReturnType;
 
   /** PL/pgSQL or SQL function body (without CREATE FUNCTION wrapper) */

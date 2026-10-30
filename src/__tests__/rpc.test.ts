@@ -135,8 +135,8 @@ describe('Supabase Adapter — RPC SQL Generation', () => {
     expect(sql).toContain('LANGUAGE sql');
     expect(sql).toContain('SECURITY DEFINER');
     expect(sql).toContain('IMMUTABLE');
-    // SQL language: no BEGIN/END wrapper
-    expect(sql).not.toContain('BEGIN');
+    // SQL language: no BEGIN/END wrapper (the DO guard before it is plpgsql)
+    expect(sql.slice(sql.indexOf('CREATE OR REPLACE FUNCTION'))).not.toContain('BEGIN');
     expect(sql).toContain(`SELECT 'Hello!';`);
   });
 
@@ -326,5 +326,58 @@ describe('definer RPC privileges', () => {
     expect(open).toContain('REVOKE EXECUTE ON FUNCTION accept(TEXT, INTEGER) FROM PUBLIC;');
     expect(open).toContain('TO authenticated, service_role, anon;');
     expect(sqlFor({})).not.toContain('EXECUTE ON FUNCTION');
+  });
+});
+
+describe('RPC table/setof returns', () => {
+  const adapter = new SupabaseAdapter({ deterministic: true });
+  const schema = defineSchema({
+    bookings: table({ columns: { id: 'uuid', client_id: 'uuid', note: 'text?' }, primaryKey: 'id' }),
+  }, {
+    rpcs: {
+      get_client_bookings: rpc({
+        args: { p_client_id: 'uuid' },
+        returns: { table: { booking_id: 'uuid', date_time: 'timestamptz', services: 'json', has_review: 'boolean', total: 'numeric', note: 'text?' } },
+        language: 'sql',
+        security: 'definer',
+        body: 'SELECT id, now(), null::json, false, 0::numeric, note FROM bookings WHERE client_id = p_client_id;',
+      }),
+      bookings_of: rpc({ args: { p_client_id: 'uuid' }, returns: { setof: 'bookings' }, language: 'sql', body: 'SELECT * FROM bookings WHERE client_id = p_client_id;' }),
+      booking_ids: rpc({ returns: { setof: 'uuid' }, language: 'sql', body: 'SELECT id FROM bookings;' }),
+      signature_only: rpc({ args: { p_id: 'uuid' }, returns: { table: { n: 'int' } } }),
+    },
+  });
+
+  it('emits RETURNS TABLE(...) / SETOF and skips signature-only rpcs', () => {
+    const sql = adapter.generateRpcs(schema)[0].content;
+    expect(sql).toContain('CREATE OR REPLACE FUNCTION get_client_bookings(p_client_id UUID)\nRETURNS TABLE(booking_id UUID, date_time TIMESTAMPTZ, services JSON, has_review BOOLEAN, total NUMERIC, note TEXT)');
+    expect(sql).toContain('RETURNS SETOF bookings');
+    expect(sql).toContain('RETURNS SETOF UUID');
+    expect(sql).not.toContain('signature_only');
+    expect(sql).toContain('REVOKE EXECUTE ON FUNCTION get_client_bookings(UUID) FROM PUBLIC, anon;');
+  });
+
+  it('guards CREATE OR REPLACE with a DROP when the result or arg names change', () => {
+    const sql = adapter.generateRpcs(schema)[0].content;
+    expect(sql).toContain("fn regprocedure := pg_catalog.to_regprocedure('get_client_bookings(UUID)');");
+    expect(sql).toContain("want_args text := 'p_client_id ' || pg_catalog.format_type(pg_catalog.to_regtype('UUID'), NULL);");
+    expect(sql).toContain("want_result text := 'TABLE(' || 'booking_id ' || pg_catalog.format_type(pg_catalog.to_regtype('UUID'), NULL) || ', date_time ' ||");
+    expect(sql).toContain("want_result text := 'SETOF ' || pg_catalog.format_type(pg_catalog.to_regtype('bookings'), NULL);");
+    expect(sql).toContain('    DROP FUNCTION get_client_bookings(UUID);');
+    expect(sql).not.toMatch(/DROP FUNCTION[^;]*CASCADE/);
+  });
+
+  it('types TABLE/SETOF results like supabase gen types', () => {
+    const types = adapter.generateClient(schema).find((f) => f.path === 'types.ts')!.content;
+    expect(types).toContain('Args: { p_client_id: string };\n        Returns: { booking_id: string; date_time: string; services: Json; has_review: boolean; total: number; note: string | null }[];');
+    expect(types).toContain('Returns: Bookings[];');
+    expect(types).toContain('Returns: string[];');
+  });
+
+  it('rejects an empty returns.table', () => {
+    const bad = defineSchema({ t: table({ columns: { id: 'uuid' } }) }, {
+      rpcs: { f: rpc({ returns: { table: {} }, body: 'SELECT 1' }) },
+    });
+    expect(() => adapter.generateRpcs(bad)).toThrow(/at least one column/);
   });
 });

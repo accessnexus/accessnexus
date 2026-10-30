@@ -27,6 +27,16 @@ import type { RpcArg, RpcDef, RpcLanguage, RpcReturnType, RpcSecurity, RpcVolati
  *   returns: 'jsonb',
  *   body: `RETURN (SELECT json_build_object('count', count(*)) FROM orders);`,
  * })
+ *
+ * // Row sets: RETURNS TABLE(...) → SDK Returns: { booking_id: string; ... }[]
+ * rpc({
+ *   args: { p_client_id: 'uuid' },
+ *   returns: { table: { booking_id: 'uuid', date_time: 'timestamptz' } },
+ *   language: 'sql',
+ *   body: `SELECT id, date_time FROM bookings WHERE client_id = p_client_id;`,
+ * })
+ * // RETURNS SETOF bookings → SDK Returns: Row[] of bookings
+ * rpc({ returns: { setof: 'bookings' }, language: 'sql', body: `SELECT * FROM bookings;` })
  * ```
  */
 export function rpc(config?: {
