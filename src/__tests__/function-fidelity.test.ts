@@ -152,3 +152,46 @@ describe('init import of volatility, proconfig and search_path', () => {
     expect(hardened).toEqual([]);
   });
 });
+
+describe('init import of effective EXECUTE grants', () => {
+  const fn = (name: string, extra: Partial<IntrospectedFunction>): IntrospectedFunction => ({
+    name, args: '', returns: 'integer', language: 'sql', security: 'definer', volatility: 'stable', config: {}, body: 'SELECT 1', ...extra,
+  });
+  const gen = (functions: IntrospectedFunction[]) => {
+    const anonExecutable: string[] = [];
+    const authenticatedGranted: string[] = [];
+    const out = generateSchemaFromIntrospection({
+      policyPrefix: 'accessnexus', anonExecutable, authenticatedGranted,
+      tables: [{ name: 't', columns: [], foreignKeys: [], uniqueColumns: [], policies: [] }],
+      functions,
+    });
+    return { out, anonExecutable, authenticatedGranted };
+  };
+
+  it('keeps anon on a definer function anon could execute, with a NOTE, and reports it', () => {
+    const { out, anonExecutable } = gen([
+      fn('is_member', { anonExecute: true, authenticatedExecute: true }),
+      fn('admin_only', { anonExecute: false, authenticatedExecute: true }),
+      fn('invoker_fn', { security: 'invoker', anonExecute: true }),
+    ]);
+    expect(out).toMatch(/is_member: rpc\(\{[\s\S]*?\/\/ NOTE: anon could execute this in the source database[^\n]*\n\s+allowAnon: true,/);
+    expect(out).not.toMatch(/admin_only: rpc\(\{[^}]*allowAnon/);
+    expect(out).not.toMatch(/invoker_fn: rpc\(\{[^}]*allowAnon/);
+    expect(anonExecutable).toEqual(['is_member']);
+    const sql = rpcSql({ is_member: rpc({ returns: 'int', language: 'sql', security: 'definer', allowAnon: true, body: 'SELECT 1' }) });
+    expect(sql).toContain('REVOKE EXECUTE ON FUNCTION is_member() FROM PUBLIC;');
+    expect(sql).toContain('GRANT EXECUTE ON FUNCTION is_member() TO authenticated, service_role, anon;');
+  });
+
+  it('notes definer functions authenticated could not execute', () => {
+    const { out, authenticatedGranted } = gen([fn('svc_only', { anonExecute: false, authenticatedExecute: false })]);
+    expect(out).toContain('// NOTE: authenticated could NOT execute this in the source database');
+    expect(authenticatedGranted).toEqual(['svc_only']);
+  });
+
+  it('changes nothing when the roles are unknown (plain Postgres)', () => {
+    const { out, anonExecutable } = gen([fn('f', {})]);
+    expect(out).not.toContain('allowAnon');
+    expect(anonExecutable).toEqual([]);
+  });
+});

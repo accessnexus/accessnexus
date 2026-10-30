@@ -193,6 +193,8 @@ export async function runInit(options: InitOptions): Promise<Record<string, unkn
   let introspectedTables: IntrospectedTable[] | null = null;
   let introspectedFunctions: IntrospectedFunction[] = [];
   const hardenedFunctions: HardenedFunction[] = [];
+  const anonExecutableFunctions: string[] = [];
+  const authenticatedGrantedFunctions: string[] = [];
 
   if (pullFromDb) {
     // A direct DB connection reads policies + functions (the faithful path for
@@ -226,7 +228,20 @@ export async function runInit(options: InitOptions): Promise<Record<string, unkn
             functions: result.functions,
             policyPrefix,
             hardened: hardenedFunctions,
+            anonExecutable: anonExecutableFunctions,
+            authenticatedGranted: authenticatedGrantedFunctions,
           });
+          if (anonExecutableFunctions.length > 0) {
+            info(`anon can execute ${anonExecutableFunctions.length} SECURITY DEFINER function${anonExecutableFunctions.length > 1 ? 's' : ''} `
+              + 'in the source database (via PUBLIC or a direct grant); imported with allowAnon: true. '
+              + 'Review each one (maintenance/admin functions should not stay public):');
+            for (const name of anonExecutableFunctions) info(`  rpc ${name}`);
+          }
+          if (authenticatedGrantedFunctions.length > 0) {
+            info(`authenticated could NOT execute ${authenticatedGrantedFunctions.length} SECURITY DEFINER function${authenticatedGrantedFunctions.length > 1 ? 's' : ''} `
+              + 'in the source database; generate grants EXECUTE to authenticated (see the // NOTE: comments):');
+            for (const name of authenticatedGrantedFunctions) info(`  rpc ${name}`);
+          }
           if (hardenedFunctions.length > 0) {
             info(`search_path hardened on ${hardenedFunctions.length} imported function${hardenedFunctions.length > 1 ? 's' : ''} `
               + `(generate pins SET search_path = pg_catalog, public; see the // NOTE: comments in the schema):`);
@@ -441,6 +456,8 @@ export async function runInit(options: InitOptions): Promise<Record<string, unkn
     files,
     agents,
     hardenedFunctions,
+    anonExecutableFunctions,
+    authenticatedGrantedFunctions,
     nextSteps,
   };
 }

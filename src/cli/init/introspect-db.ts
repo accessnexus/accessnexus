@@ -27,6 +27,13 @@ export interface IntrospectedFunction {
   /** pg_proc.proconfig as `{ name: value }` (e.g. `{ search_path: 'public', row_security: 'off' }`). */
   config: Record<string, string>;
   body: string; // prosrc (inner body)
+  /**
+   * Effective EXECUTE privilege in the source database (`has_function_privilege`,
+   * so it counts grants via PUBLIC and role membership). Undefined when the
+   * role does not exist there (plain Postgres).
+   */
+  anonExecute?: boolean;
+  authenticatedExecute?: boolean;
 }
 
 /** Parse pg_proc.proconfig (`{"search_path=public","row_security=off"}`) into a map. */
@@ -138,7 +145,11 @@ SELECT p.proname AS name,
        p.prosecdef AS secdef,
        p.provolatile AS volatility,
        p.proconfig::text[] AS config,
-       p.prosrc AS body
+       p.prosrc AS body,
+       CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon')
+            THEN has_function_privilege('anon', p.oid, 'EXECUTE') END AS anon_exec,
+       CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated')
+            THEN has_function_privilege('authenticated', p.oid, 'EXECUTE') END AS authenticated_exec
 FROM pg_proc p
 JOIN pg_namespace ns ON ns.oid = p.pronamespace
 JOIN pg_language l ON l.oid = p.prolang
@@ -281,6 +292,8 @@ export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionRes
       volatility: r.volatility === 'i' ? 'immutable' : r.volatility === 's' ? 'stable' : 'volatile',
       config: parseProconfig(r.config),
       body: r.body ?? '',
+      ...(typeof r.anon_exec === 'boolean' ? { anonExecute: r.anon_exec } : {}),
+      ...(typeof r.authenticated_exec === 'boolean' ? { authenticatedExecute: r.authenticated_exec } : {}),
     }));
 
     const tables = Array.from(tableMap.values()).sort((a, b) => a.name.localeCompare(b.name));

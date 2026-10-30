@@ -19,6 +19,16 @@ export interface SchemaGenOptions {
    * change (it always pins `pg_catalog, public`), for init's report.
    */
   hardened?: HardenedFunction[];
+  /**
+   * Collects the SECURITY DEFINER functions anon could execute in the source
+   * database (they are emitted with `allowAnon: true`), for init's report.
+   */
+  anonExecutable?: string[];
+  /**
+   * Collects the SECURITY DEFINER functions authenticated could NOT execute in
+   * the source database (generate grants it: `rpc()` cannot express the revoke).
+   */
+  authenticatedGranted?: string[];
 }
 
 /** A function whose search_path changes when AccessNexus regenerates it. */
@@ -71,7 +81,7 @@ function hardeningNote(searchPath: string | null, indent: string): string {
  */
 export function generateSchemaFromIntrospection(options: SchemaGenOptions): string {
   const { tables, functions = [] } = options;
-  const { policyPrefix, hardened } = options;
+  const { policyPrefix, hardened, anonExecutable, authenticatedGranted } = options;
   const imports = ['defineSchema', 'table', 'policy'];
   const triggerBlocks = new Map(tables.map((t) => [t.name, renderTriggers(t, policyPrefix, hardened)]));
   if ([...triggerBlocks.values()].some((b) => b.usesBuilder)) imports.push('trigger');
@@ -177,7 +187,7 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
         continue;
       }
       seen.add(fn.name);
-      lines.push(...renderRpc(fn, hardened));
+      lines.push(...renderRpc(fn, hardened, { anonExecutable, authenticatedGranted }));
       lines.push('');
     }
     lines.push('  },');
@@ -195,7 +205,14 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
  * returning TABLE/SETOF/composite are emitted as signature-only markers (their SQL
  * stays in the project's migrations) to avoid generating a wrong RETURNS clause.
  */
-function renderRpc(fn: IntrospectedFunction, hardened?: HardenedFunction[]): string[] {
+function renderRpc(
+  fn: IntrospectedFunction,
+  hardened?: HardenedFunction[],
+  grants: { anonExecutable?: string[]; authenticatedGranted?: string[] } = {},
+): string[] {
+  const definer = fn.security === 'definer';
+  // Faithful import: grant neither more nor less than the source database did.
+  if (definer && fn.anonExecute === true) grants.anonExecutable?.push(fn.name);
   const sig = `${fn.name}(${fn.args}) -> ${fn.returns} [${fn.language}${fn.security === 'definer' ? ', definer' : ''}]`;
   const mappedReturn = mapReturnType(fn.returns);
 
@@ -214,6 +231,7 @@ function renderRpc(fn: IntrospectedFunction, hardened?: HardenedFunction[]): str
     // Not fully representable by rpc({ returns }) — signature-only marker.
     return [`    // ${sig}`, `    ${fn.name}: rpc(),`];
   }
+  if (definer && fn.authenticatedExecute === false) grants.authenticatedGranted?.push(fn.name);
 
   const cfg = splitConfig(fn.config);
   const out: string[] = [`    // ${sig}`];
@@ -228,7 +246,16 @@ function renderRpc(fn: IntrospectedFunction, hardened?: HardenedFunction[]): str
   }
   out.push(`      returns: '${mappedReturn}',`);
   out.push(`      language: '${fn.language === 'sql' ? 'sql' : 'plpgsql'}',`);
-  if (fn.security === 'definer') out.push(`      security: 'definer',`);
+  if (definer) {
+    out.push(`      security: 'definer',`);
+    if (fn.anonExecute === true) {
+      out.push(`      // NOTE: anon could execute this in the source database (via PUBLIC or a direct grant) — review whether it should stay public.`);
+      out.push(`      allowAnon: true,`);
+    }
+    if (fn.authenticatedExecute === false) {
+      out.push(`      // NOTE: authenticated could NOT execute this in the source database; generate grants it to authenticated (rpc() cannot express that revoke).`);
+    }
+  }
   if (fn.volatility !== 'volatile') out.push(`      volatility: '${fn.volatility}',`);
   out.push(...renderSet(cfg.rest, '      '));
   out.push(`      body: \`${escapeTemplateString(fn.body.trim())}\`,`);
