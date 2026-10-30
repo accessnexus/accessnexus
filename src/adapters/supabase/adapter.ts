@@ -1214,6 +1214,22 @@ export class SupabaseAdapter implements Adapter {
       `/** The row narrowed to the selected \`columns\` (the whole row when omitted). */`,
       `export type SelectedRow<T extends TableName, TColumns extends ColumnsOf<T> | undefined> =`,
       `  TColumns extends readonly (infer K extends keyof RowOf<T>)[] ? Pick<RowOf<T>, K> : RowOf<T>;`,
+      `/**`,
+      ` * Filter of the *One/*Many writes: column → value, naming at least one column`,
+      ` * of the table (\`{}\` and unknown columns are type errors).`,
+      ` */`,
+      `export type RowFilter<T extends TableName, TFilter> = TFilter`,
+      `  & { [K in Exclude<keyof TFilter, keyof RowOf<T>>]: never }`,
+      `  & (keyof TFilter extends never ? { 'filter must name at least one column': never } : unknown);`,
+      '',
+      `// Runtime guard of the *One/*Many writes: never update or delete every row.`,
+      `function requireFilter(filter: object | null | undefined, method: string): object {`,
+      `  const entries = Object.entries(filter ?? {}).filter(([, value]) => value !== undefined);`,
+      `  if (entries.length === 0) {`,
+      `    throw new Error(\`[AccessNexus] \${method}: the filter must name at least one column (refusing to write every row)\`);`,
+      `  }`,
+      `  return Object.fromEntries(entries);`,
+      `}`,
       '',
       `// Internal, loosely typed view of the Supabase query builder. Results are`,
       `// typed per method below.`,
@@ -1357,6 +1373,55 @@ export class SupabaseAdapter implements Adapter {
       // On softDelete tables the BEFORE DELETE trigger turns this into
       // SET <column> = NOW(), so the DELETE policy (not UPDATE) decides it.
       lines.push(`        ${from}.delete().eq('${pk}', id) as unknown as QueryResult<null>,`);
+      lines.push('');
+      // Filtered writes. The filter is required (type and runtime) so a
+      // mistake never writes the whole table; RLS still decides which rows.
+      const wGenerics = `<TFilter extends Partial<${rowType}>, TColumns extends ColumnsOf<'${tableName}'> | undefined = undefined>`;
+      const wFilter = `filter: RowFilter<'${tableName}', TFilter>`;
+      const wOptions = `options?: { columns?: TColumns }`;
+      const wRow = `SelectedRow<'${tableName}', TColumns>`;
+      const guard = (method: string) => `requireFilter(filter, '${tableName}.${method}')`;
+      lines.push(`      // Updates the row matching \`filter\` (a unique column) and returns it in one`);
+      lines.push(`      // round trip; \`data: null\` when no visible row matches. More than one match`);
+      lines.push(`      // is an error (PGRST116) and nothing is updated.`);
+      lines.push(`      updateOne: ${wGenerics}(`);
+      lines.push(`        ${wFilter},`);
+      lines.push(`        data: ${updateType},`);
+      lines.push(`        ${wOptions},`);
+      lines.push(`      ) => {`);
+      lines.push(`        const match = ${guard('updateOne')};`);
+      lines.push(`        return ${from}.update(data).match(match)${live}.select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<${wRow}>;`);
+      lines.push(`      },`);
+      lines.push('');
+      lines.push(`      // Updates every row matching \`filter\` (at least one column) and returns them.`);
+      lines.push(`      updateMany: ${wGenerics}(`);
+      lines.push(`        ${wFilter},`);
+      lines.push(`        data: ${updateType},`);
+      lines.push(`        ${wOptions},`);
+      lines.push(`      ) => {`);
+      lines.push(`        const match = ${guard('updateMany')};`);
+      lines.push(`        return ${from}.update(data).match(match)${live}.select(selectClause(options?.columns)) as unknown as QueryResult<${wRow}[]>;`);
+      lines.push(`      },`);
+      lines.push('');
+      lines.push(`      // Deletes the row matching \`filter\` and returns it (\`data: null\` when none`);
+      lines.push(`      // matches${softDeleteColumn ? ' — and always on this soft-delete table, whose trigger turns the DELETE into an UPDATE' : ''}).`);
+      lines.push(`      // More than one match is an error (PGRST116) and nothing is deleted.`);
+      lines.push(`      deleteOne: ${wGenerics}(`);
+      lines.push(`        ${wFilter},`);
+      lines.push(`        ${wOptions},`);
+      lines.push(`      ) => {`);
+      lines.push(`        const match = ${guard('deleteOne')};`);
+      lines.push(`        return ${from}.delete().match(match)${live}.select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<${wRow}>;`);
+      lines.push(`      },`);
+      lines.push('');
+      lines.push(`      // Deletes every row matching \`filter\` (at least one column) and returns them${softDeleteColumn ? ' (\`[]\` on this soft-delete table)' : ''}.`);
+      lines.push(`      deleteMany: ${wGenerics}(`);
+      lines.push(`        ${wFilter},`);
+      lines.push(`        ${wOptions},`);
+      lines.push(`      ) => {`);
+      lines.push(`        const match = ${guard('deleteMany')};`);
+      lines.push(`        return ${from}.delete().match(match)${live}.select(selectClause(options?.columns)) as unknown as QueryResult<${wRow}[]>;`);
+      lines.push(`      },`);
       lines.push(`    },`);
       lines.push('');
     }
