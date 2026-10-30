@@ -449,6 +449,48 @@ export default defineSchema({
 
 Não combine `onDelete: 'cascade'` apontando para uma tabela com soft delete (`CASCADE_INTO_SOFT_DELETE`): use `'restrict'` e faça soft delete dos filhos antes.
 
+## RPC que retorna linhas {#row-set-rpc}
+
+`returns: { table: { ... } }` emite `RETURNS TABLE(...)` e tipa o resultado no SDK como array de linhas. A função invoker roda sob o RLS de quem chama, então só enxerga as reservas dessa pessoa de qualquer forma; o `WHERE` deixa o plano enxuto. `policies.all` dá ao dono todas as operações, e `delete: policy.none()` tira uma de volta.
+
+```ts [accessnexus.schema.ts]
+import { defineSchema, policy, rpc, table } from 'accessnexus';
+
+export default defineSchema({
+  bookings: table({
+    columns: { id: 'uuid', user_id: 'uuid', date_time: 'timestamptz', services: 'json' },
+    primaryKey: 'id',
+    references: { user_id: 'auth.users.id' },
+    policies: { all: policy.isOwner('user_id'), delete: policy.none() },
+  }),
+}, {
+  rpcs: {
+    my_bookings: rpc({
+      returns: { table: { booking_id: 'uuid', date_time: 'timestamptz', services: 'json' } },
+      language: 'sql',
+      volatility: 'stable',
+      body: `SELECT id, date_time, services FROM public.bookings
+             WHERE user_id = (SELECT auth.uid()) ORDER BY date_time`,
+    }),
+  },
+});
+```
+
+```ts [src/bookings.ts]
+import { createClient } from '@supabase/supabase-js';
+import { createAccessNexusClient } from './generated/sdk/client.js';
+
+const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'public-anon-key'));
+
+export async function upcoming() {
+  const { data, error } = await db.rpc.my_bookings({});
+  if (error) throw error;
+  return data; // { booking_id: string; date_time: string; services: Json }[]
+}
+```
+
+Para retornar linhas inteiras de uma tabela, use `{ setof: 'bookings' }` (SDK `Bookings[]`). Mudar as colunas de resultado depois é tratado pelo `push`: veja [Alterando ou removendo uma RPC](/pt/guide/rpcs#changing-or-removing-an-rpc).
+
 ## Veja também {#related}
 
 - [Modelo de segurança](/pt/guide/security)

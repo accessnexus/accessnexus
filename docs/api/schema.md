@@ -143,7 +143,7 @@ interface TableDef<TColumns extends Record<string, ColumnInput>> {
 | `compositePrimaryKey` | column names | `undefined` | Instead of `primaryKey`: `['org_id', 'user_id']` → `PRIMARY KEY (org_id, user_id)`. Seed upserts use all of them; not allowed with `softDelete` (`INVALID_PRIMARY_KEY`). |
 | `references` | `{ [column]: 'table.column' \| 'schema.table.column' }` | `undefined` | Foreign keys. Equivalent to `references` on a `ColumnDef`; when both are set, the column-level one wins. |
 | `onDelete` | `{ [column]: ForeignKeyAction }` | no action | `ON DELETE` action per referencing column. See [Foreign keys](#foreign-keys). |
-| `policies` | `TablePolicies` | `undefined` | One rule per operation: `{ select?, insert?, update?, delete? }`, each built with [`policy`](/api/policy) or [`definePermissions`](/api/permissions). |
+| `policies` | `TablePolicies` | `undefined` | One rule per operation: `{ select?, insert?, update?, delete? }`, plus `all?` applied to every operation without its own key ([details](/guide/policies#one-rule-for-every-operation-all)), each built with [`policy`](/api/policy) or [`definePermissions`](/api/permissions). |
 | `triggers` | `TriggerRule[]` | `[]` | Built with [`trigger`](/api/trigger). |
 | `enableRLS` | `boolean` | `true` | Only `false` has an effect: RLS is not enabled for the table. |
 | `indexes` | `IndexDef[]` | `[]` | Explicit indexes. See [IndexDef](#indexdef). |

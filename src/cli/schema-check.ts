@@ -5,6 +5,7 @@
 // Postgres error at push time (or worse, as an open table in production).
 // ============================================
 
+import { withExpandedPolicies } from '../core/policy/expand.js';
 import { closest } from './args.js';
 import type { SchemaIssue } from './output.js';
 
@@ -172,7 +173,13 @@ export function checkSchema(schema: unknown): SchemaIssue[] {
     return issues;
   }
 
-  const record = schema as Record<string, any>;
+  // `policies.all` is expanded by table()/defineSchema; expand it here too for
+  // a schema object built by hand, so every check sees one rule per operation.
+  const record = Object.fromEntries(
+    Object.entries(schema as Record<string, any>).map(([name, def]) => [name, withExpandedPolicies(def)]),
+  ) as Record<string, any>;
+  const rawRpcs = (schema as any).__rpcs;
+  if (rawRpcs) Object.defineProperty(record, '__rpcs', { value: rawRpcs, enumerable: false });
   const entries = Object.entries(record);
   if (entries.length === 0) {
     issues.push({
@@ -491,13 +498,13 @@ function checkTable(ctx: Ctx, tableName: string, def: any): void {
       code: 'INVALID_POLICIES',
       path: `${path}.policies`,
       message: 'policies must be an object like { select: policy.isAuthenticated() }',
-      hint: 'Use one key per operation: select, insert, update, delete.',
+      hint: 'Use one key per operation (select, insert, update, delete), or all for every operation.',
     });
   } else {
     for (const [op, rule] of Object.entries(def.policies as Record<string, unknown>)) {
       const opPath = `${path}.policies.${op}`;
       if (!(POLICY_OPERATIONS as readonly string[]).includes(op)) {
-        const mapped: Record<string, string> = { read: 'select', create: 'insert', write: 'update', all: 'select/insert/update/delete' };
+        const mapped: Record<string, string> = { read: 'select', create: 'insert', write: 'update' };
         push(ctx, {
           severity: 'error',
           code: 'UNKNOWN_POLICY_OPERATION',
@@ -505,7 +512,7 @@ function checkTable(ctx: Ctx, tableName: string, def: any): void {
           message: `"${op}" is not a policy operation`,
           hint: mapped[op]
             ? `Use "${mapped[op]}" (read/create/update/delete are only used inside definePermissions resources).`
-            : 'Valid keys: select, insert, update, delete.',
+            : 'Valid keys: select, insert, update, delete, and all (one rule for every operation).',
         });
         continue;
       }
@@ -1294,6 +1301,54 @@ function checkFunctionSet(ctx: Ctx, path: string, set: unknown, owner: string): 
   }
 }
 
+const RETURNS_SHAPES = "a column type, 'void', { table: { col: 'type' } } or { setof: 'table_name' }";
+
+/** `returns` of an rpc(): a column type, 'void', { table: {...} } or { setof: '...' }. */
+function checkRpcReturns(ctx: Ctx, name: string, returns: unknown): void {
+  if (returns === undefined) return;
+  const path = `rpcs.${name}.returns`;
+  const bad = (message: string, hint?: string) => push(ctx, { severity: 'error', code: 'INVALID_RPC_RETURNS', path, message: `rpc ${name}: ${message}`, ...(hint ? { hint } : {}) });
+  if (typeof returns === 'string') {
+    if (returns !== 'void' && !isValidType(returns)) {
+      bad(`unknown return type "${returns}"`, `Use ${RETURNS_SHAPES}.`);
+    }
+    return;
+  }
+  if (!returns || typeof returns !== 'object') {
+    bad(`returns must be ${RETURNS_SHAPES}`);
+    return;
+  }
+  const r = returns as Record<string, unknown>;
+  if ('table' in r) {
+    const cols = r.table;
+    if (!cols || typeof cols !== 'object' || Object.keys(cols).length === 0) {
+      bad('returns.table needs at least one column', "Example: returns: { table: { id: 'uuid', total: 'numeric' } }.");
+      return;
+    }
+    for (const [col, type] of Object.entries(cols as Record<string, unknown>)) {
+      if (!IDENTIFIER.test(col)) {
+        push(ctx, { severity: 'error', code: 'INVALID_IDENTIFIER', path: `${path}.table.${col}`, message: `RPC result column "${col}" is not lowercase snake_case` });
+      }
+      if (typeof type !== 'string' || !isValidType(type)) {
+        push(ctx, { severity: 'error', code: 'UNKNOWN_COLUMN_TYPE', path: `${path}.table.${col}`, message: `Unknown result column type "${String(type)}"`, hint: `Use one of: ${[...SCALAR_TYPES].join(', ')}.` });
+      }
+    }
+    return;
+  }
+  if ('setof' in r) {
+    const target = r.setof;
+    if (typeof target !== 'string' || target === '') {
+      bad('returns.setof must be a table name or a column type');
+      return;
+    }
+    if (!isValidType(target) && !Object.prototype.hasOwnProperty.call(ctx.schema, target)) {
+      bad(`returns.setof "${target}" is neither a table of the schema nor a column type`, `Tables: ${Object.keys(ctx.schema).join(', ') || '(none)'}.`);
+    }
+    return;
+  }
+  bad(`returns must be ${RETURNS_SHAPES}`);
+}
+
 function checkRpc(ctx: Ctx, name: string, def: any): void {
   const path = `rpcs.${name}`;
   if (!IDENTIFIER.test(name)) {
@@ -1335,6 +1390,7 @@ function checkRpc(ctx: Ctx, name: string, def: any): void {
     });
   }
   checkFunctionSet(ctx, `${path}.set`, def.set, `rpc ${name}`);
+  checkRpcReturns(ctx, name, def.returns);
   let sawDefault = false;
   for (const [arg, input] of Object.entries((def.args ?? {}) as Record<string, unknown>)) {
     const type = input && typeof input === 'object' ? (input as any).type : input;

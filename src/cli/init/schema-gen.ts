@@ -180,6 +180,7 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
     lines.push('}, {');
     lines.push('  rpcs: {');
     const seen = new Set<string>();
+    const tableNames = new Set(tables.map((t) => t.name));
     for (const fn of rpcFns) {
       // Postgres allows overloading; a JS object cannot repeat a key.
       if (seen.has(fn.name)) {
@@ -187,7 +188,7 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
         continue;
       }
       seen.add(fn.name);
-      lines.push(...renderRpc(fn, hardened, { anonExecutable, authenticatedGranted }));
+      lines.push(...renderRpc(fn, hardened, { anonExecutable, authenticatedGranted }, tableNames));
       lines.push('');
     }
     lines.push('  },');
@@ -200,37 +201,57 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
 }
 
 /**
- * Emit one function. AccessNexus `rpc({ returns })` only models scalar `ColumnType`s,
- * so functions with a scalar return round-trip fully (args, returns, body); those
- * returning TABLE/SETOF/composite are emitted as signature-only markers (their SQL
- * stays in the project's migrations) to avoid generating a wrong RETURNS clause.
+ * Emit one function. Scalar, TABLE(...) and SETOF returns round-trip fully
+ * (args, returns, body). A function whose argument or return type `rpc()`
+ * cannot express (composite types, `record`, OUT parameters...) is emitted
+ * signature-only — still with its real `args`, so the SDK types the call —
+ * and its SQL stays in the project's migrations (no wrong RETURNS clause).
  */
 function renderRpc(
   fn: IntrospectedFunction,
   hardened?: HardenedFunction[],
   grants: { anonExecutable?: string[]; authenticatedGranted?: string[] } = {},
+  tableNames: ReadonlySet<string> = new Set(),
 ): string[] {
   const definer = fn.security === 'definer';
-  // Faithful import: grant neither more nor less than the source database did.
-  if (definer && fn.anonExecute === true) grants.anonExecutable?.push(fn.name);
   const sig = `${fn.name}(${fn.args}) -> ${fn.returns} [${fn.language}${fn.security === 'definer' ? ', definer' : ''}]`;
-  const mappedReturn = mapReturnType(fn.returns);
+  const mappedReturn = mapReturnType(fn.returns, tableNames);
 
-  // Map every arg to a AccessNexus ColumnType; bail to a marker if any is non-scalar
-  // (e.g. a composite/table type) or if the return type is non-scalar.
+  // Map every arg to an AccessNexus ColumnType. A non-scalar one (e.g. a
+  // composite/table type) is typed as json in a signature-only rpc().
   const rawArgs = parseFunctionArgs(fn.args);
   const mappedArgs: Record<string, string> = {};
+  const argNotes: string[] = [];
   let argsOk = true;
   for (const [name, arg] of Object.entries(rawArgs)) {
-    const m = mapScalar(arg.type);
-    if (!m) { argsOk = false; break; }
+    let m = mapScalar(arg.type);
+    if (!m) {
+      argsOk = false;
+      argNotes.push(`argument ${name} is ${arg.type}, typed as json`);
+      m = 'json';
+    }
     mappedArgs[name] = arg.default !== undefined ? `{ type: '${m}', default: ${tsString(arg.default)} }` : `'${m}'`;
   }
+  const argsLine = Object.keys(mappedArgs).length > 0
+    ? `      args: { ${Object.entries(mappedArgs).map(([n, t]) => `${n}: ${t}`).join(', ')} },`
+    : null;
 
   if (mappedReturn === null || !argsOk) {
-    // Not fully representable by rpc({ returns }) — signature-only marker.
-    return [`    // ${sig}`, `    ${fn.name}: rpc(),`];
+    // Not fully representable by rpc() — signature only (typed client, no SQL).
+    const why = [...argNotes, ...(mappedReturn === null ? [`result ${fn.returns} has no rpc() equivalent, typed as unknown`] : [])];
+    const out = [`    // ${sig}`, `    // Signature only (${why.join('; ')}): its SQL stays in your migrations.`];
+    if (!argsLine && mappedReturn === null) {
+      out.push(`    ${fn.name}: rpc(),`);
+      return out;
+    }
+    out.push(`    ${fn.name}: rpc({`);
+    if (argsLine) out.push(argsLine);
+    if (mappedReturn !== null) out.push(`      returns: ${mappedReturn},`);
+    out.push(`    }),`);
+    return out;
   }
+  // Faithful import: grant neither more nor less than the source database did.
+  if (definer && fn.anonExecute === true) grants.anonExecutable?.push(fn.name);
   if (definer && fn.authenticatedExecute === false) grants.authenticatedGranted?.push(fn.name);
 
   const cfg = splitConfig(fn.config);
@@ -240,11 +261,8 @@ function renderRpc(
     hardened?.push({ kind: 'rpc', name: fn.name, from: cfg.searchPath, to: PINNED_SEARCH_PATH });
   }
   out.push(`    ${fn.name}: rpc({`);
-  if (Object.keys(mappedArgs).length > 0) {
-    const pairs = Object.entries(mappedArgs).map(([n, t]) => `${n}: ${t}`);
-    out.push(`      args: { ${pairs.join(', ')} },`);
-  }
-  out.push(`      returns: '${mappedReturn}',`);
+  if (argsLine) out.push(argsLine);
+  out.push(`      returns: ${mappedReturn},`);
   out.push(`      language: '${fn.language === 'sql' ? 'sql' : 'plpgsql'}',`);
   if (definer) {
     out.push(`      security: 'definer',`);
@@ -289,15 +307,39 @@ function mapScalar(pgType: string): string | null {
   return base ? base + suffix : null;
 }
 
-/** Map a pg return type to a AccessNexus ColumnType / 'void', or null if non-scalar. */
-function mapReturnType(ret: string): string | null {
-  const t = ret.trim().toLowerCase();
-  if (t === 'void') return 'void';
-  // TABLE(...), SETOF ..., record, or any composite → not representable.
-  if (t.startsWith('setof') || t.startsWith('table') || t.includes('(') || t === 'record') {
-    return null;
+/**
+ * Map a pg return type (`pg_get_function_result`) to the TS source of an
+ * `rpc({ returns })` value: `'uuid'`, `'void'`, `{ table: { ... } }` or
+ * `{ setof: '...' }`. Null when `rpc()` cannot express it (record, composite).
+ */
+export function mapReturnType(ret: string, tableNames: ReadonlySet<string> = new Set()): string | null {
+  const raw = ret.trim();
+  const t = raw.toLowerCase();
+  if (t === 'void') return `'void'`;
+  const table = /^table\s*\(([\s\S]*)\)$/i.exec(raw);
+  if (table) {
+    const cols: string[] = [];
+    for (const part of splitTopLevel(table[1])) {
+      const m = /^\s*("?)([A-Za-z_][\w$]*)\1\s+([\s\S]+?)\s*$/.exec(part);
+      if (!m) return null;
+      const type = mapScalar(m[3]);
+      if (!type) return null;
+      cols.push(`${m[2]}: '${type}'`);
+    }
+    return cols.length > 0 ? `{ table: { ${cols.join(', ')} } }` : null;
   }
-  return mapScalar(t);
+  const setof = /^setof\s+(.+)$/i.exec(raw);
+  if (setof) {
+    const target = setof[1].trim();
+    const scalar = mapScalar(target);
+    if (scalar) return `{ setof: '${scalar}' }`;
+    const name = target.replace(/^"?public"?\./i, '').replace(/"/g, '');
+    return tableNames.has(name) ? `{ setof: '${name}' }` : null;
+  }
+  if (t.includes('(') && !/^(numeric|decimal|character varying|varchar|character|char|time|timestamp)/.test(t)) return null;
+  if (t === 'record') return null;
+  const scalar = mapScalar(t);
+  return scalar ? `'${scalar}'` : null;
 }
 
 /**

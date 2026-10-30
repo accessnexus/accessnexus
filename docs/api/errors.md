@@ -152,7 +152,7 @@ Static checks run by `validate`, `generate`, `diff` and `push`. In Database mode
 | `RLS_DISABLED` | warning | `<table>.enableRLS` | `enableRLS: false`: anyone with the anon key can read and write the table. | Remove `enableRLS: false` and add policies. |
 | `RLS_DISABLED_WITH_POLICIES` | error | `<table>.enableRLS` | `enableRLS: false` together with `policies`. | Remove `enableRLS: false`. |
 | `INVALID_POLICIES` | error | `<table>.policies` | `policies` is not an object. | `{ select: policy.isAuthenticated() }`. |
-| `UNKNOWN_POLICY_OPERATION` | error | `<table>.policies.<op>` | Key is not `select`, `insert`, `update` or `delete` (e.g. `read`, `create`). | Use the SQL operation names; `read`/`create` belong in `definePermissions`. |
+| `UNKNOWN_POLICY_OPERATION` | error | `<table>.policies.<op>` | Key is not `select`, `insert`, `update`, `delete` or `all` (e.g. `read`, `create`). | Use the SQL operation names, or `all` for one rule on every operation; `read`/`create` belong in `definePermissions`. |
 | `INVALID_POLICY_RULE` | error | `<table>.policies.<op>` | Not built with `policy.*` (e.g. `'public'`), `hasRole` without a role, or `custom` with an empty expression. | `policy.public()`, `policy.hasRole('admin')`, a non-empty SQL expression. |
 | `UNKNOWN_POLICY_KIND` | error | `<table>.policies.<op>` | A rule object has an unknown `kind`. | Build rules with `policy.*`. |
 | `EMPTY_COMBINATOR` | error | `<table>.policies.<op>` | `policy.any([])` or `policy.all([])`. | Pass at least one rule, or use `policy.none()`. |
@@ -185,6 +185,7 @@ Static checks run by `validate`, `generate`, `diff` and `push`. In Database mode
 | Code | Severity | Path | Meaning | Fix |
 | --- | --- | --- | --- | --- |
 | `INVALID_RPC` | error | `rpcs.<name>` | An entry of `rpcs` was not created with `rpc()`, or its `volatility` is not `'volatile'` / `'stable'` / `'immutable'`. | `rpcs: { name: rpc({ ... }) }`. |
+| `INVALID_RPC_RETURNS` | error | `rpcs.<name>.returns` | `returns` is an unknown type, an empty `{ table: {} }`, a `{ setof }` that is neither a schema table nor a column type, or another shape. | A column type, `'void'`, `{ table: { col: 'type' } }` or `{ setof: 'table_name' }`. Result column names are checked as `INVALID_IDENTIFIER`, their types as `UNKNOWN_COLUMN_TYPE`. |
 | `RPC_VOLATILITY_CONFLICT` | error | `rpcs.<name>.volatility` | `immutable` contradicts `volatility` (e.g. `immutable: true, volatility: 'stable'`). | Keep only `volatility`. |
 | `INVALID_FUNCTION_SET` | error | `rpcs.<name>.set`, `<table>.triggers[<i>].set` | `set` is not an object, a key is not a configuration parameter name, or a value is not a string. | `set: { row_security: 'off' }`. |
 | `SEARCH_PATH_PINNED` | warning | `rpcs.<name>.set.search_path`, `<table>.triggers[<i>].set.search_path` | `set.search_path` differs from `pg_catalog, public`; generated functions always pin that value, so it is ignored. | Remove it and schema-qualify anything outside `public` in the body. |

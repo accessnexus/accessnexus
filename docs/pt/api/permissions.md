@@ -86,6 +86,7 @@ interface ResourcePermissions {
   create?: PermissionLevel;
   update?: PermissionLevel;
   delete?: PermissionLevel;
+  all?: PermissionLevel;
 }
 ```
 
@@ -99,6 +100,7 @@ interface ResourcePermissions {
 | `create` | `PermissionLevel` | nenhum | Compila para a policy de `insert`. |
 | `update` | `PermissionLevel` | nenhum | Compila para a policy de `update`. |
 | `delete` | `PermissionLevel` | nenhum | Compila para a policy de `delete`. |
+| `all` | `PermissionLevel` | nenhum | Preenche `read`, `create`, `update` e `delete` que não têm nível próprio: `{ ownerColumn: 'user_id', all: 'own', read: '*' }`. Os pins de escrita valem para o `create`/`update` expandidos como se estivessem escritos. |
 
 Uma ação que fica de fora não gera policy, então é negada assim que a tabela tem policies.
 

@@ -312,6 +312,8 @@ all(rules: PolicyRule[]): AllRule; // { kind: 'all', rules }
 
 SQL: cada regra entre parênteses, unidas por `AND`.
 
+Não confunda com a chave `all` das `policies` de uma tabela (`policies: { all: rule }`), que aplica uma regra a todas as operações. Veja [Policies](/pt/guide/policies#one-rule-for-every-operation-all).
+
 ```ts
 import { policy } from 'accessnexus';
 

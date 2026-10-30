@@ -354,6 +354,32 @@ describe('checkSchema', () => {
     expect(codes(withRpcs)).toEqual(['error:UNKNOWN_COLUMN_TYPE:rpcs.get_x.args.n']);
   });
 
+  it('validates rpc returns: scalar, table and setof', () => {
+    const t = () => ({ t: table({ columns: { id: 'uuid' }, primaryKey: 'id', policies: { select: policy.public() } }) });
+    const ok = defineSchema(t(), { rpcs: {
+      a: rpc({ returns: { table: { id: 'uuid', n: 'int?' } } }),
+      b: rpc({ returns: { setof: 't' } }),
+      c: rpc({ returns: { setof: 'uuid' } }),
+      d: rpc({ returns: 'void' }),
+    } });
+    expect(codes(ok)).toEqual([]);
+    const bad = defineSchema(t(), { rpcs: {
+      a: rpc({ returns: { table: {} } }),
+      b: rpc({ returns: { setof: 'nope' } }),
+      c: rpc({ returns: { table: { BadName: 'uuid', x: 'number' as any } } }),
+      d: rpc({ returns: 'number' as any }),
+      e: rpc({ returns: { rows: 't' } as any }),
+    } });
+    expect(codes(bad)).toEqual([
+      'error:INVALID_RPC_RETURNS:rpcs.a.returns',
+      'error:INVALID_RPC_RETURNS:rpcs.b.returns',
+      'error:INVALID_IDENTIFIER:rpcs.c.returns.table.BadName',
+      'error:UNKNOWN_COLUMN_TYPE:rpcs.c.returns.table.x',
+      'error:INVALID_RPC_RETURNS:rpcs.d.returns',
+      'error:INVALID_RPC_RETURNS:rpcs.e.returns',
+    ]);
+  });
+
   it('flags a manual-mode table without columns', () => {
     expect(codes({
       a: { columns: { id: 'uuid' }, primaryKey: 'id', policies: { select: policy.public() } },

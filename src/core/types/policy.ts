@@ -128,7 +128,15 @@ export type PolicyRuleType =
  * Policies for a table: one rule per operation.
  * All operations are optional — undefined means no policy generated
  * (inherits default behavior from the adapter).
+ *
+ * `all` applies one rule to select, insert, update and delete; an explicit
+ * per-operation key overrides it (`{ all: policy.isOwner('user_id'),
+ * delete: policy.none() }`). It still generates one policy per operation
+ * (never a Postgres `FOR ALL` policy). Not to be confused with the
+ * `policy.all([...])` combinator, which ANDs rules.
  */
 export type TablePolicies = {
   [K in PolicyOperation]?: PolicyRule;
+} & {
+  all?: PolicyRule;
 };

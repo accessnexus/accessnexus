@@ -16,6 +16,22 @@ export type ColumnsOf<T extends TableName> = readonly (keyof RowOf<T> & string)[
 /** The row narrowed to the selected `columns` (the whole row when omitted). */
 export type SelectedRow<T extends TableName, TColumns extends ColumnsOf<T> | undefined> =
   TColumns extends readonly (infer K extends keyof RowOf<T>)[] ? Pick<RowOf<T>, K> : RowOf<T>;
+/**
+ * Filter of the *One/*Many writes: column → value, naming at least one column
+ * of the table (`{}` and unknown columns are type errors).
+ */
+export type RowFilter<T extends TableName, TFilter> = TFilter
+  & { [K in Exclude<keyof TFilter, keyof RowOf<T>>]: never }
+  & (keyof TFilter extends never ? { 'filter must name at least one column': never } : unknown);
+
+// Runtime guard of the *One/*Many writes: never update or delete every row.
+function requireFilter(filter: object | null | undefined, method: string): object {
+  const entries = Object.entries(filter ?? {}).filter(([, value]) => value !== undefined);
+  if (entries.length === 0) {
+    throw new Error(`[AccessNexus] ${method}: the filter must name at least one column (refusing to write every row)`);
+  }
+  return Object.fromEntries(entries);
+}
 
 // Internal, loosely typed view of the Supabase query builder. Results are
 // typed per method below.
@@ -198,6 +214,48 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
 
       delete: (id: string) =>
         provider.from('profiles').delete().eq('id', id) as unknown as QueryResult<null>,
+
+      // Updates the row matching `filter` (a unique column) and returns it in one
+      // round trip; `data: null` when no visible row matches. More than one match
+      // is an error (PGRST116) and nothing is updated.
+      updateOne: <TFilter extends Partial<Profiles>, TColumns extends ColumnsOf<'profiles'> | undefined = undefined>(
+        filter: RowFilter<'profiles', TFilter>,
+        data: ProfilesUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'profiles.updateOne');
+        return provider.from('profiles').update(data).match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'profiles', TColumns>>;
+      },
+
+      // Updates every row matching `filter` (at least one column) and returns them.
+      updateMany: <TFilter extends Partial<Profiles>, TColumns extends ColumnsOf<'profiles'> | undefined = undefined>(
+        filter: RowFilter<'profiles', TFilter>,
+        data: ProfilesUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'profiles.updateMany');
+        return provider.from('profiles').update(data).match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'profiles', TColumns>[]>;
+      },
+
+      // Deletes the row matching `filter` and returns it (`data: null` when none
+      // matches).
+      // More than one match is an error (PGRST116) and nothing is deleted.
+      deleteOne: <TFilter extends Partial<Profiles>, TColumns extends ColumnsOf<'profiles'> | undefined = undefined>(
+        filter: RowFilter<'profiles', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'profiles.deleteOne');
+        return provider.from('profiles').delete().match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'profiles', TColumns>>;
+      },
+
+      // Deletes every row matching `filter` (at least one column) and returns them.
+      deleteMany: <TFilter extends Partial<Profiles>, TColumns extends ColumnsOf<'profiles'> | undefined = undefined>(
+        filter: RowFilter<'profiles', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'profiles.deleteMany');
+        return provider.from('profiles').delete().match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'profiles', TColumns>[]>;
+      },
     },
 
     organizations: {
@@ -230,6 +288,48 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
 
       delete: (id: string) =>
         provider.from('organizations').delete().eq('id', id) as unknown as QueryResult<null>,
+
+      // Updates the row matching `filter` (a unique column) and returns it in one
+      // round trip; `data: null` when no visible row matches. More than one match
+      // is an error (PGRST116) and nothing is updated.
+      updateOne: <TFilter extends Partial<Organizations>, TColumns extends ColumnsOf<'organizations'> | undefined = undefined>(
+        filter: RowFilter<'organizations', TFilter>,
+        data: OrganizationsUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'organizations.updateOne');
+        return provider.from('organizations').update(data).match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'organizations', TColumns>>;
+      },
+
+      // Updates every row matching `filter` (at least one column) and returns them.
+      updateMany: <TFilter extends Partial<Organizations>, TColumns extends ColumnsOf<'organizations'> | undefined = undefined>(
+        filter: RowFilter<'organizations', TFilter>,
+        data: OrganizationsUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'organizations.updateMany');
+        return provider.from('organizations').update(data).match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'organizations', TColumns>[]>;
+      },
+
+      // Deletes the row matching `filter` and returns it (`data: null` when none
+      // matches).
+      // More than one match is an error (PGRST116) and nothing is deleted.
+      deleteOne: <TFilter extends Partial<Organizations>, TColumns extends ColumnsOf<'organizations'> | undefined = undefined>(
+        filter: RowFilter<'organizations', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'organizations.deleteOne');
+        return provider.from('organizations').delete().match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'organizations', TColumns>>;
+      },
+
+      // Deletes every row matching `filter` (at least one column) and returns them.
+      deleteMany: <TFilter extends Partial<Organizations>, TColumns extends ColumnsOf<'organizations'> | undefined = undefined>(
+        filter: RowFilter<'organizations', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'organizations.deleteMany');
+        return provider.from('organizations').delete().match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'organizations', TColumns>[]>;
+      },
     },
 
     org_members: {
@@ -262,6 +362,48 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
 
       delete: (id: string) =>
         provider.from('org_members').delete().eq('id', id) as unknown as QueryResult<null>,
+
+      // Updates the row matching `filter` (a unique column) and returns it in one
+      // round trip; `data: null` when no visible row matches. More than one match
+      // is an error (PGRST116) and nothing is updated.
+      updateOne: <TFilter extends Partial<OrgMembers>, TColumns extends ColumnsOf<'org_members'> | undefined = undefined>(
+        filter: RowFilter<'org_members', TFilter>,
+        data: OrgMembersUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'org_members.updateOne');
+        return provider.from('org_members').update(data).match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'org_members', TColumns>>;
+      },
+
+      // Updates every row matching `filter` (at least one column) and returns them.
+      updateMany: <TFilter extends Partial<OrgMembers>, TColumns extends ColumnsOf<'org_members'> | undefined = undefined>(
+        filter: RowFilter<'org_members', TFilter>,
+        data: OrgMembersUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'org_members.updateMany');
+        return provider.from('org_members').update(data).match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'org_members', TColumns>[]>;
+      },
+
+      // Deletes the row matching `filter` and returns it (`data: null` when none
+      // matches).
+      // More than one match is an error (PGRST116) and nothing is deleted.
+      deleteOne: <TFilter extends Partial<OrgMembers>, TColumns extends ColumnsOf<'org_members'> | undefined = undefined>(
+        filter: RowFilter<'org_members', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'org_members.deleteOne');
+        return provider.from('org_members').delete().match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'org_members', TColumns>>;
+      },
+
+      // Deletes every row matching `filter` (at least one column) and returns them.
+      deleteMany: <TFilter extends Partial<OrgMembers>, TColumns extends ColumnsOf<'org_members'> | undefined = undefined>(
+        filter: RowFilter<'org_members', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'org_members.deleteMany');
+        return provider.from('org_members').delete().match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'org_members', TColumns>[]>;
+      },
     },
 
     projects: {
@@ -294,6 +436,48 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
 
       delete: (id: string) =>
         provider.from('projects').delete().eq('id', id) as unknown as QueryResult<null>,
+
+      // Updates the row matching `filter` (a unique column) and returns it in one
+      // round trip; `data: null` when no visible row matches. More than one match
+      // is an error (PGRST116) and nothing is updated.
+      updateOne: <TFilter extends Partial<Projects>, TColumns extends ColumnsOf<'projects'> | undefined = undefined>(
+        filter: RowFilter<'projects', TFilter>,
+        data: ProjectsUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'projects.updateOne');
+        return provider.from('projects').update(data).match(match).is('deleted_at', null).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'projects', TColumns>>;
+      },
+
+      // Updates every row matching `filter` (at least one column) and returns them.
+      updateMany: <TFilter extends Partial<Projects>, TColumns extends ColumnsOf<'projects'> | undefined = undefined>(
+        filter: RowFilter<'projects', TFilter>,
+        data: ProjectsUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'projects.updateMany');
+        return provider.from('projects').update(data).match(match).is('deleted_at', null).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'projects', TColumns>[]>;
+      },
+
+      // Deletes the row matching `filter` and returns it (`data: null` when none
+      // matches — and always on this soft-delete table, whose trigger turns the DELETE into an UPDATE).
+      // More than one match is an error (PGRST116) and nothing is deleted.
+      deleteOne: <TFilter extends Partial<Projects>, TColumns extends ColumnsOf<'projects'> | undefined = undefined>(
+        filter: RowFilter<'projects', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'projects.deleteOne');
+        return provider.from('projects').delete().match(match).is('deleted_at', null).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'projects', TColumns>>;
+      },
+
+      // Deletes every row matching `filter` (at least one column) and returns them (`[]` on this soft-delete table).
+      deleteMany: <TFilter extends Partial<Projects>, TColumns extends ColumnsOf<'projects'> | undefined = undefined>(
+        filter: RowFilter<'projects', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'projects.deleteMany');
+        return provider.from('projects').delete().match(match).is('deleted_at', null).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'projects', TColumns>[]>;
+      },
     },
 
     tasks: {
@@ -326,6 +510,48 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
 
       delete: (id: string) =>
         provider.from('tasks').delete().eq('id', id) as unknown as QueryResult<null>,
+
+      // Updates the row matching `filter` (a unique column) and returns it in one
+      // round trip; `data: null` when no visible row matches. More than one match
+      // is an error (PGRST116) and nothing is updated.
+      updateOne: <TFilter extends Partial<Tasks>, TColumns extends ColumnsOf<'tasks'> | undefined = undefined>(
+        filter: RowFilter<'tasks', TFilter>,
+        data: TasksUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'tasks.updateOne');
+        return provider.from('tasks').update(data).match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'tasks', TColumns>>;
+      },
+
+      // Updates every row matching `filter` (at least one column) and returns them.
+      updateMany: <TFilter extends Partial<Tasks>, TColumns extends ColumnsOf<'tasks'> | undefined = undefined>(
+        filter: RowFilter<'tasks', TFilter>,
+        data: TasksUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'tasks.updateMany');
+        return provider.from('tasks').update(data).match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'tasks', TColumns>[]>;
+      },
+
+      // Deletes the row matching `filter` and returns it (`data: null` when none
+      // matches).
+      // More than one match is an error (PGRST116) and nothing is deleted.
+      deleteOne: <TFilter extends Partial<Tasks>, TColumns extends ColumnsOf<'tasks'> | undefined = undefined>(
+        filter: RowFilter<'tasks', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'tasks.deleteOne');
+        return provider.from('tasks').delete().match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'tasks', TColumns>>;
+      },
+
+      // Deletes every row matching `filter` (at least one column) and returns them.
+      deleteMany: <TFilter extends Partial<Tasks>, TColumns extends ColumnsOf<'tasks'> | undefined = undefined>(
+        filter: RowFilter<'tasks', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'tasks.deleteMany');
+        return provider.from('tasks').delete().match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'tasks', TColumns>[]>;
+      },
     },
 
     comments: {
@@ -358,6 +584,48 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
 
       delete: (id: string) =>
         provider.from('comments').delete().eq('id', id) as unknown as QueryResult<null>,
+
+      // Updates the row matching `filter` (a unique column) and returns it in one
+      // round trip; `data: null` when no visible row matches. More than one match
+      // is an error (PGRST116) and nothing is updated.
+      updateOne: <TFilter extends Partial<Comments>, TColumns extends ColumnsOf<'comments'> | undefined = undefined>(
+        filter: RowFilter<'comments', TFilter>,
+        data: CommentsUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'comments.updateOne');
+        return provider.from('comments').update(data).match(match).is('deleted_at', null).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'comments', TColumns>>;
+      },
+
+      // Updates every row matching `filter` (at least one column) and returns them.
+      updateMany: <TFilter extends Partial<Comments>, TColumns extends ColumnsOf<'comments'> | undefined = undefined>(
+        filter: RowFilter<'comments', TFilter>,
+        data: CommentsUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'comments.updateMany');
+        return provider.from('comments').update(data).match(match).is('deleted_at', null).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'comments', TColumns>[]>;
+      },
+
+      // Deletes the row matching `filter` and returns it (`data: null` when none
+      // matches — and always on this soft-delete table, whose trigger turns the DELETE into an UPDATE).
+      // More than one match is an error (PGRST116) and nothing is deleted.
+      deleteOne: <TFilter extends Partial<Comments>, TColumns extends ColumnsOf<'comments'> | undefined = undefined>(
+        filter: RowFilter<'comments', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'comments.deleteOne');
+        return provider.from('comments').delete().match(match).is('deleted_at', null).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'comments', TColumns>>;
+      },
+
+      // Deletes every row matching `filter` (at least one column) and returns them (`[]` on this soft-delete table).
+      deleteMany: <TFilter extends Partial<Comments>, TColumns extends ColumnsOf<'comments'> | undefined = undefined>(
+        filter: RowFilter<'comments', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'comments.deleteMany');
+        return provider.from('comments').delete().match(match).is('deleted_at', null).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'comments', TColumns>[]>;
+      },
     },
 
     audit_log: {
@@ -390,6 +658,48 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
 
       delete: (id: string) =>
         provider.from('audit_log').delete().eq('id', id) as unknown as QueryResult<null>,
+
+      // Updates the row matching `filter` (a unique column) and returns it in one
+      // round trip; `data: null` when no visible row matches. More than one match
+      // is an error (PGRST116) and nothing is updated.
+      updateOne: <TFilter extends Partial<AuditLog>, TColumns extends ColumnsOf<'audit_log'> | undefined = undefined>(
+        filter: RowFilter<'audit_log', TFilter>,
+        data: AuditLogUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'audit_log.updateOne');
+        return provider.from('audit_log').update(data).match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'audit_log', TColumns>>;
+      },
+
+      // Updates every row matching `filter` (at least one column) and returns them.
+      updateMany: <TFilter extends Partial<AuditLog>, TColumns extends ColumnsOf<'audit_log'> | undefined = undefined>(
+        filter: RowFilter<'audit_log', TFilter>,
+        data: AuditLogUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'audit_log.updateMany');
+        return provider.from('audit_log').update(data).match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'audit_log', TColumns>[]>;
+      },
+
+      // Deletes the row matching `filter` and returns it (`data: null` when none
+      // matches).
+      // More than one match is an error (PGRST116) and nothing is deleted.
+      deleteOne: <TFilter extends Partial<AuditLog>, TColumns extends ColumnsOf<'audit_log'> | undefined = undefined>(
+        filter: RowFilter<'audit_log', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'audit_log.deleteOne');
+        return provider.from('audit_log').delete().match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'audit_log', TColumns>>;
+      },
+
+      // Deletes every row matching `filter` (at least one column) and returns them.
+      deleteMany: <TFilter extends Partial<AuditLog>, TColumns extends ColumnsOf<'audit_log'> | undefined = undefined>(
+        filter: RowFilter<'audit_log', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'audit_log.deleteMany');
+        return provider.from('audit_log').delete().match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'audit_log', TColumns>[]>;
+      },
     },
 
     invitations: {
@@ -422,6 +732,48 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
 
       delete: (id: string) =>
         provider.from('invitations').delete().eq('id', id) as unknown as QueryResult<null>,
+
+      // Updates the row matching `filter` (a unique column) and returns it in one
+      // round trip; `data: null` when no visible row matches. More than one match
+      // is an error (PGRST116) and nothing is updated.
+      updateOne: <TFilter extends Partial<Invitations>, TColumns extends ColumnsOf<'invitations'> | undefined = undefined>(
+        filter: RowFilter<'invitations', TFilter>,
+        data: InvitationsUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'invitations.updateOne');
+        return provider.from('invitations').update(data).match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'invitations', TColumns>>;
+      },
+
+      // Updates every row matching `filter` (at least one column) and returns them.
+      updateMany: <TFilter extends Partial<Invitations>, TColumns extends ColumnsOf<'invitations'> | undefined = undefined>(
+        filter: RowFilter<'invitations', TFilter>,
+        data: InvitationsUpdate,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'invitations.updateMany');
+        return provider.from('invitations').update(data).match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'invitations', TColumns>[]>;
+      },
+
+      // Deletes the row matching `filter` and returns it (`data: null` when none
+      // matches).
+      // More than one match is an error (PGRST116) and nothing is deleted.
+      deleteOne: <TFilter extends Partial<Invitations>, TColumns extends ColumnsOf<'invitations'> | undefined = undefined>(
+        filter: RowFilter<'invitations', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'invitations.deleteOne');
+        return provider.from('invitations').delete().match(match).select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<SelectedRow<'invitations', TColumns>>;
+      },
+
+      // Deletes every row matching `filter` (at least one column) and returns them.
+      deleteMany: <TFilter extends Partial<Invitations>, TColumns extends ColumnsOf<'invitations'> | undefined = undefined>(
+        filter: RowFilter<'invitations', TFilter>,
+        options?: { columns?: TColumns },
+      ) => {
+        const match = requireFilter(filter, 'invitations.deleteMany');
+        return provider.from('invitations').delete().match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'invitations', TColumns>[]>;
+      },
     },
 
     rpc: {

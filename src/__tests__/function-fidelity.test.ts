@@ -147,7 +147,7 @@ describe('init import of volatility, proconfig and search_path', () => {
     const hardened: HardenedFunction[] = [];
     generateSchemaFromIntrospection({
       policyPrefix: 'accessnexus', hardened, tables: [{ name: 't', columns: [], foreignKeys: [], uniqueColumns: [], policies: [] }],
-      functions: [fn('setof_fn', { returns: 'SETOF integer' })],
+      functions: [fn('record_fn', { returns: 'record' })],
     });
     expect(hardened).toEqual([]);
   });

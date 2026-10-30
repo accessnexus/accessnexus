@@ -60,6 +60,7 @@ Um schema real também declara `orgs` e `org_members`; veja o [passo a passo](#m
 | `ownerColumn` | Coluna com o id do usuário dono. Obrigatória para `'own'` |
 | `tenantColumn` | Coluna com o id do tenant da linha. Obrigatória para `{ scope: 'tenant' }`. Use `'id'` quando a linha é o próprio tenant |
 | `read`, `create`, `update`, `delete` | Um nível de permissão por ação. Uma ação omitida é negada |
+| `all` | Um nível para toda ação sem nível próprio: `{ ownerColumn: 'user_id', all: 'own', read: '*' }`. Os pins de escrita valem para o `create`/`update` expandidos |
 | `pinOwnerOnCreate` | Ligado por padrão. Veja [Pins de escrita](#write-pins) |
 | `pinTenant` | Ligado por padrão. Veja [Pins de escrita](#write-pins) |
 

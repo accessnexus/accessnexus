@@ -2,6 +2,19 @@
 -- AccessNexus: Auto-generated RPC functions
 -- ============================================
 
+-- CREATE OR REPLACE cannot change the result type or argument names: drop get_org_dashboard first when they differ.
+DO $$
+DECLARE
+  fn regprocedure := pg_catalog.to_regprocedure('get_org_dashboard(UUID)');
+  want_args text := 'p_org_id ' || pg_catalog.format_type(pg_catalog.to_regtype('UUID'), NULL);
+  want_result text := pg_catalog.format_type(pg_catalog.to_regtype('JSONB'), NULL);
+BEGIN
+  IF fn IS NOT NULL AND want_args IS NOT NULL AND want_result IS NOT NULL
+     AND (pg_catalog.pg_get_function_identity_arguments(fn) IS DISTINCT FROM want_args
+          OR pg_catalog.pg_get_function_result(fn) IS DISTINCT FROM want_result) THEN
+    DROP FUNCTION get_org_dashboard(UUID);
+  END IF;
+END $$;
 CREATE OR REPLACE FUNCTION get_org_dashboard(p_org_id UUID)
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -22,6 +35,19 @@ BEGIN
 END;
 $$;
 
+-- CREATE OR REPLACE cannot change the result type or argument names: drop accept_invitation first when they differ.
+DO $$
+DECLARE
+  fn regprocedure := pg_catalog.to_regprocedure('accept_invitation(TEXT)');
+  want_args text := 'p_token ' || pg_catalog.format_type(pg_catalog.to_regtype('TEXT'), NULL);
+  want_result text := pg_catalog.format_type(pg_catalog.to_regtype('UUID'), NULL);
+BEGIN
+  IF fn IS NOT NULL AND want_args IS NOT NULL AND want_result IS NOT NULL
+     AND (pg_catalog.pg_get_function_identity_arguments(fn) IS DISTINCT FROM want_args
+          OR pg_catalog.pg_get_function_result(fn) IS DISTINCT FROM want_result) THEN
+    DROP FUNCTION accept_invitation(TEXT);
+  END IF;
+END $$;
 CREATE OR REPLACE FUNCTION accept_invitation(p_token TEXT)
 RETURNS UUID
 LANGUAGE plpgsql
@@ -66,6 +92,19 @@ $$;
 REVOKE EXECUTE ON FUNCTION accept_invitation(TEXT) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION accept_invitation(TEXT) TO authenticated, service_role;
 
+-- CREATE OR REPLACE cannot change the result type or argument names: drop search_tasks first when they differ.
+DO $$
+DECLARE
+  fn regprocedure := pg_catalog.to_regprocedure('search_tasks(UUID, TEXT, INTEGER)');
+  want_args text := 'p_org_id ' || pg_catalog.format_type(pg_catalog.to_regtype('UUID'), NULL) || ', p_query ' || pg_catalog.format_type(pg_catalog.to_regtype('TEXT'), NULL) || ', p_limit ' || pg_catalog.format_type(pg_catalog.to_regtype('INTEGER'), NULL);
+  want_result text := pg_catalog.format_type(pg_catalog.to_regtype('JSONB'), NULL);
+BEGIN
+  IF fn IS NOT NULL AND want_args IS NOT NULL AND want_result IS NOT NULL
+     AND (pg_catalog.pg_get_function_identity_arguments(fn) IS DISTINCT FROM want_args
+          OR pg_catalog.pg_get_function_result(fn) IS DISTINCT FROM want_result) THEN
+    DROP FUNCTION search_tasks(UUID, TEXT, INTEGER);
+  END IF;
+END $$;
 CREATE OR REPLACE FUNCTION search_tasks(p_org_id UUID, p_query TEXT, p_limit INTEGER)
 RETURNS JSONB
 LANGUAGE plpgsql

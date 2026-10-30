@@ -85,6 +85,10 @@ Toda tabela do schema ganha estes acessores. `<pk>` é a `primaryKey` da tabela 
 | `create` | `(data: Create) => QueryResult<Row>` | `from(t).insert(data).select().single()` |
 | `update` | `(id: string, data: Update) => QueryResult<Row>` | `from(t).update(data).eq(<pk>, id).select().single()` |
 | `delete` | `(id: string) => QueryResult<null>` | `from(t).delete().eq(<pk>, id)` |
+| `updateOne` | `(filter: RowFilter, data: Update, options?: { columns? }) => QueryResult<Selected>` | `from(t).update(data).match(filter)[.is(softDelete, null)].select(<colunas ou *>).maybeSingle()` |
+| `updateMany` | `(filter: RowFilter, data: Update, options?: { columns? }) => QueryResult<Selected[]>` | `from(t).update(data).match(filter)[.is(softDelete, null)].select(<colunas ou *>)` |
+| `deleteOne` | `(filter: RowFilter, options?: { columns? }) => QueryResult<Selected>` | `from(t).delete().match(filter)[.is(softDelete, null)].select(<colunas ou *>).maybeSingle()` |
+| `deleteMany` | `(filter: RowFilter, options?: { columns? }) => QueryResult<Selected[]>` | `from(t).delete().match(filter)[.is(softDelete, null)].select(<colunas ou *>)` |
 
 `Selected` é `Row` (mais as relações do `include`), ou `Pick<Row, ...columns>` quando `columns` é informado.
 
@@ -99,6 +103,7 @@ Tipos por modo:
 | `Row` | `<Table>` | `Database['public']['Tables'][t]['Row']` |
 | `Create` | `<Table>Create` | `...[t]['Insert']` |
 | `Update` | `<Table>Update` | `...[t]['Update']` |
+| `RowFilter` | `{ [coluna]?: tipo da coluna }`, ao menos uma chave | igual, a partir do `Row` |
 
 Observações:
 
@@ -108,6 +113,29 @@ Observações:
 - `delete` envia um DELETE de verdade. Numa tabela com `softDelete`, o trigger transforma isso em `SET <column> = NOW()`, então quem decide é a policy de DELETE. O supabase-js retorna `data: null` para um delete sem `.select()`.
 - `findOne` e `findById` usam `maybeSingle()`: nenhuma linha (ou nenhuma visível) é `{ data: null, error: null }`, não um erro. Mais de uma linha batendo com o filtro do `findOne` é erro (PGRST116), então filtre por uma coluna única (`{ slug }`, `{ email }`).
 - Numa tabela com `softDelete`, `findMany`, `findOne` e `findById` adicionam `.is(<column>, null)`. O RLS em si não esconde linhas com soft delete.
+
+### Escritas por filtro {#filtered-writes}
+
+`updateOne` / `updateMany` / `deleteOne` / `deleteMany` gravam por um filtro em vez da primary key, numa só ida ao servidor, e retornam as linhas gravadas:
+
+```ts
+import { createClient } from '@supabase/supabase-js';
+import { createAccessNexusClient } from './generated/sdk/client.js';
+
+const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'public-anon-key'));
+
+export async function publish(slug: string) {
+  // uma coluna única que não é PK: uma requisição, a linha atualizada (ou null)
+  const { data, error } = await db.posts.updateOne({ slug }, { published: true }, { columns: ['id', 'slug'] });
+  if (error) throw error;
+  return data; // Pick<Posts, 'id' | 'slug'> | null
+}
+```
+
+- O filtro é obrigatório e tipado como `RowFilter<T, TFilter>` (exportado pelo client gerado): as chaves precisam ser colunas, os valores os tipos das colunas, e `{}` é erro de tipo. Em runtime, um filtro vazio, ou com todos os valores `undefined`, lança `[AccessNexus] <table>.<method>: the filter must name at least one column (refusing to write every row)` antes de qualquer requisição. `data` é o tipo `Update` da tabela.
+- `updateOne` / `deleteOne` usam `maybeSingle()`: nenhuma linha visível batendo é `{ data: null, error: null }`. Mais de uma é erro PGRST116 e o PostgREST desfaz a escrita.
+- As linhas retornadas vêm do `.select()` (`UPDATE/DELETE ... RETURNING`), então só voltam quando a policy de `select` deixa o usuário vê-las. `options.columns` as restringe como no `findOne`.
+- Numa tabela com `softDelete`, esses métodos só tocam linhas vivas (`.is(<column>, null)`). O trigger transforma o DELETE em UPDATE, então o DELETE não retorna linha: `deleteOne` dá `null` e `deleteMany` `[]`, mesmo com as linhas tendo sofrido soft delete.
 
 ### columns
 
@@ -160,7 +188,7 @@ rpc.<name>(args: Functions['<name>']['Args']): QueryResult<Functions['<name>']['
 // chama provider.rpc('<name>', args)
 ```
 
-No modo manual, `Functions` vem do `types.ts` gerado (uma RPC sem `args` recebe `{}`); no modo Database, do seu tipo `Database`.
+No modo manual, `Functions` vem do `types.ts` gerado (uma RPC sem `args` recebe `{}`; um retorno `{ table }` / `{ setof }` é um array de linhas, veja [Tipos de retorno](/pt/api/rpc#return-types)); no modo Database, do seu tipo `Database`.
 
 ```ts
 import { createClient } from '@supabase/supabase-js';

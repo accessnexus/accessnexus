@@ -213,6 +213,32 @@ export async function lookups() {
   // @ts-expect-error unknown column name
   await plain.profiles.findOne({ id: 'x' }, { columns: ['email'] });
 }
+
+// 5. updateOne/updateMany/deleteOne/deleteMany: required, typed filter.
+export async function writes() {
+  const u1 = await plain.docs.updateOne({ slug: 'hello' }, { views: 2 });
+  assertType<Equal<typeof u1.data, Docs | null>>(true);
+  const u2 = await plain.docs.updateOne({ slug: 'hello', owner_id: 'o' }, { status: 'published' }, { columns: ['id', 'status'] });
+  assertType<Equal<typeof u2.data, Pick<Docs, 'id' | 'status'> | null>>(true);
+  const um = await plain.docs.updateMany({ status: 'draft' }, { published: false });
+  assertType<Equal<typeof um.data, Docs[] | null>>(true);
+  const d1 = await plain.docs.deleteOne({ slug: 'x' }, { columns: ['id'] });
+  assertType<Equal<typeof d1.data, Pick<Docs, 'id'> | null>>(true);
+  const dm = await plain.profiles.deleteMany({ name: 'x' });
+  assertType<Equal<typeof dm.data, Database['public']['Tables']['profiles']['Row'][] | null>>(true);
+  // @ts-expect-error empty filter
+  await plain.docs.updateOne({}, { views: 1 });
+  // @ts-expect-error empty filter
+  await plain.docs.deleteMany({});
+  // @ts-expect-error unknown filter column
+  await plain.docs.updateOne({ slug: 'x', nope: 1 }, { views: 1 });
+  // @ts-expect-error wrong filter value type
+  await plain.docs.deleteOne({ views: 'many' });
+  // @ts-expect-error wrong data type
+  await plain.docs.updateMany({ slug: 'x' }, { views: 'many' });
+  // @ts-expect-error unknown column in columns
+  await plain.docs.updateOne({ slug: 'x' }, { views: 1 }, { columns: ['nope'] });
+}
 `);
     expect(typecheck([join(dir, 'use.ts')])).toEqual([]);
   }, 60_000);
@@ -266,6 +292,29 @@ export async function lookups() {
     expect(await run(() => client.profiles.update('1', { name: 'y' }))).toEqual([
       ['from', 'profiles'], ['update', { name: 'y' }], ['eq', 'id', '1'], ['select'], ['single'],
     ]);
+    // filtered writes: one round trip, live rows only, guarded filter
+    expect(await run(() => client.docs.updateOne({ slug: 'a' }, { views: 1 }, { columns: ['id'] }))).toEqual([
+      ['from', 'docs'], ['update', { views: 1 }], ['match', { slug: 'a' }], ['is', 'deleted_at', null], ['select', 'id'], ['maybeSingle'],
+    ]);
+    expect(await run(() => client.profiles.updateMany({ name: 'a', id: undefined }, { name: 'b' }))).toEqual([
+      ['from', 'profiles'], ['update', { name: 'b' }], ['match', { name: 'a' }], ['select', '*'],
+    ]);
+    expect(await run(() => client.profiles.deleteOne({ id: '1' }))).toEqual([
+      ['from', 'profiles'], ['delete'], ['match', { id: '1' }], ['select', '*'], ['maybeSingle'],
+    ]);
+    expect(await run(() => client.profiles.deleteMany({ name: 'a' }, { columns: ['id'] }))).toEqual([
+      ['from', 'profiles'], ['delete'], ['match', { name: 'a' }], ['select', 'id'],
+    ]);
+    for (const call of [
+      () => client.profiles.updateOne({}, { name: 'x' }),
+      () => client.profiles.updateMany({ name: undefined }, { name: 'x' }),
+      () => client.profiles.deleteOne(null),
+      () => client.profiles.deleteMany({}),
+    ]) {
+      calls.length = 0;
+      expect(call).toThrow(/filter must name at least one column/);
+      expect(calls.filter((c) => c[0] === 'update' || c[0] === 'delete')).toEqual([]);
+    }
   });
 });
 
@@ -296,6 +345,12 @@ export async function q() {
   assertType<Equal<typeof created.data, Row | null>>(true);
   // @ts-expect-error unknown column name
   await client.docs.findMany({}, { columns: ['nope'] });
+  const upd = await client.docs.updateOne({ slug: 'x' }, { views: 3 }, { columns: ['id', 'views'] });
+  assertType<Equal<typeof upd.data, Pick<Row, 'id' | 'views'> | null>>(true);
+  const del = await client.docs.deleteMany({ owner_id: 'o' });
+  assertType<Equal<typeof del.data, Row[] | null>>(true);
+  // @ts-expect-error empty filter
+  await client.docs.updateMany({}, { views: 1 });
 }
 `);
     expect(typecheck([join(dir, 'use.ts')])).toEqual([]);

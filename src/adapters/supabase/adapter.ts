@@ -5,7 +5,7 @@
 
 import { baseType, isNullable, normalizeColumn } from '../../core/types/columns.js';
 import { primaryKeyColumns, singlePrimaryKey } from '../../core/types/schema.js';
-import type { RpcArg } from '../../core/types/rpc.js';
+import type { RpcArg, RpcSetofReturn, RpcTableReturn } from '../../core/types/rpc.js';
 import type {
   Adapter,
   GeneratedOutput,
@@ -818,9 +818,7 @@ export class SupabaseAdapter implements Adapter {
         : '';
 
       // Build return type
-      const returnsPG = def.returns
-        ? this.columnTypeToPG(def.returns)
-        : 'VOID';
+      const returnsPG = this.rpcReturnsToPG(name, def.returns);
 
       // Build function body
       const trimmedBody = def.body.trim();
@@ -829,6 +827,7 @@ export class SupabaseAdapter implements Adapter {
         ? [`BEGIN`, `  ${trimmedBody}`, `END;`]
         : [trimmedBody];
 
+      lines.push(...this.rpcReplaceGuard(name, def));
       lines.push(`CREATE OR REPLACE FUNCTION ${name}(${argList})`);
       lines.push(`RETURNS ${returnsPG}`);
       lines.push(`LANGUAGE ${language}`);
@@ -855,6 +854,86 @@ export class SupabaseAdapter implements Adapter {
     }
 
     return [{ path: 'rpcs.sql', content: lines.join('\n') }];
+  }
+
+  /** `RETURNS` clause body of an rpc(): scalar, VOID, TABLE(...) or SETOF ... */
+  private rpcReturnsToPG(name: string, returns: RpcDef['returns']): string {
+    if (returns === undefined) return 'VOID';
+    if (typeof returns === 'string') return this.columnTypeToPG(returns);
+    if (isTableReturn(returns)) {
+      const cols = Object.entries(returns.table);
+      if (cols.length === 0) {
+        throw new Error(`[AccessNexus] rpc ${name}: returns.table needs at least one column`);
+      }
+      return `TABLE(${cols.map(([col, type]) => `${col} ${this.columnTypeToPG(type)}`).join(', ')})`;
+    }
+    if (isSetofReturn(returns)) {
+      return `SETOF ${isRpcScalarType(returns.setof) ? this.columnTypeToPG(returns.setof) : returns.setof}`;
+    }
+    throw new Error(`[AccessNexus] rpc ${name}: returns must be a column type, 'void', { table: {...} } or { setof: '...' }`);
+  }
+
+  /**
+   * Postgres cannot change a function's result type (scalar, TABLE columns,
+   * SETOF) or its argument names with CREATE OR REPLACE ("cannot change return
+   * type of existing function"). Before replacing, drop the existing function
+   * when its argument names or result differ from the definition. Both sides
+   * are compared in Postgres' own spelling (format_type), so an unchanged
+   * function is never dropped. DROP (no CASCADE) fails when a policy, view or
+   * other function depends on it, which rolls the whole push back.
+   */
+  private rpcReplaceGuard(name: string, def: RpcDef): string[] {
+    const fmt = (type: string) => `pg_catalog.format_type(pg_catalog.to_regtype(${quoteLiteral(type)}), NULL)`;
+    const args = Object.entries(def.args ?? {}).map(([argName, arg]) => [argName, this.columnTypeToPG(normalizeRpcArg(arg).type)] as const);
+    const signature = `${name}(${args.map(([, type]) => type).join(', ')})`;
+    const wantArgs = args.length === 0
+      ? `''`
+      : args.map(([argName, type], i) => `${quoteLiteral(`${i > 0 ? ', ' : ''}${argName} `)} || ${fmt(type)}`).join(' || ');
+    const returns = def.returns;
+    let wantResult: string;
+    if (returns !== undefined && typeof returns === 'object' && isTableReturn(returns)) {
+      const cols = Object.entries(returns.table);
+      wantResult = `'TABLE(' || ${cols.map(([col, type], i) => `${quoteLiteral(`${i > 0 ? ', ' : ''}${col} `)} || ${fmt(this.columnTypeToPG(type))}`).join(' || ')} || ')'`;
+    } else if (returns !== undefined && typeof returns === 'object' && isSetofReturn(returns)) {
+      const target = isRpcScalarType(returns.setof) ? this.columnTypeToPG(returns.setof) : returns.setof;
+      wantResult = `'SETOF ' || ${fmt(target)}`;
+    } else {
+      wantResult = fmt(this.rpcReturnsToPG(name, returns));
+    }
+    return [
+      `-- CREATE OR REPLACE cannot change the result type or argument names: drop ${name} first when they differ.`,
+      `DO $$`,
+      `DECLARE`,
+      `  fn regprocedure := pg_catalog.to_regprocedure(${quoteLiteral(signature)});`,
+      `  want_args text := ${wantArgs};`,
+      `  want_result text := ${wantResult};`,
+      `BEGIN`,
+      `  IF fn IS NOT NULL AND want_args IS NOT NULL AND want_result IS NOT NULL`,
+      `     AND (pg_catalog.pg_get_function_identity_arguments(fn) IS DISTINCT FROM want_args`,
+      `          OR pg_catalog.pg_get_function_result(fn) IS DISTINCT FROM want_result) THEN`,
+      `    DROP FUNCTION ${signature};`,
+      `  END IF;`,
+      `END $$;`,
+    ];
+  }
+
+  /** TypeScript type of an rpc()'s result, matching `supabase gen types`. */
+  private rpcReturnsToTS(schema: SchemaDef, returns: RpcDef['returns']): string {
+    if (returns === undefined) return 'unknown';
+    if (typeof returns === 'string') return this.columnTypeToTS(returns);
+    if (isTableReturn(returns)) {
+      const cols = Object.entries(returns.table);
+      if (cols.length === 0) return 'Json';
+      return `{ ${cols.map(([col, type]) => `${col}: ${this.columnTypeToTS(type)}`).join('; ')} }[]`;
+    }
+    if (isSetofReturn(returns)) {
+      if (isRpcScalarType(returns.setof)) {
+        const ts = this.columnTypeToTS(returns.setof);
+        return /[|\s]/.test(ts) ? `(${ts})[]` : `${ts}[]`;
+      }
+      return Object.prototype.hasOwnProperty.call(schema, returns.setof) ? `${this.toPascalCase(returns.setof)}[]` : 'Json';
+    }
+    return 'Json';
   }
 
   // ---- Seed Generation ----
@@ -1135,6 +1214,22 @@ export class SupabaseAdapter implements Adapter {
       `/** The row narrowed to the selected \`columns\` (the whole row when omitted). */`,
       `export type SelectedRow<T extends TableName, TColumns extends ColumnsOf<T> | undefined> =`,
       `  TColumns extends readonly (infer K extends keyof RowOf<T>)[] ? Pick<RowOf<T>, K> : RowOf<T>;`,
+      `/**`,
+      ` * Filter of the *One/*Many writes: column → value, naming at least one column`,
+      ` * of the table (\`{}\` and unknown columns are type errors).`,
+      ` */`,
+      `export type RowFilter<T extends TableName, TFilter> = TFilter`,
+      `  & { [K in Exclude<keyof TFilter, keyof RowOf<T>>]: never }`,
+      `  & (keyof TFilter extends never ? { 'filter must name at least one column': never } : unknown);`,
+      '',
+      `// Runtime guard of the *One/*Many writes: never update or delete every row.`,
+      `function requireFilter(filter: object | null | undefined, method: string): object {`,
+      `  const entries = Object.entries(filter ?? {}).filter(([, value]) => value !== undefined);`,
+      `  if (entries.length === 0) {`,
+      `    throw new Error(\`[AccessNexus] \${method}: the filter must name at least one column (refusing to write every row)\`);`,
+      `  }`,
+      `  return Object.fromEntries(entries);`,
+      `}`,
       '',
       `// Internal, loosely typed view of the Supabase query builder. Results are`,
       `// typed per method below.`,
@@ -1278,6 +1373,55 @@ export class SupabaseAdapter implements Adapter {
       // On softDelete tables the BEFORE DELETE trigger turns this into
       // SET <column> = NOW(), so the DELETE policy (not UPDATE) decides it.
       lines.push(`        ${from}.delete().eq('${pk}', id) as unknown as QueryResult<null>,`);
+      lines.push('');
+      // Filtered writes. The filter is required (type and runtime) so a
+      // mistake never writes the whole table; RLS still decides which rows.
+      const wGenerics = `<TFilter extends Partial<${rowType}>, TColumns extends ColumnsOf<'${tableName}'> | undefined = undefined>`;
+      const wFilter = `filter: RowFilter<'${tableName}', TFilter>`;
+      const wOptions = `options?: { columns?: TColumns }`;
+      const wRow = `SelectedRow<'${tableName}', TColumns>`;
+      const guard = (method: string) => `requireFilter(filter, '${tableName}.${method}')`;
+      lines.push(`      // Updates the row matching \`filter\` (a unique column) and returns it in one`);
+      lines.push(`      // round trip; \`data: null\` when no visible row matches. More than one match`);
+      lines.push(`      // is an error (PGRST116) and nothing is updated.`);
+      lines.push(`      updateOne: ${wGenerics}(`);
+      lines.push(`        ${wFilter},`);
+      lines.push(`        data: ${updateType},`);
+      lines.push(`        ${wOptions},`);
+      lines.push(`      ) => {`);
+      lines.push(`        const match = ${guard('updateOne')};`);
+      lines.push(`        return ${from}.update(data).match(match)${live}.select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<${wRow}>;`);
+      lines.push(`      },`);
+      lines.push('');
+      lines.push(`      // Updates every row matching \`filter\` (at least one column) and returns them.`);
+      lines.push(`      updateMany: ${wGenerics}(`);
+      lines.push(`        ${wFilter},`);
+      lines.push(`        data: ${updateType},`);
+      lines.push(`        ${wOptions},`);
+      lines.push(`      ) => {`);
+      lines.push(`        const match = ${guard('updateMany')};`);
+      lines.push(`        return ${from}.update(data).match(match)${live}.select(selectClause(options?.columns)) as unknown as QueryResult<${wRow}[]>;`);
+      lines.push(`      },`);
+      lines.push('');
+      lines.push(`      // Deletes the row matching \`filter\` and returns it (\`data: null\` when none`);
+      lines.push(`      // matches${softDeleteColumn ? ' — and always on this soft-delete table, whose trigger turns the DELETE into an UPDATE' : ''}).`);
+      lines.push(`      // More than one match is an error (PGRST116) and nothing is deleted.`);
+      lines.push(`      deleteOne: ${wGenerics}(`);
+      lines.push(`        ${wFilter},`);
+      lines.push(`        ${wOptions},`);
+      lines.push(`      ) => {`);
+      lines.push(`        const match = ${guard('deleteOne')};`);
+      lines.push(`        return ${from}.delete().match(match)${live}.select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<${wRow}>;`);
+      lines.push(`      },`);
+      lines.push('');
+      lines.push(`      // Deletes every row matching \`filter\` (at least one column) and returns them${softDeleteColumn ? ' (\`[]\` on this soft-delete table)' : ''}.`);
+      lines.push(`      deleteMany: ${wGenerics}(`);
+      lines.push(`        ${wFilter},`);
+      lines.push(`        ${wOptions},`);
+      lines.push(`      ) => {`);
+      lines.push(`        const match = ${guard('deleteMany')};`);
+      lines.push(`        return ${from}.delete().match(match)${live}.select(selectClause(options?.columns)) as unknown as QueryResult<${wRow}[]>;`);
+      lines.push(`      },`);
       lines.push(`    },`);
       lines.push('');
     }
@@ -1926,7 +2070,7 @@ export class SupabaseAdapter implements Adapter {
           return `${k}${a.default !== undefined ? '?' : ''}: ${this.columnTypeToTS(a.type)}`;
         }).join('; ')} }`
         : 'Record<string, never>';
-      const returnsType = def.returns ? this.columnTypeToTS(def.returns) : 'unknown';
+      const returnsType = this.rpcReturnsToTS(schema, def.returns);
       lines.push(`      ${name}: {`);
       lines.push(`        Args: ${argsType};`);
       lines.push(`        Returns: ${returnsType};`);
@@ -1969,6 +2113,25 @@ export class SupabaseAdapter implements Adapter {
       .join('');
   }
 }
+
+function isTableReturn(r: object): r is RpcTableReturn {
+  return 'table' in r && typeof (r as RpcTableReturn).table === 'object' && (r as RpcTableReturn).table !== null;
+}
+
+function isSetofReturn(r: object): r is RpcSetofReturn {
+  return 'setof' in r && typeof (r as RpcSetofReturn).setof === 'string';
+}
+
+/** Whether a `setof` target is a column type (otherwise it names a table). */
+function isRpcScalarType(t: string): boolean {
+  const base = t.endsWith('?') ? t.slice(0, -1) : t;
+  return RPC_SCALAR_TYPES.has(base) || /^numeric\(\d+(,\d+)?\)$/.test(base) || /^varchar\(\d+\)$/.test(base);
+}
+
+const RPC_SCALAR_TYPES = new Set([
+  'uuid', 'text', 'varchar', 'int', 'smallint', 'bigint', 'serial', 'float', 'decimal', 'numeric', 'boolean',
+  'json', 'jsonb', 'date', 'timestamp', 'timestamptz', 'time', 'text[]', 'int[]', 'uuid[]',
+]);
 
 /** `{ type, default }` for an RPC argument given as a type string or an object. */
 function normalizeRpcArg(arg: RpcArg): { type: string; default?: string } {
