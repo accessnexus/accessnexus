@@ -21,7 +21,7 @@ O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do q
 | `init --db-url` | Importa só o schema `public`; sem constraints `CHECK`, índices não únicos, views, FKs de várias colunas ou colunas geradas. Tipos sem equivalente no AccessNexus viram `text`; triggers com argumentos, desabilitados, `INSTEAD OF`/só `TRUNCATE` ou que não são plpgsql ficam de fora. Cada um deixa um comentário `// WARNING:`. Os triggers importados ganham nomes novos, então os originais precisam ser removidos depois do primeiro `push`. Toda função importada é recriada com `SET search_path = pg_catalog, public` (reportado em `hardenedFunctions`, `// NOTE:` no schema); funções de trigger são sempre `VOLATILE`. | Revise antes do primeiro `generate` ([Projetos existentes](/pt/guide/existing-project)). |
 | Primary keys compostas | `compositePrimaryKey` cria a chave, mas `softDelete` e os helpers por id do SDK precisam de um `primaryKey` de uma coluna. | Use uma chave `id` única onde precisar deles. |
 | Verificação | O `validate` checa estrutura, não intenção; ele não simula acesso. | Teste suas policies com usuários reais. |
-| `diff` | Compara o schema com os arquivos gerados e o snapshot das migrations (`.snapshot.json`), não com o banco real. Mudanças feitas direto no banco (Studio, SQL à mão), inclusive a volatilidade ou as opções `SET` de uma função, ficam invisíveis para ele. | Rode `push --dry-run` contra o banco (ele reporta policies estranhas); um modo `diff --against-db` está planejado. |
+| `diff --against-db` | Cobre as tabelas gerenciadas e as funções que o SQL gerado define ou que os triggers gerenciados chamam, não outros objetos (tipos enum, extensões, outros schemas). Reflete o que o `push` faz: uma migration já aplicada ou um arquivo de policy/trigger/RPC inalterado é pulado, então um drift feito direto no banco depois de um push não é desfeito pelo `push` e não aparece no plano. O ensaio executa o SQL numa transação, então pega por um instante os mesmos locks que um push pegaria. | Rode antes de todo push; para drift num arquivo que o push pula, mude o schema para que o arquivo seja regerado. |
 
 ## Roadmap {#roadmap}
 
@@ -31,7 +31,6 @@ O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do q
 | Adapter Firebase (Firestore Security Rules, Cloud Functions, SDK tipado) | Planejado, não disponível |
 | Teste de policies / simulação de acesso (provar que uma policy bloqueia o que deve, como gate de CI) | Planejado, não disponível |
 | Servidor MCP para coding agents | Planejado, não disponível |
-| `diff --against-db` (comparar o schema com o banco real, não só com o snapshot) | Planejado, não disponível |
 
 Itens planejados não têm data de lançamento. Acompanhe o [CHANGELOG](https://github.com/accessnexus/accessnexus/blob/main/CHANGELOG.md) para saber o que de fato foi lançado.
 

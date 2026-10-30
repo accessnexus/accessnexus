@@ -19,6 +19,29 @@ All notable changes to `accessnexus` are documented here. The format follows
 - `init --json` returns `hardenedFunctions`: every imported RPC or trigger function whose
   `search_path` `generate` changes (from another value, or none, to `pg_catalog, public`).
 
+- `diff --against-db`: a live-database change plan. `diff` compared the schema with the
+  generated files, so an agent could not see what a push would really change (and found
+  regressions such as STABLE → VOLATILE functions or a lost `SET search_path` only after
+  pushing). The new mode rehearses the push: it takes the push lock without waiting
+  (`PUSH_LOCKED`), BEGINs, snapshots the catalog of the managed tables (columns, defaults,
+  constraints, indexes, RLS, policies, triggers, grants) and of the functions the SQL defines
+  or the triggers call (volatility, security definer, `proconfig`, body hash), runs the push
+  code path, snapshots again and ROLLs BACK — nothing persists, not even
+  `accessnexus_migrations` rows. The result lists `changes` (`kind`, `object`, `change`,
+  `before`, `after`, `fields`), `riskyChanges` (function volatility/config/security changes,
+  widened policy roles, dropped policies/triggers/functions/tables/columns, lost defaults,
+  type changes, relaxed `NOT NULL`, RLS disabled, grants widened to `anon`/`PUBLIC`) and the
+  `blockers` a real push would stop at. Takes the same `--url`/`--db-url`/env/`--target`
+  resolution as `push` and its `--replace-foreign-*` / `--allow-destructive` flags. `--check`
+  exits 1 with `LIVE_DB_CHANGES`; a push Postgres would reject exits 1 with `PUSH_WOULD_FAIL`
+  (`failed: { file, message, sqlState }`).
+- `push --dry-run` runs the same rehearsal on the files on disk when a database URL is set
+  and returns it as `livePlan` (`wouldRefuse` also covers its blockers and failures).
+- Plain `diff` adds a `hint` pointing to `--against-db` when a database URL is configured.
+  The `AGENTS.md` block `init` writes and `llms.txt` tell agents to run
+  `diff --against-db --json` (or `push --dry-run --json`) before any push and review
+  `riskyChanges` with the user.
+
 ### Fixed
 
 - `init --db-url` no longer loses function volatility: `STABLE` / `IMMUTABLE` functions were

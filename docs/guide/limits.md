@@ -21,7 +21,7 @@ What v0.1.0 does not do, so you can plan around it, and what is planned next. An
 | `init --db-url` | Imports the `public` schema only; no `CHECK` constraints, non-unique indexes, views, multi-column FKs or generated columns. Types without an AccessNexus equivalent become `text`; triggers with arguments, disabled, `INSTEAD OF`/`TRUNCATE`-only or non-plpgsql ones are left out. Each of these leaves a `// WARNING:` comment. Imported triggers get new names, so the originals must be dropped after the first `push`. Every imported function is re-created with `SET search_path = pg_catalog, public` (reported as `hardenedFunctions`, `// NOTE:` in the schema); trigger functions are always `VOLATILE`. | Review before the first `generate` ([Existing projects](/guide/existing-project)). |
 | Composite primary keys | `compositePrimaryKey` creates the key, but `softDelete` and the SDK's by-id helpers need a single `primaryKey`. | Use a single `id` key where you need them. |
 | Verification | `validate` checks structure, not intent; it does not simulate access. | Test your policies with real users. |
-| `diff` | Compares the schema with the generated files and the migration snapshot (`.snapshot.json`), not with the live database. Changes made directly in the database (Studio, hand-written SQL), including a function's volatility or `SET` options, are invisible to it. | Run `push --dry-run` against the database (it reports foreign policies); a `diff --against-db` mode is planned. |
+| `diff --against-db` | Covers the managed tables and the functions the generated SQL defines or the managed triggers call, not other objects (enum types, extensions, other schemas). It reflects what `push` does: an applied migration or an unchanged policy/trigger/RPC file is skipped, so drift made directly in the database after a push is not undone by `push` and does not show in the plan. The rehearsal executes the SQL in a transaction, so it briefly takes the same locks a push would. | Run it before every push; for drift on a file push skips, change the schema so the file is regenerated. |
 
 ## Roadmap
 
@@ -31,7 +31,6 @@ What v0.1.0 does not do, so you can plan around it, and what is planned next. An
 | Firebase adapter (Firestore Security Rules, Cloud Functions, typed SDK) | Planned, not available |
 | Policy testing / access simulation (prove a policy blocks what it should, as a CI gate) | Planned, not available |
 | MCP server for coding agents | Planned, not available |
-| `diff --against-db` (compare the schema with the live database, not only the snapshot) | Planned, not available |
 
 Planned items have no release date. Follow the [CHANGELOG](https://github.com/accessnexus/accessnexus/blob/main/CHANGELOG.md) for what actually ships.
 

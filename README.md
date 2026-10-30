@@ -179,9 +179,16 @@ generated/
 ### 4. Apply
 
 ```bash
-npx accessnexus push --dry-run   # list what would be applied
-npx accessnexus push             # apply generated SQL to the database
+npx accessnexus diff --against-db  # what push would REALLY change in the live database
+npx accessnexus push --dry-run     # files + the same live plan (when a DB URL is set)
+npx accessnexus push               # apply generated SQL to the database
 ```
+
+`diff --against-db` rehearses the push in a transaction that is rolled back: it snapshots the
+catalog of the managed tables and functions, applies exactly what `push` would, snapshots again
+and lists every added/removed/modified table, column, policy, trigger, function and grant
+(`before → after`), plus `riskyChanges` (function volatility or `search_path` changes, widened
+policy roles, dropped policies, lost defaults, type changes, RLS disabled). Nothing persists.
 
 `push` refuses to run when the generated SQL is out of date with the schema, and refuses
 pending migrations that drop tables/columns or change column types unless you pass
@@ -355,7 +362,8 @@ npx accessnexus validate --json   # fix every issue with severity "error"
 npx accessnexus diff --json       # review the SQL that will change (before generate: diff
                                 # compares schema vs files on disk); `diff --check` for CI
 npx accessnexus generate --json   # created / updated / unchanged per file
-npx accessnexus push --dry-run --json && npx accessnexus push --json
+npx accessnexus diff --against-db --json   # live plan: review riskyChanges with the user
+npx accessnexus push --json                # only when the user asked for it
 ```
 
 ## CLI reference
@@ -366,7 +374,8 @@ npx accessnexus <command> [flags]        (npx accessnexus <command> --help for d
 Commands:
   init        Set up AccessNexus (schema, accessnexus.config.ts, SDK wrappers, AGENTS.md block)
   generate    Generate migrations, RLS, triggers, RPCs + typed SDK from schema
-  diff        Show what generate would change (no writes); --check exits 1 if stale
+  diff        Show what generate would change (no writes); --check exits 1 if stale;
+              --against-db: what push would change in the live database (rolled back)
   validate    Check the schema for errors without writing anything
   push        Apply generated SQL (refuses stale output and unconfirmed data loss)
   seed        Generate and run the seed against the database
@@ -384,10 +393,15 @@ generate / diff / validate:
   --sdk-only         Generate only the typed SDK
   --prefix <name>    Policy name prefix (default accessnexus)
   --check            diff only: exit 1 when generated files are out of date
+                     (with --against-db: when push would change the database)
+diff --against-db:
+  --url / --db-url / --adapter / --target   Same database resolution as push
+  --allow-destructive, --replace-foreign-policies, --replace-foreign-triggers
+                     Plan as push would with these flags
 
 push / seed:
   --url <db-url>        Database URL (alias --db-url)
-  --dry-run             Print the plan/SQL without executing
+  --dry-run             Print the plan/SQL without persisting (push: rehearses a live plan when a DB URL is set)
   --adapter <name>      Select adapter when several are configured
   --target <name>       Select a target from config.targets
   --allow-remote-seed   Allow seeding a hosted Supabase project

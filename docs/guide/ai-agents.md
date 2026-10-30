@@ -16,7 +16,7 @@ Because it lives in `node_modules`, the agent always reads the reference for the
 
 - `accessnexus.schema.ts` is the single source of truth: never write SQL migrations or policies by hand, never edit generated files;
 - after every schema change, run `validate` → `diff` → `generate`, in that order;
-- `push` changes the real database: dry-run first, push only when the user asked, and never add `--allow-destructive` or `--seed` without the user's explicit OK;
+- `push` changes the real database: before any push, run `diff --against-db --json` (or `push --dry-run --json`) and review `riskyChanges` with the user; push only when the user asked, and never add `--allow-destructive` or `--seed` without the user's explicit OK;
 - every table the app uses needs policies; use `policy.none()` to block an operation and never `enableRLS: false`;
 - org/team roles are `{ scope: 'tenant', roles }`; `policy.hasRole` is a global app role;
 - prefer semantic builders over `policy.custom`, and always write `(SELECT auth.uid())`;
@@ -150,13 +150,18 @@ npx accessnexus diff --json
 # 4. Write the SQL and the SDK (created / updated / unchanged per file)
 npx accessnexus generate --json
 
-# 5. Preview, then apply only when the user asked for it
-npx accessnexus push --dry-run --json
+# 5. What push would REALLY change in the live database: rehearsed in a
+#    rolled-back transaction, nothing persists. Review riskyChanges with the user.
+npx accessnexus diff --against-db --json     # or: push --dry-run --json (livePlan)
+
+# 6. Apply only when the user asked for it
 npx accessnexus push --json
 ```
 
+`diff --json` (step 3) compares the schema with the generated files; it cannot see what is in the database. `diff --against-db` does: it lists every table, column, policy, trigger, function and grant that would be added, removed or modified, with `before`/`after`, and flags `riskyChanges` such as a function going from `STABLE` to `VOLATILE`, a lost `SET search_path`, a policy widened from `authenticated` to `public`, a dropped policy or a lost column default. An agent should show these to the user before pushing. A push Postgres would reject comes back as `PUSH_WOULD_FAIL` with the file and the SQL error, and nothing was persisted.
+
 ::: warning Stop and ask the user
-If `generate`, `diff` or `push --dry-run` reports `destructive` statements, the agent must tell the user what data would be lost and wait. `--allow-destructive` and `--seed` need the user's explicit OK. A rename belongs in the schema as a rename, not as remove + add.
+If `diff --against-db` reports `riskyChanges` or `blockers`, or `generate`, `diff` or `push --dry-run` reports `destructive` statements, the agent must tell the user what data would be lost and wait. `--allow-destructive` and `--seed` need the user's explicit OK. A rename belongs in the schema as a rename, not as remove + add.
 :::
 
 In CI, `npx accessnexus diff --check` exits `1` when someone changed the schema without regenerating.
@@ -181,7 +186,8 @@ Rules:
 - Change only accessnexus.schema.ts. Never edit generated SQL.
 - Run `npx accessnexus validate --json`, then `diff --json`, then `generate --json`.
   Fix every error and explain every warning you keep.
-- Run `npx accessnexus push --dry-run --json` and show me the plan. Do not push,
+- Run `npx accessnexus diff --against-db --json` and show me the changes and
+  riskyChanges. Do not push,
   do not use --allow-destructive or --seed, until I say so.
 - Summarize the access rules you wrote in plain English.
 ```
