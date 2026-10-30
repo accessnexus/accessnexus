@@ -330,7 +330,7 @@ ${paint.bold('Exit codes:')}
   2  internal error (a AccessNexus bug — re-run with --verbose and report it)
 
 ${paint.bold('Agent workflow:')}
-  edit accessnexus.schema.ts → validate --json → diff --json (review SQL) → generate --json → push --dry-run → push
+  edit accessnexus.schema.ts → validate --json → diff --json (review SQL) → generate --json → diff --against-db --json (review riskyChanges) → push
 
 ${paint.bold('Docs for AI agents:')} node_modules/accessnexus/llms.txt
 `);

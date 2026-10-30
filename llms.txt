@@ -39,7 +39,13 @@
    (`diff --check` exits 1 when generated files are stale; use it in CI.)
 4. `npx accessnexus generate --json` — writes SQL + SDK; reports created/updated/unchanged.
    To review afterwards, use `git diff generated/`.
-5. `npx accessnexus push --dry-run --json`, then `npx accessnexus push --json` when asked.
+5. Before ANY push: `npx accessnexus diff --against-db --json` (or `push --dry-run --json`,
+   which runs the same plan when a database URL is set). It rehearses the push against the
+   live database in a rolled-back transaction and lists what would really change (tables,
+   columns, policies, triggers, functions, grants) with `before`/`after`. Review
+   `riskyChanges` with the user (volatility or `SET search_path` changes, widened policy
+   roles, dropped policies, lost defaults, type changes, RLS disabled), plus `blockers` and
+   `failed`. Then `npx accessnexus push --json` when asked.
    If `generate`/`diff`/`push` report `destructive` statements, tell the user what data
    would be lost; a rename should be a rename in the schema, not remove + add.
 
@@ -570,7 +576,19 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   output folder goes under `<dir>`, overriding the paths in `accessnexus.config.ts` — handy to
   preview into a scratch folder), `--sql-only`, `--sdk-only`, `--prefix <name>`.
 - `diff` — what `generate` would change; writes nothing. Same flags + `--check` (exit 1 when
-  anything is out of date).
+  anything is out of date). It compares the schema with the generated FILES, not the
+  database; when a database URL is configured its result carries a `hint` pointing to
+  `--against-db`.
+- `diff --against-db` — live change plan: connects (same `--url`/`--db-url`/env/`--target`
+  resolution as `push`), takes the push advisory lock without waiting (`PUSH_LOCKED` if a
+  push is running), BEGINs, snapshots the catalog of everything the schema manages, applies
+  exactly what `generate` + `push` would apply (the SQL the current schema generates, through
+  the push code path), snapshots again and ROLLs BACK. Nothing persists — no objects, no
+  `accessnexus_migrations` rows. Foreign policies/triggers are dropped in the plan only with
+  `--replace-foreign-policies` / `--replace-foreign-triggers` (as in push); without them they
+  are reported in `blockers`. `--allow-destructive` likewise. `--check` exits 1
+  (`LIVE_DB_CHANGES`) when the database would change; a push Postgres would reject exits 1
+  (`PUSH_WOULD_FAIL`) with `failed: { file, message, sqlState }`.
 - `push` — apply generated SQL in order migrations → policies → triggers → rpcs, tracked in
   `public.accessnexus_migrations`. The whole push (bookkeeping, foreign-policy drops and every
   file) runs in ONE transaction under an advisory lock: if anything fails, nothing from that
@@ -585,15 +603,16 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   AccessNexus generates (`<prefix>_<table>_<op>`); `--replace-foreign-policies` drops them in the
   same transaction. Same for triggers not named `<prefix>_<table>_...` (`FOREIGN_TRIGGERS`,
   `--replace-foreign-triggers`). Prints a notice instead of waiting silently when another
-  push holds the lock. Flags: `--url <db-url>` (alias `--db-url`), `--dry-run` (lists files,
-  destructive statements and, when a database URL is set, foreign policies — read-only),
+  push holds the lock. Flags: `--url <db-url>` (alias `--db-url`), `--dry-run` (lists files and
+  destructive statements; when a database URL is set it also rehearses the push of the files
+  on disk like `diff --against-db` and returns that plan as `livePlan` — nothing persists),
   `--allow-destructive`, `--replace-foreign-policies`, `--replace-foreign-triggers`, `--seed` (also run the seed), `--allow-remote-seed`, `--output`,
   `--schema`, `--prefix`, `--adapter`, `--target`.
 - `seed` — upsert seed rows. Flags: `--seed <path>`, `--url` (alias `--db-url`), `--dry-run` (prints the SQL),
   `--allow-remote-seed`, `--schema`, `--prefix`, `--adapter`, `--target`.
 - `help [command]`, `version` (also `--version`). With `--json` both print one object.
 
-Database connections (`push`, `seed`, `init --db-url`) give up after 10 s with
+Database connections (`push`, `seed`, `diff --against-db`, `init --db-url`) give up after 10 s with
 `DB_CONNECTION_FAILED` instead of hanging; set `ACCESSNEXUS_DB_CONNECT_TIMEOUT=<seconds>` to change it.
 
 Exit codes: `0` success; `1` user-fixable (bad flag, missing file, schema error, missing DB
@@ -659,6 +678,66 @@ export interface DiffResult {
   summary: { added: number; modified: number; removed: number };
   changes: Array<{ path: string; status: 'added' | 'modified' | 'removed'; diff: string }>;
   warnings: SchemaIssue[];
+  hint?: string; // set when a database URL is configured: use `diff --against-db` for the live plan
+}
+
+export type PlanKind = 'table' | 'column' | 'constraint' | 'index' | 'rls' | 'policy' | 'trigger' | 'function' | 'grant';
+
+export interface PlanChange {
+  kind: PlanKind;
+  // 'public.notes' (table, rls) | 'public.notes.body' (column) | 'public.notes.<policy|trigger|constraint>'
+  // | 'public.<index>' | 'public.fn(uuid, text)' (function) | 'table public.notes' / 'function public.fn()' (grant)
+  object: string;
+  change: 'added' | 'removed' | 'modified';
+  before?: Record<string, unknown>; // normalized catalog properties (absent when added)
+  after?: Record<string, unknown>;  // (absent when removed)
+  fields?: string[];                // modified: the properties that differ
+  // properties per kind:
+  //   column:     { type, notNull, default, identity, generated }   (type via format_type, default via pg_get_expr)
+  //   constraint: { type, definition }    index: { table, definition }    rls: { enabled, forced }
+  //   policy:     { command, permissive, roles: string[], using, withCheck }
+  //   trigger:    { timing, events: string[], level, when, function, enabled }
+  //   function:   { returns, language, volatility, securityDefiner, strict, config: string[], bodyHash, definition }
+  //               ('definition' = pg_get_functiondef, shown but not compared; a body change shows as 'bodyHash')
+  //   grant:      { privileges: string[] }  e.g. 'anon=EXECUTE', 'PUBLIC=EXECUTE', 'authenticated=SELECT*' (* = WITH GRANT OPTION)
+}
+
+export interface RiskyChange {
+  code: 'table_dropped' | 'column_dropped' | 'column_type_changed' | 'column_default_removed'
+    | 'column_nullability_relaxed' | 'rls_disabled' | 'policy_dropped' | 'policy_roles_widened'
+    | 'policy_permissive_changed' | 'trigger_dropped' | 'function_dropped'
+    | 'function_volatility_changed' | 'function_config_changed' | 'function_security_changed'
+    | 'grant_widened';
+  kind: PlanKind; object: string;
+  message: string; // e.g. 'function public.f() STABLE → VOLATILE'
+}
+
+export interface LivePlan {
+  database: string;              // redacted URL
+  wouldApply: string[];          // files push would execute (others are skipped as already applied)
+  skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
+  droppedPolicies: ForeignPolicy[];   // only with --replace-foreign-policies
+  droppedTriggers: ForeignTrigger[];  // only with --replace-foreign-triggers
+  foreignPolicies: ForeignPolicy[];
+  foreignTriggers: ForeignTrigger[];
+  blockers: Array<{ code: string; message: string; hint?: string }>; // refusals the real push would stop at
+  // (FOREIGN_POLICIES, FOREIGN_TRIGGERS, DESTRUCTIVE_MIGRATION, PUSH_ROLE_NO_BYPASSRLS): the push would apply nothing
+  failed: null | { file: string | null; code: string; message: string; sqlState: string | null }; // push would fail
+  changed: boolean;
+  summary: { added: number; modified: number; removed: number };
+  changes: PlanChange[];
+  riskyChanges: RiskyChange[];
+  persisted: false;              // always: the rehearsal is rolled back
+}
+
+export interface DiffAgainstDbResult extends LivePlan {
+  ok: boolean; // false with --check and changes (LIVE_DB_CHANGES) or when the push would fail (PUSH_WOULD_FAIL)
+  command: 'diff'; version: string;
+  schemaPath: string;
+  againstDb: true;
+  adapter: string; target: string | null;
+  generatedUpToDate: boolean; // false: plan is from the schema; run generate before push
+  warnings: SchemaIssue[];
 }
 
 export interface PushResult {
@@ -670,7 +749,8 @@ export interface PushResult {
   destructive?: DestructiveStatement[]; // --dry-run: in all migration files
   foreignPolicies?: ForeignPolicy[] | null; // --dry-run: null when no database URL (not checked)
   foreignTriggers?: ForeignTrigger[] | null; // --dry-run: { schema, table, trigger }
-  wouldRefuse?: boolean;                    // --dry-run: foreign policies/triggers found without their --replace-* flag
+  wouldRefuse?: boolean;                    // --dry-run: foreign policies/triggers without their --replace-* flag, or livePlan blockers/failed
+  livePlan?: LivePlan | null;               // --dry-run: rehearsal of the files on disk; null without a database URL (or unreachable)
   applied: string[];
   droppedPolicies: ForeignPolicy[];         // --replace-foreign-policies
   droppedTriggers: ForeignTrigger[];        // --replace-foreign-triggers
@@ -1143,6 +1223,12 @@ export default defineSchema({
 - `PUSH_FAILED` — Postgres rejected a file (message has the SQL error; `failed` names it). The
   whole push was rolled back: nothing from it is applied (`applied` is `[]`, `rolledBack` lists
   the files that had run). Fix the schema, `generate`, `push` again.
+- `PUSH_WOULD_FAIL` — `diff --against-db` rehearsed the push and Postgres rejected a file
+  (`failed.file`, `failed.message`, `failed.sqlState`). Nothing was persisted. Fix the schema
+  (or the database state) and plan again.
+- `LIVE_DB_CHANGES` — `diff --against-db --check` found that push would change the database;
+  the plan (`changes`, `riskyChanges`) is in the result.
+- `PUSH_LOCKED` — the live plan does not wait for a running push; retry when it finishes.
 - `MIGRATION_DRIFT` — an applied migration file was edited: restore it, change the schema,
   `generate` a new `__changes` migration.
 - `SEED_NOT_FOUND` / `SEED_EMPTY` / `SEED_FAILED` — create/fix `accessnexus.seed.ts`; seed after
@@ -1160,7 +1246,13 @@ export default defineSchema({
 - Only the Supabase adapter exists. Database mode does not generate DDL migrations.
 - Migrations are generated from snapshot diffs; renames are detected heuristically — read
   `diff` output before pushing destructive changes (`-- Destructive:` comments).
-- `push` applies files one by one (each in its own transaction), not as a single transaction.
+- The live plan (`diff --against-db`) covers the managed tables and the functions the
+  generated SQL defines or the managed triggers call; it does not snapshot other objects
+  (enum types, extensions, unrelated schemas). It reflects what push does: an applied
+  migration or an unchanged policy/trigger/RPC file is skipped, so drift made directly in
+  the database after a push is not undone by push and does not show in the plan.
+- The rehearsal really executes the SQL inside a transaction: it takes the same locks as a
+  push (brief ACCESS EXCLUSIVE locks on altered tables) until the ROLLBACK.
 - Identifiers are emitted unquoted: lowercase snake_case (one optional leading `_`), no reserved
   keywords.
 - RLS is row-level: it cannot restrict which columns an UPDATE changes — use

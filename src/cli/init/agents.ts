@@ -45,8 +45,12 @@ Rules:
   2. \`npx accessnexus diff --json\` — review the SQL that will change (before generate:
      diff compares the schema with the files on disk, so it is empty right after generate)
   3. \`npx accessnexus generate --json\` — writes the SQL and the SDK
-- \`npx accessnexus push\` changes the real database. Run \`npx accessnexus push --dry-run --json\`
-  first and only push when the user asked for it. Never add \`--allow-destructive\` (drops
+- \`npx accessnexus push\` changes the real database. Before ANY push run
+  \`npx accessnexus diff --against-db --json\` (or \`npx accessnexus push --dry-run --json\`): it
+  rehearses the push against the live database in a rolled-back transaction and lists what
+  would really change. Review \`riskyChanges\` (function volatility/search_path changes,
+  widened policy roles, dropped policies, lost defaults, type changes, RLS disabled),
+  \`blockers\` and \`failed\` with the user, and only push when the user asked for it. Never add \`--allow-destructive\` (drops
   tables/columns), \`--replace-foreign-policies\` (drops the database's own RLS policies that
   FOREIGN_POLICIES lists), \`--replace-foreign-triggers\` (drops the triggers FOREIGN_TRIGGERS
   lists) or \`--seed\` without the user's explicit OK.
