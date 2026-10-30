@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { useData, withBase } from "vitepress";
 import HeroRls from "./HeroRls.vue";
+import { version } from "../../../package.json";
 
 /** Landing page shared by the English and Portuguese homes; copy switches on `lang`. */
 
@@ -12,7 +13,7 @@ const link = (path: string) => withBase(`${prefix.value}${path}`);
 
 const COPY = {
   en: {
-    badge: "v0.1.0 · Built for AI coding agents",
+    badge: `v${version} · Built for AI coding agents`,
     title: ["Row-level security", "you can trust."],
     lead: "Define tables and access rules in TypeScript. AccessNexus generates correct RLS, RBAC, migrations and a typed SDK for Supabase — in a form your coding agent can't get wrong.",
     start: "Get started",
@@ -43,7 +44,7 @@ const COPY = {
     docs: "Read the docs",
   },
   pt: {
-    badge: "v0.1.0 · Feito para agentes de IA",
+    badge: `v${version} · Feito para agentes de IA`,
     title: ["Row-level security", "em que você confia."],
     lead: "Defina tabelas e regras de acesso em TypeScript. O AccessNexus gera RLS, RBAC, migrations e um SDK tipado corretos para o Supabase — num formato que o seu agente não consegue errar.",
     start: "Começar",
