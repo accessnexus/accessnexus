@@ -300,7 +300,8 @@ describe('Supabase Adapter — RPC Client Generation (Database mode)', () => {
     });
 
     const client = adapter.generateClient(schema)[0];
-    expect(client.content).toContain("type Functions = Database['public']['Functions'];");
+    // Only emitted when used (typescript-eslint flags an unused type alias).
+    expect(client.content).not.toContain("type Functions = Database['public']['Functions'];");
     expect(client.content).not.toContain('\n    rpc: {');
     expect(client.content).not.toContain('provider.rpc(');
   });

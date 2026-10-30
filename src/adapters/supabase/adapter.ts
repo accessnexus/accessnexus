@@ -1097,10 +1097,6 @@ export class SupabaseAdapter implements Adapter {
    */
   private generateDatabaseModeClient(schema: SchemaDef): GeneratedOutput[] {
     const dbTypesPath = this.options.databaseTypes ?? './database.types';
-    const tableNames = Object.keys(schema);
-    const rpcs = (schema as any).__rpcs as Record<string, RpcDef> | undefined;
-    const rpcNames = rpcs ? Object.keys(rpcs) : [];
-
     const lines: string[] = [
       '// ============================================',
       '// AccessNexus: Auto-generated typed client',
@@ -1110,68 +1106,83 @@ export class SupabaseAdapter implements Adapter {
       '',
       `import type { Database } from '${dbTypesPath}';`,
       '',
+    ];
+    this.emitClientBody(schema, lines, 'database');
+    return [
+      { path: 'client.ts', content: lines.join('\n') },
+    ];
+  }
+
+  /**
+   * Shared body of the generated client (both modes): helper types, relation
+   * maps and the `createAccessNexusClient` factory. In manual mode the table
+   * accessors name the types from `types.ts`; in Database mode they index the
+   * user's Supabase `Database` type, so rows are exactly Supabase's.
+   */
+  private emitClientBody(schema: SchemaDef, lines: string[], mode: 'manual' | 'database'): void {
+    const rpcs = (schema as any).__rpcs as Record<string, RpcDef> | undefined;
+    const rpcEntries = rpcs ? Object.entries(rpcs) : [];
+
+    lines.push(
       `type Tables = Database['public']['Tables'];`,
-      `type Functions = Database['public']['Functions'];`,
+      ...(rpcEntries.length > 0 ? [`type Functions = Database['public']['Functions'];`] : []),
       `type TableName = keyof Tables & string;`,
-      `type FunctionName = keyof Functions & string;`,
       `type RowOf<T extends TableName> = Tables[T]['Row'];`,
-      `type InsertOf<T extends TableName> = Tables[T]['Insert'];`,
-      `type UpdateOf<T extends TableName> = Tables[T]['Update'];`,
       `type QueryResult<T> = Promise<{ data: T | null; error: unknown }>;`,
       '',
-      `interface SelectQuery<T extends TableName> {`,
-      `  match(filter: Partial<RowOf<T>>): QueryResult<RowOf<T>[]>;`,
-      `  eq(column: string, value: unknown): SelectQuery<T>;`,
-      `  is(column: string, value: null): SelectQuery<T>;`,
-      `  single(): QueryResult<RowOf<T>>;`,
-      `}`,
+      `/** Column names of a table, for the \`columns\` option of the find* methods. */`,
+      `export type ColumnsOf<T extends TableName> = readonly (keyof RowOf<T> & string)[];`,
+      `/** The row narrowed to the selected \`columns\` (the whole row when omitted). */`,
+      `export type SelectedRow<T extends TableName, TColumns extends ColumnsOf<T> | undefined> =`,
+      `  TColumns extends readonly (infer K extends keyof RowOf<T>)[] ? Pick<RowOf<T>, K> : RowOf<T>;`,
       '',
-      `interface MutationQuery<T extends TableName> {`,
-      `  eq(column: string, value: unknown): MutationQuery<T>;`,
-      `  select(): SelectQuery<T>;`,
-      `}`,
-      '',
-      `interface DeleteQuery<T extends TableName> {`,
-      `  eq(column: string, value: unknown): QueryResult<RowOf<T>[]>;`,
-      `}`,
-      '',
-      `interface TableQuery<T extends TableName> {`,
-      `  select(columns: string): SelectQuery<T>;`,
-      `  insert(data: InsertOf<T>): MutationQuery<T>;`,
-      `  update(data: UpdateOf<T>): MutationQuery<T>;`,
-      `  delete(): DeleteQuery<T>;`,
+      `// Internal, loosely typed view of the Supabase query builder. Results are`,
+      `// typed per method below.`,
+      `interface QueryBuilder extends PromiseLike<unknown> {`,
+      `  select(columns?: string): QueryBuilder;`,
+      `  insert(data: object): QueryBuilder;`,
+      `  update(data: object): QueryBuilder;`,
+      `  delete(): QueryBuilder;`,
+      `  match(filter: object): QueryBuilder;`,
+      `  eq(column: string, value: unknown): QueryBuilder;`,
+      `  is(column: string, value: null): QueryBuilder;`,
+      `  single(): QueryBuilder;`,
+      `  maybeSingle(): QueryBuilder;`,
       `}`,
       '',
       `type AccessNexusTransport = {`,
-      `  auth: unknown;`,
-      `  from<T extends TableName>(table: T): TableQuery<T>;`,
-      `  rpc<F extends FunctionName>(name: F, args: Functions[F]['Args']): QueryResult<Functions[F]['Returns']>;`,
+      `  from(table: string): QueryBuilder;`,
+      `  rpc(name: string, args: object): QueryBuilder;`,
       `};`,
       '',
-      `// Loose shape a real Supabase client satisfies (its builders are thenables,`,
-      `// not Promises, so it cannot match AccessNexusTransport structurally).`,
-      `type AccessNexusProvider = {`,
+      `/**`,
+      ` * Loose shape a real Supabase client satisfies (\`createClient\`, or`,
+      ` * \`createBrowserClient\` / \`createServerClient\` from @supabase/ssr).`,
+      ` */`,
+      `export type AccessNexusProvider = {`,
       `  auth: unknown;`,
       `  from(table: string): unknown;`,
       `  rpc(name: string, args?: object): unknown;`,
       `};`,
       '',
-      `function buildSelectClause(`,
-      `  base: string,`,
-      `  joins: Record<string, string>,`,
+      `function selectClause(`,
+      `  columns: readonly string[] | undefined,`,
+      `  joins?: Record<string, string>,`,
       `  include?: Record<string, true | undefined>,`,
       `): string {`,
-      `  if (!include) return base;`,
-      `  const selected = Object.keys(include)`,
-      `    .filter((key) => include[key] === true && joins[key])`,
-      `    .map((key) => joins[key]);`,
-      `  if (selected.length === 0) return base;`,
-      `  return \`\${base}, \${selected.join(', ')}\`;`,
+      `  // Column names are checked at compile time (ColumnsOf); an empty list means all.`,
+      `  const parts = columns && columns.length > 0 ? [...columns] : ['*'];`,
+      `  if (joins && include) {`,
+      `    for (const key of Object.keys(include)) {`,
+      `      if (include[key] === true && joins[key]) parts.push(joins[key]);`,
+      `    }`,
+      `  }`,
+      `  return parts.join(', ');`,
       `}`,
-    ];
-    lines.push('');
+      '',
+    );
 
-    for (const tableName of tableNames) {
+    for (const tableName of Object.keys(schema)) {
       const relations = this.getTableRelations(schema, tableName);
       if (relations.length === 0) continue;
 
@@ -1186,8 +1197,8 @@ export class SupabaseAdapter implements Adapter {
       }
       lines.push(`};`);
       lines.push(`type ${includeTypeName} = Partial<Record<keyof ${relTypeName}, true>>;`);
-      lines.push(`type ${withIncludeTypeName}<TInclude extends ${includeTypeName} | undefined> =`);
-      lines.push(`  RowOf<'${tableName}'>`);
+      lines.push(`type ${withIncludeTypeName}<TInclude extends ${includeTypeName} | undefined, TRow = RowOf<'${tableName}'>> =`);
+      lines.push(`  TRow`);
       for (const relation of relations) {
         lines.push(`  & (TInclude extends { '${relation.alias}': true } ? { '${relation.alias}': ${relTypeName}['${relation.alias}'] | null } : unknown)`);
       }
@@ -1202,85 +1213,82 @@ export class SupabaseAdapter implements Adapter {
 
     // Client factory
     lines.push(`export function createAccessNexusClient<TClient extends AccessNexusProvider>(providerRaw: TClient) {`);
-    lines.push(`  // Accept a real Supabase client (loose AccessNexusProvider) and use the strict`);
-    lines.push(`  // AccessNexusTransport shape internally for the typed accessors below.`);
+    lines.push(`  // Accept a real Supabase client (loose AccessNexusProvider) and use the`);
+    lines.push(`  // internal QueryBuilder view for the typed accessors below.`);
     lines.push(`  const provider = providerRaw as unknown as AccessNexusTransport;`);
     lines.push(`  return {`);
-    lines.push(`    auth: providerRaw.auth,`);
+    lines.push(`    // Typed as the client you passed in (e.g. SupabaseAuthClient).`);
+    lines.push(`    auth: providerRaw.auth as TClient['auth'],`);
     lines.push('');
 
-    for (const tableName of tableNames) {
-      const tableDef = schema[tableName];
+    for (const [tableName, tableDef] of Object.entries(schema)) {
+      const typeName = this.toPascalCase(tableName);
       const pk = singlePrimaryKey(tableDef) ?? 'id';
       const softDeleteColumn = tableDef.softDelete;
       const relations = this.getTableRelations(schema, tableName);
-      const includeTypeName = `${this.toPascalCase(tableName)}Include`;
-      const withIncludeTypeName = `${this.toPascalCase(tableName)}WithInclude`;
+      const includeTypeName = `${typeName}Include`;
+      const withIncludeTypeName = `${typeName}WithInclude`;
       const joinConstName = `${tableName}Joins`;
+      const rowType = mode === 'manual' ? typeName : `RowOf<'${tableName}'>`;
+      const insertType = mode === 'manual' ? `${typeName}Create` : `Tables['${tableName}']['Insert']`;
+      const updateType = mode === 'manual' ? `${typeName}Update` : `Tables['${tableName}']['Update']`;
+      const hasRel = relations.length > 0;
+      const generics = hasRel
+        ? `<TColumns extends ColumnsOf<'${tableName}'> | undefined = undefined, TInclude extends ${includeTypeName} | undefined = undefined>`
+        : `<TColumns extends ColumnsOf<'${tableName}'> | undefined = undefined>`;
+      const optionsType = hasRel ? `{ columns?: TColumns; include?: TInclude }` : `{ columns?: TColumns }`;
+      const resultRow = hasRel
+        ? `${withIncludeTypeName}<TInclude, SelectedRow<'${tableName}', TColumns>>`
+        : `SelectedRow<'${tableName}', TColumns>`;
+      const selectExpr = hasRel
+        ? `selectClause(options?.columns, ${joinConstName}, options?.include as Record<string, true | undefined> | undefined)`
+        : `selectClause(options?.columns)`;
+      const live = softDeleteColumn ? `.is('${softDeleteColumn}', null)` : '';
+      const from = `provider.from('${tableName}')`;
 
       lines.push(`    ${tableName}: {`);
-      if (relations.length > 0) {
-        lines.push(`      findMany: <TInclude extends ${includeTypeName} | undefined = undefined>(`);
-        lines.push(`        filter?: Partial<RowOf<'${tableName}'>>,`);
-        lines.push(`        options?: { include?: TInclude },`);
-        lines.push(`      ) => {`);
-        lines.push(`        const select = buildSelectClause('*', ${joinConstName}, options?.include as Record<string, true | undefined> | undefined);`);
-        if (softDeleteColumn) {
-          lines.push(`        return provider.from('${tableName}').select(select).is('${softDeleteColumn}', null).match(filter ?? {}) as QueryResult<${withIncludeTypeName}<TInclude>[]>;`);
-        } else {
-          lines.push(`        return provider.from('${tableName}').select(select).match(filter ?? {}) as QueryResult<${withIncludeTypeName}<TInclude>[]>;`);
-        }
-        lines.push(`      },`);
-      } else {
-        lines.push(`      findMany: (filter?: Partial<RowOf<'${tableName}'>>) =>`);
-        if (softDeleteColumn) {
-          lines.push(`        provider.from('${tableName}').select('*').is('${softDeleteColumn}', null).match(filter ?? {}),`);
-        } else {
-          lines.push(`        provider.from('${tableName}').select('*').match(filter ?? {}),`);
-        }
-      }
+      lines.push(`      findMany: ${generics}(`);
+      lines.push(`        filter?: Partial<${rowType}>,`);
+      lines.push(`        options?: ${optionsType},`);
+      lines.push(`      ) =>`);
+      lines.push(`        ${from}.select(${selectExpr})${live}.match(filter ?? {}) as unknown as QueryResult<${resultRow}[]>,`);
       lines.push('');
-      if (relations.length > 0) {
-        lines.push(`      findById: <TInclude extends ${includeTypeName} | undefined = undefined>(`);
-        lines.push(`        id: string,`);
-        lines.push(`        options?: { include?: TInclude },`);
-        lines.push(`      ) => {`);
-        lines.push(`        const select = buildSelectClause('*', ${joinConstName}, options?.include as Record<string, true | undefined> | undefined);`);
-        if (softDeleteColumn) {
-          lines.push(`        return provider.from('${tableName}').select(select).eq('${pk}', id).is('${softDeleteColumn}', null).single() as QueryResult<${withIncludeTypeName}<TInclude>>;`);
-        } else {
-          lines.push(`        return provider.from('${tableName}').select(select).eq('${pk}', id).single() as QueryResult<${withIncludeTypeName}<TInclude>>;`);
-        }
-        lines.push(`      },`);
-      } else {
-        lines.push(`      findById: (id: string) =>`);
-        if (softDeleteColumn) {
-          lines.push(`        provider.from('${tableName}').select('*').eq('${pk}', id).is('${softDeleteColumn}', null).single(),`);
-        } else {
-          lines.push(`        provider.from('${tableName}').select('*').eq('${pk}', id).single(),`);
-        }
-      }
+      lines.push(`      // The row matching \`filter\`, or \`data: null\` (no error) when none does;`);
+      lines.push(`      // more than one match is an error (PGRST116): filter on a unique column.`);
+      lines.push(`      findOne: ${generics}(`);
+      lines.push(`        filter: Partial<${rowType}>,`);
+      lines.push(`        options?: ${optionsType},`);
+      lines.push(`      ) =>`);
+      lines.push(`        ${from}.select(${selectExpr})${live}.match(filter).maybeSingle() as unknown as QueryResult<${resultRow}>,`);
       lines.push('');
-      lines.push(`      create: (data: Tables['${tableName}']['Insert']) =>`);
-      lines.push(`        provider.from('${tableName}').insert(data).select().single(),`);
+      lines.push(`      // \`data: null\` (no error) when the row does not exist or is not visible.`);
+      lines.push(`      findById: ${generics}(`);
+      lines.push(`        id: string,`);
+      lines.push(`        options?: ${optionsType},`);
+      lines.push(`      ) =>`);
+      lines.push(`        ${from}.select(${selectExpr}).eq('${pk}', id)${live}.maybeSingle() as unknown as QueryResult<${resultRow}>,`);
       lines.push('');
-      lines.push(`      update: (id: string, data: Tables['${tableName}']['Update']) =>`);
-      lines.push(`        provider.from('${tableName}').update(data).eq('${pk}', id).select().single(),`);
+      lines.push(`      create: (data: ${insertType}) =>`);
+      lines.push(`        ${from}.insert(data).select().single() as unknown as QueryResult<${rowType}>,`);
+      lines.push('');
+      lines.push(`      update: (id: string, data: ${updateType}) =>`);
+      lines.push(`        ${from}.update(data).eq('${pk}', id).select().single() as unknown as QueryResult<${rowType}>,`);
       lines.push('');
       lines.push(`      delete: (id: string) =>`);
       // On softDelete tables the BEFORE DELETE trigger turns this into
       // SET <column> = NOW(), so the DELETE policy (not UPDATE) decides it.
-      lines.push(`        provider.from('${tableName}').delete().eq('${pk}', id),`);
+      lines.push(`        ${from}.delete().eq('${pk}', id) as unknown as QueryResult<null>,`);
       lines.push(`    },`);
       lines.push('');
     }
 
-    // RPC namespace (Database mode — types from Functions)
-    if (rpcNames.length > 0) {
+    if (rpcEntries.length > 0) {
       lines.push(`    rpc: {`);
-      for (const name of rpcNames) {
-        lines.push(`      ${name}: (args: Functions['${name}']['Args']) =>`);
-        lines.push(`        provider.rpc('${name}', args),`);
+      for (const [name, def] of rpcEntries) {
+        const noArgs = mode === 'manual' && !(def.args && Object.keys(def.args).length > 0);
+        // No arguments (manual mode): callable as `client.rpc.<name>()`.
+        lines.push(`      ${name}: (args: Functions['${name}']['Args']${noArgs ? ' = {}' : ''}) =>`);
+        lines.push(`        provider.rpc('${name}', args) as unknown as QueryResult<Functions['${name}']['Returns']>,`);
         lines.push('');
       }
       lines.push(`    },`);
@@ -1290,11 +1298,12 @@ export class SupabaseAdapter implements Adapter {
     lines.push(`  };`);
     lines.push(`}`);
     lines.push('');
-    lines.push(`export type AccessNexusClient = ReturnType<typeof createAccessNexusClient>;`);
-
-    return [
-      { path: 'client.ts', content: lines.join('\n') },
-    ];
+    lines.push(`/**`);
+    lines.push(` * Type of a client from \`createAccessNexusClient\`. Pass your Supabase client type`);
+    lines.push(` * to keep \`auth\` typed: \`AccessNexusClient<SupabaseClient<Database>>\`.`);
+    lines.push(` */`);
+    lines.push(`export type AccessNexusClient<TClient extends AccessNexusProvider = AccessNexusProvider> =`);
+    lines.push(`  ReturnType<typeof createAccessNexusClient<TClient>>;`);
   }
 
   // ---- TypeScript Generation (manual mode) ----
@@ -1315,8 +1324,8 @@ export class SupabaseAdapter implements Adapter {
       decimal: 'number',
       numeric: 'number',
       boolean: 'boolean',
-      json: 'Record<string, unknown>',
-      jsonb: 'Record<string, unknown>',
+      json: 'Json',
+      jsonb: 'Json',
       date: 'string',
       timestamp: 'string',
       timestamptz: 'string',
@@ -1858,12 +1867,24 @@ export class SupabaseAdapter implements Adapter {
       '// DO NOT EDIT — regenerate with `npx accessnexus generate`',
       '// ============================================',
       '',
+      '// Same definition as the `Json` type `supabase gen types` emits, so json/jsonb',
+      '// columns are interchangeable with Supabase-generated types.',
+      'export type Json =',
+      '  | string',
+      '  | number',
+      '  | boolean',
+      '  | null',
+      '  | { [key: string]: Json | undefined }',
+      '  | Json[];',
+      '',
     ];
 
     for (const [tableName, tableDef] of Object.entries(schema)) {
       const interfaceName = this.toPascalCase(tableName);
 
-      lines.push(`export interface ${interfaceName} {`);
+      // A type alias (not an interface) so rows get an implicit index signature
+      // and satisfy supabase-js' `GenericTable` (`Row: Record<string, unknown>`).
+      lines.push(`export type ${interfaceName} = {`);
 
       for (const [colName, colDef] of Object.entries(tableDef.columns)) {
         const colType = typeof colDef === 'string' ? colDef : colDef.type;
@@ -1871,7 +1892,7 @@ export class SupabaseAdapter implements Adapter {
         lines.push(`  ${colName}: ${tsType};`);
       }
 
-      lines.push(`}`);
+      lines.push(`};`);
       lines.push('');
 
       // Create/Update types. On create, nullable columns, columns with a
@@ -1922,9 +1943,6 @@ export class SupabaseAdapter implements Adapter {
   }
 
   private generateClientCode(schema: SchemaDef): string {
-    const rpcs = (schema as any).__rpcs as Record<string, RpcDef> | undefined;
-    const rpcEntries = rpcs ? Object.entries(rpcs) : [];
-
     const lines: string[] = [
       '// ============================================',
       '// AccessNexus: Auto-generated client',
@@ -1933,202 +1951,14 @@ export class SupabaseAdapter implements Adapter {
       '',
     ];
 
-    // Import types
     const typeImports: string[] = [];
     for (const tableName of Object.keys(schema)) {
       const name = this.toPascalCase(tableName);
       typeImports.push(name, `${name}Create`, `${name}Update`);
     }
     lines.push(`import type { Database, ${typeImports.join(', ')} } from './types.js';`);
-    lines.push(`type Tables = Database['public']['Tables'];`);
-    lines.push(`type Functions = Database['public']['Functions'];`);
-    lines.push(`type TableName = keyof Tables & string;`);
-    lines.push(`type FunctionName = keyof Functions & string;`);
-    lines.push(`type RowOf<T extends TableName> = Tables[T]['Row'];`);
-    lines.push(`type InsertOf<T extends TableName> = Tables[T]['Insert'];`);
-    lines.push(`type UpdateOf<T extends TableName> = Tables[T]['Update'];`);
-    lines.push(`type QueryResult<T> = Promise<{ data: T | null; error: unknown }>;`);
-    lines.push('');
-    lines.push(`interface SelectQuery<T extends TableName> {`);
-    lines.push(`  match(filter: Partial<RowOf<T>>): QueryResult<RowOf<T>[]>;`);
-    lines.push(`  eq(column: string, value: unknown): SelectQuery<T>;`);
-    lines.push(`  is(column: string, value: null): SelectQuery<T>;`);
-    lines.push(`  single(): QueryResult<RowOf<T>>;`);
-    lines.push(`}`);
-    lines.push('');
-    lines.push(`interface MutationQuery<T extends TableName> {`);
-    lines.push(`  eq(column: string, value: unknown): MutationQuery<T>;`);
-    lines.push(`  select(): SelectQuery<T>;`);
-    lines.push(`}`);
-    lines.push('');
-    lines.push(`interface DeleteQuery<T extends TableName> {`);
-    lines.push(`  eq(column: string, value: unknown): QueryResult<RowOf<T>[]>;`);
-    lines.push(`}`);
-    lines.push('');
-    lines.push(`interface TableQuery<T extends TableName> {`);
-    lines.push(`  select(columns: string): SelectQuery<T>;`);
-    lines.push(`  insert(data: InsertOf<T>): MutationQuery<T>;`);
-    lines.push(`  update(data: UpdateOf<T>): MutationQuery<T>;`);
-    lines.push(`  delete(): DeleteQuery<T>;`);
-    lines.push(`}`);
-    lines.push('');
-    lines.push(`type AccessNexusTransport = {`);
-    lines.push(`  auth: unknown;`);
-    lines.push(`  from<T extends TableName>(table: T): TableQuery<T>;`);
-    lines.push(`  rpc<F extends FunctionName>(name: F, args: Functions[F]['Args']): QueryResult<Functions[F]['Returns']>;`);
-    lines.push(`};`);
-    lines.push('');
-    lines.push(`// Loose shape a real Supabase client satisfies (its builders are thenables,`);
-    lines.push(`// not Promises, so it cannot match AccessNexusTransport structurally).`);
-    lines.push(`type AccessNexusProvider = {`);
-    lines.push(`  auth: unknown;`);
-    lines.push(`  from(table: string): unknown;`);
-    lines.push(`  rpc(name: string, args?: object): unknown;`);
-    lines.push(`};`);
-    lines.push('');
-    lines.push(`function buildSelectClause(`);
-    lines.push(`  base: string,`);
-    lines.push(`  joins: Record<string, string>,`);
-    lines.push(`  include?: Record<string, true | undefined>,`);
-    lines.push(`): string {`);
-    lines.push(`  if (!include) return base;`);
-    lines.push(`  const selected = Object.keys(include)`);
-    lines.push(`    .filter((key) => include[key] === true && joins[key])`);
-    lines.push(`    .map((key) => joins[key]);`);
-    lines.push(`  if (selected.length === 0) return base;`);
-    lines.push(`  return \`\${base}, \${selected.join(', ')}\`;`);
-    lines.push(`}`);
-    lines.push('');
-
-    for (const tableName of Object.keys(schema)) {
-      const relations = this.getTableRelations(schema, tableName);
-      if (relations.length === 0) continue;
-
-      const relTypeName = `${this.toPascalCase(tableName)}Relations`;
-      const includeTypeName = `${this.toPascalCase(tableName)}Include`;
-      const withIncludeTypeName = `${this.toPascalCase(tableName)}WithInclude`;
-      const joinConstName = `${tableName}Joins`;
-
-      lines.push(`type ${relTypeName} = {`);
-      for (const relation of relations) {
-        lines.push(`  '${relation.alias}': RowOf<'${relation.targetTable}'>;`);
-      }
-      lines.push(`};`);
-      lines.push(`type ${includeTypeName} = Partial<Record<keyof ${relTypeName}, true>>;`);
-      lines.push(`type ${withIncludeTypeName}<TInclude extends ${includeTypeName} | undefined> =`);
-      lines.push(`  RowOf<'${tableName}'>`);
-      for (const relation of relations) {
-        lines.push(`  & (TInclude extends { '${relation.alias}': true } ? { '${relation.alias}': ${relTypeName}['${relation.alias}'] | null } : unknown)`);
-      }
-      lines.push(`;`);
-      lines.push(`const ${joinConstName}: Record<keyof ${relTypeName} & string, string> = {`);
-      for (const relation of relations) {
-        lines.push(`  '${relation.alias}': '${relation.alias}:${relation.targetTable}!${relation.constraint}(*)',`);
-      }
-      lines.push(`};`);
-      lines.push('');
-    }
-
-    // Client factory
-    lines.push(`export function createAccessNexusClient<TClient extends AccessNexusProvider>(providerRaw: TClient) {`);
-    lines.push(`  // Accept a real Supabase client (loose AccessNexusProvider) and use the strict`);
-    lines.push(`  // AccessNexusTransport shape internally for the typed accessors below.`);
-    lines.push(`  const provider = providerRaw as unknown as AccessNexusTransport;`);
-    lines.push(`  return {`);
-    lines.push(`    auth: providerRaw.auth,`);
-    lines.push('');
-
-    for (const [tableName, tableDef] of Object.entries(schema)) {
-      const typeName = this.toPascalCase(tableName);
-      const pk = singlePrimaryKey(tableDef) ?? 'id';
-      const softDeleteColumn = tableDef.softDelete;
-      const relations = this.getTableRelations(schema, tableName);
-      const includeTypeName = `${this.toPascalCase(tableName)}Include`;
-      const withIncludeTypeName = `${this.toPascalCase(tableName)}WithInclude`;
-      const joinConstName = `${tableName}Joins`;
-
-      lines.push(`    ${tableName}: {`);
-      if (relations.length > 0) {
-        lines.push(`      findMany: <TInclude extends ${includeTypeName} | undefined = undefined>(`);
-        lines.push(`        filter?: Partial<${typeName}>,`);
-        lines.push(`        options?: { include?: TInclude },`);
-        lines.push(`      ) => {`);
-        lines.push(`        const select = buildSelectClause('*', ${joinConstName}, options?.include as Record<string, true | undefined> | undefined);`);
-        if (softDeleteColumn) {
-          lines.push(`        return provider.from('${tableName}').select(select).is('${softDeleteColumn}', null).match(filter ?? {}) as QueryResult<${withIncludeTypeName}<TInclude>[]>;`);
-        } else {
-          lines.push(`        return provider.from('${tableName}').select(select).match(filter ?? {}) as QueryResult<${withIncludeTypeName}<TInclude>[]>;`);
-        }
-        lines.push(`      },`);
-      } else {
-        lines.push(`      findMany: (filter?: Partial<${typeName}>) =>`);
-        if (softDeleteColumn) {
-          lines.push(`        provider.from('${tableName}').select('*').is('${softDeleteColumn}', null).match(filter ?? {}),`);
-        } else {
-          lines.push(`        provider.from('${tableName}').select('*').match(filter ?? {}),`);
-        }
-      }
-      lines.push('');
-      if (relations.length > 0) {
-        lines.push(`      findById: <TInclude extends ${includeTypeName} | undefined = undefined>(`);
-        lines.push(`        id: string,`);
-        lines.push(`        options?: { include?: TInclude },`);
-        lines.push(`      ) => {`);
-        lines.push(`        const select = buildSelectClause('*', ${joinConstName}, options?.include as Record<string, true | undefined> | undefined);`);
-        if (softDeleteColumn) {
-          lines.push(`        return provider.from('${tableName}').select(select).eq('${pk}', id).is('${softDeleteColumn}', null).single() as QueryResult<${withIncludeTypeName}<TInclude>>;`);
-        } else {
-          lines.push(`        return provider.from('${tableName}').select(select).eq('${pk}', id).single() as QueryResult<${withIncludeTypeName}<TInclude>>;`);
-        }
-        lines.push(`      },`);
-      } else {
-        lines.push(`      findById: (id: string) =>`);
-        if (softDeleteColumn) {
-          lines.push(`        provider.from('${tableName}').select('*').eq('${pk}', id).is('${softDeleteColumn}', null).single(),`);
-        } else {
-          lines.push(`        provider.from('${tableName}').select('*').eq('${pk}', id).single(),`);
-        }
-      }
-      lines.push('');
-      lines.push(`      create: (data: ${typeName}Create) =>`);
-      lines.push(`        provider.from('${tableName}').insert(data).select().single(),`);
-      lines.push('');
-      lines.push(`      update: (id: string, data: ${typeName}Update) =>`);
-      lines.push(`        provider.from('${tableName}').update(data).eq('${pk}', id).select().single(),`);
-      lines.push('');
-      lines.push(`      delete: (id: string) =>`);
-      // On softDelete tables the BEFORE DELETE trigger turns this into
-      // SET <column> = NOW(), so the DELETE policy (not UPDATE) decides it.
-      lines.push(`        provider.from('${tableName}').delete().eq('${pk}', id),`);
-      lines.push(`    },`);
-      lines.push('');
-    }
-
-    // RPC namespace (manual mode — inline types from RPC definitions)
-    if (rpcEntries.length > 0) {
-      lines.push(`    rpc: {`);
-      for (const [name, def] of rpcEntries) {
-        if (def.args && Object.keys(def.args).length > 0) {
-          lines.push(`      ${name}: (args: Functions['${name}']['Args']) =>`);
-          lines.push(`        provider.rpc('${name}', args),`);
-        } else {
-          // No arguments: callable as \`client.rpc.${name}()\`.
-          lines.push(`      ${name}: (args: Functions['${name}']['Args'] = {}) =>`);
-          lines.push(`        provider.rpc('${name}', args),`);
-        }
-        lines.push('');
-      }
-      lines.push(`    },`);
-      lines.push('');
-    }
-
-    lines.push(`  };`);
-    lines.push(`}`);
-    lines.push('');
-
-    // Export type for the client
-    lines.push(`export type AccessNexusClient = ReturnType<typeof createAccessNexusClient>;`);
-
+    lines.push(`export type { Json } from './types.js';`);
+    this.emitClientBody(schema, lines, 'manual');
     return lines.join('\n');
   }
 

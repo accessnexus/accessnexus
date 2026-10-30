@@ -342,10 +342,12 @@ describe('SupabaseAdapter (Database mode)', () => {
 
     // Should use generic transport type
     expect(client).toContain('type TableName = keyof Tables & string;');
-    expect(client).toContain('interface TableQuery<T extends TableName> {');
+    expect(client).toContain('interface QueryBuilder extends PromiseLike<unknown> {');
     expect(client).toContain('type AccessNexusTransport = {');
     expect(client).toContain('auth: unknown;');
-    expect(client).toContain('from<T extends TableName>(table: T): TableQuery<T>;');
+    expect(client).toContain("auth: providerRaw.auth as TClient['auth'],");
+    expect(client).toContain("as unknown as QueryResult<RowOf<'profiles'>>,");
+    expect(client).toContain('findOne');
     expect(client).toContain('createAccessNexusClient<TClient extends AccessNexusProvider>(providerRaw: TClient)');
 
     // Should have CRUD methods
@@ -407,8 +409,8 @@ describe('SupabaseAdapter (Database mode)', () => {
     expect(client).toContain("const appointmentsJoins: Record<keyof AppointmentsRelations & string, string> = {");
     expect(client).toContain("'user': 'user:profiles!appointments_user_id_fkey(*)'");
     expect(client).toContain("'shop': 'shop:shops!appointments_shop_id_fkey(*)'");
-    expect(client).toContain("findMany: <TInclude extends AppointmentsInclude | undefined = undefined>(");
-    expect(client).toContain("as QueryResult<AppointmentsWithInclude<TInclude>[]>");
+    expect(client).toContain("findMany: <TColumns extends ColumnsOf<'appointments'> | undefined = undefined, TInclude extends AppointmentsInclude | undefined = undefined>(");
+    expect(client).toContain("as unknown as QueryResult<AppointmentsWithInclude<TInclude, SelectedRow<'appointments', TColumns>>[]>");
   });
 
   it('should still generate manual mode client when columns are present', () => {
@@ -427,7 +429,7 @@ describe('SupabaseAdapter (Database mode)', () => {
     expect(outputs).toHaveLength(2);
     expect(outputs[0].path).toBe('types.ts');
     expect(outputs[1].path).toBe('client.ts');
-    expect(outputs[0].content).toContain('export interface Users');
+    expect(outputs[0].content).toContain('export type Users = {');
   });
 
   it('should generate soft-delete-aware Database mode client when softDelete is configured', () => {
@@ -450,7 +452,7 @@ describe('SupabaseAdapter (Database mode)', () => {
     const client = outputs[0].content;
 
     expect(client).toContain(".is('shop_id', null).match(filter ?? {})");
-    expect(client).toContain(".eq('id', id).is('shop_id', null).single()");
+    expect(client).toContain(".eq('id', id).is('shop_id', null).maybeSingle()");
     // delete() issues a DELETE; the soft-delete trigger turns it into SET shop_id = NOW()
     expect(client).toContain("from('profiles').delete().eq('id', id)");
     expect(client).not.toContain("['shop_id']: new Date().toISOString()");

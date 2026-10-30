@@ -620,11 +620,11 @@ describe('Supabase Adapter', () => {
       const outputs = adapter.generateClient(testSchema);
       const types = outputs[0].content;
 
-      expect(types).toContain('export interface Profiles {');
+      expect(types).toContain('export type Profiles = {');
       expect(types).toContain('id: string;');
       expect(types).toContain('name: string;');
       expect(types).toContain('shop_id: string | null;');
-      expect(types).toContain('export interface Appointments {');
+      expect(types).toContain('export type Appointments = {');
       expect(types).toContain('date: string;');
     });
 
@@ -704,10 +704,10 @@ describe('Supabase Adapter', () => {
       expect(client).toContain("const appointmentsJoins: Record<keyof AppointmentsRelations & string, string> = {");
       expect(client).toContain("'profile': 'profile:profiles!appointments_profile_id_fkey(*)'");
       expect(client).toContain("'shop': 'shop:shops!appointments_shop_id_fkey(*)'");
-      expect(client).toContain("findMany: <TInclude extends AppointmentsInclude | undefined = undefined>(");
-      expect(client).toContain("options?: { include?: TInclude },");
-      expect(client).toContain("buildSelectClause('*', appointmentsJoins, options?.include as Record<string, true | undefined> | undefined)");
-      expect(client).toContain("as QueryResult<AppointmentsWithInclude<TInclude>[]>");
+      expect(client).toContain("findMany: <TColumns extends ColumnsOf<'appointments'> | undefined = undefined, TInclude extends AppointmentsInclude | undefined = undefined>(");
+      expect(client).toContain("options?: { columns?: TColumns; include?: TInclude },");
+      expect(client).toContain("selectClause(options?.columns, appointmentsJoins, options?.include as Record<string, true | undefined> | undefined)");
+      expect(client).toContain("as unknown as QueryResult<AppointmentsWithInclude<TInclude, SelectedRow<'appointments', TColumns>>[]>");
     });
 
     it('should type client with generated Database type for return inference', () => {
@@ -720,17 +720,18 @@ describe('Supabase Adapter', () => {
       expect(types).toContain('profiles: {');
       expect(client).toContain("import type { Database, Profiles, ProfilesCreate, ProfilesUpdate, Appointments, AppointmentsCreate, AppointmentsUpdate } from './types.js';");
       expect(client).toContain('type TableName = keyof Tables & string;');
-      expect(client).toContain('interface TableQuery<T extends TableName> {');
+      expect(client).toContain('interface QueryBuilder extends PromiseLike<unknown> {');
       expect(client).toContain('type AccessNexusTransport = {');
       expect(client).toContain('auth: unknown;');
-      expect(client).toContain('from<T extends TableName>(table: T): TableQuery<T>;');
+      expect(client).toContain("auth: providerRaw.auth as TClient['auth'],");
+      expect(client).toContain("as unknown as QueryResult<Profiles>,");
       expect(client).toContain('createAccessNexusClient<TClient extends AccessNexusProvider>(providerRaw: TClient)');
     });
 
     it('should export AccessNexusClient type', () => {
       const outputs = adapter.generateClient(testSchema);
       const client = outputs[1].content;
-      expect(client).toContain('export type AccessNexusClient = ReturnType<typeof createAccessNexusClient>');
+      expect(client).toContain('export type AccessNexusClient<TClient extends AccessNexusProvider = AccessNexusProvider> =\n  ReturnType<typeof createAccessNexusClient<TClient>>;');
     });
 
     it('should soft-delete on delete() and filter soft-deleted rows when softDelete is set', () => {
@@ -750,7 +751,8 @@ describe('Supabase Adapter', () => {
       const client = outputs[1].content;
 
       expect(client).toContain(".is('deleted_at', null).match(filter ?? {})");
-      expect(client).toContain(".eq('id', id).is('deleted_at', null).single()");
+      expect(client).toContain(".eq('id', id).is('deleted_at', null).maybeSingle()");
+      expect(client).toContain(".is('deleted_at', null).match(filter).maybeSingle()");
       // A real DELETE: the soft-delete trigger converts it, so the DELETE policy decides.
       expect(client).toContain("from('posts').delete().eq('id', id)");
       expect(client).not.toContain("['deleted_at']: new Date().toISOString()");
@@ -776,7 +778,8 @@ describe('Supabase Adapter', () => {
 
       expect(types).toContain("get_stats: {");
       expect(types).toContain("Args: { user_id: string }");
-      expect(types).toContain('Returns: Record<string, unknown>');
+      expect(types).toContain('Returns: Json;');
+      expect(types).toContain('| { [key: string]: Json | undefined }');
       expect(client).toContain("type Functions = Database['public']['Functions'];");
       expect(client).toContain("get_stats: (args: Functions['get_stats']['Args']) =>");
     });
