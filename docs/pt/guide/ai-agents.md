@@ -55,7 +55,7 @@ Sem TTY, todo comando roda de forma não interativa. O único comando que faz pe
 {
   "ok": false,
   "command": "init",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "error": {
     "code": "INIT_NOT_INTERACTIVE",
     "message": "init asks questions, but there is no terminal to answer them (stdin is not a TTY)",
@@ -80,7 +80,7 @@ npx accessnexus validate --json
 {
   "ok": true,
   "command": "validate",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "schemaPath": "./accessnexus.schema.ts",
   "mode": "manual",
   "tables": [

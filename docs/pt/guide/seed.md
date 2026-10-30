@@ -73,7 +73,7 @@ ACCESSNEXUS_SEED_PASSWORD='local-dev-only' npx accessnexus seed
 A senha só vale quando um usuário é criado. Rodar o seed de novo com outro valor não muda a senha de usuários que já existem.
 
 ::: warning Declare a referência no mapa `references` da tabela
-Na v0.1.0, o seed encontra as colunas de usuário pelo mapa no nível da tabela, `references: { owner_id: 'auth.users.id' }`. Uma referência escrita na forma de objeto da coluna (`owner_id: { type: 'uuid', references: 'auth.users.id' }`) cria a mesma foreign key, mas o seed não provisiona esse usuário, e o insert falha com erro de foreign key. Use o mapa no nível da tabela para as colunas do seed. No modo Database, adicione `references` à entrada da tabela pelo mesmo motivo.
+Na v0.1.6, o seed encontra as colunas de usuário pelo mapa no nível da tabela, `references: { owner_id: 'auth.users.id' }`. Uma referência escrita na forma de objeto da coluna (`owner_id: { type: 'uuid', references: 'auth.users.id' }`) cria a mesma foreign key, mas o seed não provisiona esse usuário, e o insert falha com erro de foreign key. Use o mapa no nível da tabela para as colunas do seed. No modo Database, adicione `references` à entrada da tabela pelo mesmo motivo.
 :::
 
 ::: danger Nunca defina uma senha fixa de seed num banco acessível

@@ -94,7 +94,7 @@ Foreign keys usam `ON DELETE NO ACTION` por padrão. Defina `onDelete: { column:
 | `TARGET_INVALID` | Adicione `adapter: 'supabase'` ao target |
 
 ::: tip `GENERATED_OUT_OF_DATE` que o `generate` não resolve
-Se o `diff` lista um arquivo como **removido** (`D`), por exemplo `generated/triggers/<table>_triggers.sql` depois que você tirou o último trigger de uma tabela, o `generate` não o apaga na v0.1.0. Apague esse arquivo à mão e o `diff --check` passa. O trigger ou a função em si continua no banco até você removê-lo.
+Se o `diff` lista um arquivo como **removido** (`D`), por exemplo `generated/triggers/<table>_triggers.sql` depois que você tirou o último trigger de uma tabela, o `generate` não o apaga na v0.1.6. Apague esse arquivo à mão e o `diff --check` passa. O trigger ou a função em si continua no banco até você removê-lo.
 :::
 
 Um `PUSH_FAILED` em `rpcs.sql` dizendo "cannot change return type of existing function" significa que você mudou o `returns` de uma RPC: remova a função antiga como `postgres` e faça o push.

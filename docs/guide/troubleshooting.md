@@ -94,7 +94,7 @@ Foreign keys default to `ON DELETE NO ACTION`. Set `onDelete: { column: 'cascade
 | `TARGET_INVALID` | Add `adapter: 'supabase'` to the target |
 
 ::: tip `GENERATED_OUT_OF_DATE` that `generate` does not fix
-If `diff` lists a file as **removed** (`D`), for example `generated/triggers/<table>_triggers.sql` after you removed a table's last trigger, `generate` does not delete it in v0.1.0. Delete that file by hand, then `diff --check` passes. The trigger or function itself stays in the database until you drop it.
+If `diff` lists a file as **removed** (`D`), for example `generated/triggers/<table>_triggers.sql` after you removed a table's last trigger, `generate` does not delete it in v0.1.6. Delete that file by hand, then `diff --check` passes. The trigger or function itself stays in the database until you drop it.
 :::
 
 A `PUSH_FAILED` on `rpcs.sql` saying "cannot change return type of existing function" means you changed an RPC's `returns`: drop the old function as `postgres`, then push.

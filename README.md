@@ -487,7 +487,7 @@ use AccessNexus) — notably: **commits carry no AI co-author or attribution.**
 
 ## Status
 
-`v0.1.0` — first public release on npm. Only the **Supabase** adapter exists. Ships as a single
+`v0.1.6` — current release on npm. Only the **Supabase** adapter exists. Ships as a single
 package (`accessnexus`). See the [CHANGELOG](CHANGELOG.md).
 
 ## License

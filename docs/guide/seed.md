@@ -73,7 +73,7 @@ ACCESSNEXUS_SEED_PASSWORD='local-dev-only' npx accessnexus seed
 The password applies only when a user is created. Re-running the seed with a different value does not change the password of users that already exist.
 
 ::: warning Declare the reference in the table's `references` map
-In v0.1.0 the seed finds user columns through the table-level map, `references: { owner_id: 'auth.users.id' }`. A reference written in the column's object form (`owner_id: { type: 'uuid', references: 'auth.users.id' }`) creates the same foreign key, but the seed does not provision that user, and the insert fails with a foreign key error. Use the table-level map for columns you seed. In Database mode, add `references` to the table entry for the same reason.
+In v0.1.6 the seed finds user columns through the table-level map, `references: { owner_id: 'auth.users.id' }`. A reference written in the column's object form (`owner_id: { type: 'uuid', references: 'auth.users.id' }`) creates the same foreign key, but the seed does not provision that user, and the insert fails with a foreign key error. Use the table-level map for columns you seed. In Database mode, add `references` to the table entry for the same reason.
 :::
 
 ::: danger Never set a fixed seed password on a reachable database

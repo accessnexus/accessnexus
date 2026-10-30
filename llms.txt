@@ -4,7 +4,7 @@
 > triggers and RPCs once in TypeScript (`accessnexus.schema.ts`); AccessNexus generates the
 > SQL migrations, Row-Level Security policies, triggers, Postgres functions and a typed
 > client SDK — with Supabase RLS best practices built in. This file is the complete
-> reference for AI coding agents. Package version: 0.1.0. Requires Node.js >= 20.
+> reference for AI coding agents. Package version: 0.1.6. Requires Node.js >= 20.
 
 ## Mental model (read first)
 
@@ -1350,7 +1350,7 @@ export default defineSchema({
   create one (`npm init -y`, or `init --yes` creates a minimal one).
 - `INTERNAL_ERROR` (exit 2) — a AccessNexus bug: rerun with `--verbose`, report the stack.
 
-## Limits (v0.1.0)
+## Limits (v0.1.6)
 
 - Only the Supabase adapter exists. Database mode does not generate DDL migrations.
 - Migrations are generated from snapshot diffs; renames are detected heuristically — read

@@ -1,8 +1,8 @@
 # Limites e roadmap
 
-O que a v0.1.0 não faz, para você se planejar, e o que vem a seguir. Nada do que está em [Roadmap](#roadmap) está **disponível** hoje.
+O que a v0.1.6 não faz, para você se planejar, e o que vem a seguir. Nada do que está em [Roadmap](#roadmap) está **disponível** hoje.
 
-## Limites atuais (v0.1.0) {#current-limits-v0-1-0}
+## Limites atuais (v0.1.6) {#current-limits-v0-1-0}
 
 | Área | Limite | O que fazer |
 | --- | --- | --- |
