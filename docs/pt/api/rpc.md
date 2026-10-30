@@ -79,6 +79,8 @@ Com `language: 'plpgsql'`, um body que não começa com `DECLARE` ou `BEGIN` é 
 Uma função `SECURITY DEFINER` roda como o seu dono e ignora o RLS. Verifique quem está chamando dentro do body (`(SELECT auth.uid())`, rejeitando `NULL` para chamadas anônimas) e qualifique as tabelas com o schema (`public.todos`). Use `allowAnon: true` só em funções seguras para qualquer um que tenha a anon key.
 :::
 
+O `init --db-url` põe `allowAnon: true` (com um comentário `// NOTE:`) em toda função definer importada que `anon` podia executar no banco de origem, direto ou via `PUBLIC`, para que a importação não tire acesso; ele as lista em `anonExecutableFunctions`. Não existe opção para negar `EXECUTE` a `authenticated`: uma função definer importada que `authenticated` não podia executar passa a ter, com um `// NOTE:` e uma entrada em `authenticatedGrantedFunctions` (o `diff --against-db` reporta como `grant_widened`).
+
 ## Exemplo {#example}
 
 ```ts

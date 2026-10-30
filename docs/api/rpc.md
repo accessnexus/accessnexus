@@ -79,6 +79,8 @@ With `language: 'plpgsql'`, a body that does not start with `DECLARE` or `BEGIN`
 A `SECURITY DEFINER` function runs as its owner and bypasses RLS. Check the caller inside the body (`(SELECT auth.uid())`, reject `NULL` for anonymous callers) and schema-qualify tables (`public.todos`). Use `allowAnon: true` only for functions that are safe for anyone holding the anon key.
 :::
 
+`init --db-url` sets `allowAnon: true` (with a `// NOTE:` comment) on every imported definer function that `anon` could execute in the source database, directly or through `PUBLIC`, so the import does not take access away; it lists them in `anonExecutableFunctions`. There is no option to withhold `EXECUTE` from `authenticated`: an imported definer function that `authenticated` could not execute is granted it, with a `// NOTE:` and an entry in `authenticatedGrantedFunctions` (`diff --against-db` reports it as `grant_widened`).
+
 ## Example
 
 ```ts

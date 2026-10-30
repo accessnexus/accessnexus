@@ -575,12 +575,19 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   those columns changing; trigger functions are always VOLATILE). Every imported function is
   re-created with `SET search_path = pg_catalog, public`: each one whose search_path changes
   (another value such as `'public'`, or none) gets a `// NOTE:` comment and is listed in
-  `hardenedFunctions` (`--json`) — check its body schema-qualifies anything outside `public`. What cannot be expressed is left as a `// WARNING:` comment in the schema, never
+  `hardenedFunctions` (`--json`) — check its body schema-qualifies anything outside `public`.
+  Function grants follow the EFFECTIVE privilege in the source (`has_function_privilege`, PUBLIC
+  counts): a definer function anon could execute gets `allowAnon: true` + a `// NOTE:` and is
+  listed in `anonExecutableFunctions` — show that list to the user: maintenance/admin functions
+  exposed to anon need a deliberate keep/remove decision. One authenticated could not execute is
+  still granted to authenticated (rpc() cannot express it): `// NOTE:` + `authenticatedGrantedFunctions`. What cannot be expressed is left as a `// WARNING:` comment in the schema, never
   dropped silently: triggers with arguments, disabled, INSTEAD OF / TRUNCATE-only or non-plpgsql
   ones; array/other types with no AccessNexus equivalent (imported as `text`); generated columns;
   multi-column FKs. Imported triggers are recreated as `<prefix>_<table>_<name>`: after `push`
   to the same database the original trigger would still exist and both would fire, so `push`
-  refuses with `FOREIGN_TRIGGERS` until the user approves `--replace-foreign-triggers`. Enum columns get AccessNexus's own enum type (`<table>_<column>_enum`).
+  refuses with `FOREIGN_TRIGGERS` until the user approves `--replace-foreign-triggers`. That flag drops
+  the triggers only, never their functions; `keptTriggerFunctions` lists each with its `pg_depend`
+  dependents (`orphaned: true` = nothing depends on it; dropping it is a manual, reviewed step). Enum columns get AccessNexus's own enum type (`<table>_<column>_enum`).
 - `validate` — load + check the schema, write nothing. Flags: `--schema <path>`.
 - `generate` — write migrations, policies, triggers, RPCs and the SDK. Files that only differ
   in the `-- Generated at:` line are left untouched. Flags: `--schema`, `--output <dir>` (every
@@ -710,7 +717,10 @@ export interface PlanChange {
   //   trigger:    { timing, events: string[], level, when, function, enabled }
   //   function:   { returns, language, volatility, securityDefiner, strict, config: string[], bodyHash, definition }
   //               ('definition' = pg_get_functiondef, shown but not compared; a body change shows as 'bodyHash')
-  //   grant:      { privileges: string[] }  e.g. 'anon=EXECUTE', 'PUBLIC=EXECUTE', 'authenticated=SELECT*' (* = WITH GRANT OPTION)
+  //   grant:      { privileges: string[], effective: string[] }
+  //               privileges = literal ACL, e.g. 'anon=EXECUTE', 'PUBLIC=EXECUTE', 'authenticated=SELECT*' (* = WITH GRANT OPTION)
+  //               effective  = what PUBLIC / anon / authenticated can really do (has_*_privilege), e.g. 'anon=EXECUTE'
+  notes?: string[]; // grants: access path per role, e.g. 'anon EXECUTE: via PUBLIC → direct grant (no change in access)'
 }
 
 export interface RiskyChange {
@@ -718,7 +728,8 @@ export interface RiskyChange {
     | 'column_nullability_relaxed' | 'rls_disabled' | 'policy_dropped' | 'policy_roles_widened'
     | 'policy_permissive_changed' | 'trigger_dropped' | 'function_dropped'
     | 'function_volatility_changed' | 'function_config_changed' | 'function_security_changed'
-    | 'grant_widened';
+    | 'grant_widened'   // PUBLIC/anon/authenticated gains EFFECTIVE access on an existing object
+    | 'grant_narrowed'; // ... loses it (PUBLIC losing what anon and authenticated both keep is not flagged)
   kind: PlanKind; object: string;
   message: string; // e.g. 'function public.f() STABLE → VOLATILE'
 }
@@ -729,6 +740,7 @@ export interface LivePlan {
   skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
   droppedPolicies: ForeignPolicy[];   // only with --replace-foreign-policies
   droppedTriggers: ForeignTrigger[];  // only with --replace-foreign-triggers
+  keptTriggerFunctions: KeptTriggerFunction[]; // functions of the dropped triggers: never dropped
   foreignPolicies: ForeignPolicy[];
   foreignTriggers: ForeignTrigger[];
   blockers: Array<{ code: string; message: string; hint?: string }>; // refusals the real push would stop at
@@ -759,18 +771,30 @@ export interface PushResult {
   plan: Array<{ category: string; files: string[] }>;
   destructive?: DestructiveStatement[]; // --dry-run: in all migration files
   foreignPolicies?: ForeignPolicy[] | null; // --dry-run: null when no database URL (not checked)
-  foreignTriggers?: ForeignTrigger[] | null; // --dry-run: { schema, table, trigger }
+  foreignTriggers?: ForeignTrigger[] | null; // --dry-run: { schema, table, trigger, function }
   wouldRefuse?: boolean;                    // --dry-run: foreign policies/triggers without their --replace-* flag, or livePlan blockers/failed
   livePlan?: LivePlan | null;               // --dry-run: rehearsal of the files on disk; null without a database URL (or unreachable)
   applied: string[];
   droppedPolicies: ForeignPolicy[];         // --replace-foreign-policies
   droppedTriggers: ForeignTrigger[];        // --replace-foreign-triggers
+  keptTriggerFunctions: KeptTriggerFunction[]; // --replace-foreign-triggers
   skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
   seed: null | { path: string; status: 'applied' | 'skipped'; authUsers: number; durationMs?: number }; // only with --seed
   // on failure: error.code DESTRUCTIVE_MIGRATION adds destructive[]; GENERATED_OUT_OF_DATE adds
   // stale: Array<{ path: string; status: string }>; FOREIGN_POLICIES adds foreignPolicies[]; FOREIGN_TRIGGERS adds foreignTriggers[];
   // PUSH_FAILED / MIGRATION_DRIFT: applied is [] (rolled back), rolledBack: string[] lists the files
   // that had run, PUSH_FAILED adds failed: string; a failed --seed keeps applied[] and seed.status 'failed'
+}
+
+export interface ForeignTrigger {
+  schema: string; table: string; trigger: string;
+  function: string; // the trigger function, regprocedure text, e.g. 'touch()' or 'audit.log_change()'
+}
+
+export interface KeptTriggerFunction {
+  function: string;
+  dependents: string[]; // pg_depend, e.g. 'trigger t on table other.events' (calls inside other bodies are not tracked)
+  orphaned: boolean;    // no dependents left
 }
 
 export interface ForeignPolicy {
@@ -800,6 +824,10 @@ export interface InitResult {
   // --db-url: imported functions whose search_path generate pins to 'pg_catalog, public'
   // (from: the database value, null when it had none). name is `table.trigger` for triggers.
   hardenedFunctions?: Array<{ kind: 'rpc' | 'trigger'; name: string; from: string | null; to: string }>;
+  // --db-url: definer functions anon could execute in the source (imported with allowAnon: true)
+  anonExecutableFunctions?: string[];
+  // --db-url: definer functions authenticated could NOT execute (generate grants it anyway)
+  authenticatedGrantedFunctions?: string[];
   nextSteps?: string[];
 }
 

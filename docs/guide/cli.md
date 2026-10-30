@@ -109,7 +109,7 @@ It connects with the same URL resolution as `push`, takes the push lock (without
     ! [function_config_changed] function public.note_count() config [...] → [...]
 ```
 
-Review `riskyChanges` (volatility and `SET` config changes, widened policy roles, dropped policies, lost defaults, type changes, RLS disabled) before pushing. Pass the same `--replace-foreign-policies`, `--replace-foreign-triggers` or `--allow-destructive` you would pass to `push` to see their effect; without them the refusals are listed as `blockers`. If Postgres would reject a file, the command exits `1` with `PUSH_WOULD_FAIL` and names the file and the SQL error. `push --dry-run` runs the same plan automatically (as `livePlan`) when a database URL is set.
+Review `riskyChanges` (volatility and `SET` config changes, widened policy roles, dropped policies, lost defaults, type changes, RLS disabled, `grant_widened` / `grant_narrowed` on effective access) before pushing. Pass the same `--replace-foreign-policies`, `--replace-foreign-triggers` or `--allow-destructive` you would pass to `push` to see their effect; without them the refusals are listed as `blockers`. If Postgres would reject a file, the command exits `1` with `PUSH_WOULD_FAIL` and names the file and the SQL error. `push --dry-run` runs the same plan automatically (as `livePlan`) when a database URL is set.
 
 ## Write SQL and the SDK: `generate`
 

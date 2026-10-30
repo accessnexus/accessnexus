@@ -142,7 +142,7 @@ O `diff --against-db` mostra o que o `push` mudaria de fato no banco. Funciona p
 4. Roda o caminho de código do push na transação: os mesmos drops de policies/triggers estranhos (só com as flags `--replace-*`), as mesmas regras de pular/reaplicar, os mesmos arquivos na mesma ordem.
 5. Tira o snapshot de novo, `ROLLBACK`, libera o lock. Nada persiste: nenhum objeto, nenhuma linha em `accessnexus_migrations`.
 
-O resultado lista `changes` (`kind`, `object`, `change`, `before`, `after`, `fields`) e `riskyChanges`: mudança de volatilidade/config/security de função, roles de policy ampliadas (por exemplo `authenticated` → `public`), policies, triggers, funções, tabelas ou colunas removidas, default de coluna removido, mudança de tipo, `NOT NULL` relaxado, RLS desligado ou sem FORCE, `anon`/`PUBLIC` recebendo grant novo. As recusas em que o push real pararia (`FOREIGN_POLICIES`, `FOREIGN_TRIGGERS`, `DESTRUCTIVE_MIGRATION`, `PUSH_ROLE_NO_BYPASSRLS`) ficam em `blockers`. Se o Postgres rejeitaria um arquivo, o comando sai com `1` e `PUSH_WOULD_FAIL`, com `failed` (`file`, `message`, `sqlState`); nada foi persistido.
+O resultado lista `changes` (`kind`, `object`, `change`, `before`, `after`, `fields`) e `riskyChanges`: mudança de volatilidade/config/security de função, roles de policy ampliadas (por exemplo `authenticated` → `public`), policies, triggers, funções, tabelas ou colunas removidas, default de coluna removido, mudança de tipo, `NOT NULL` relaxado, RLS desligado ou sem FORCE, e grants. Os grants são julgados pelo acesso **efetivo** (`has_function_privilege` / `has_table_privilege` para `anon` e `authenticated`, mais a entrada `PUBLIC` da ACL), não pela forma literal da ACL: `grant_widened` quando um deles ganha um privilégio num objeto que já existia, `grant_narrowed` quando perde (`PUBLIC` perdendo um privilégio que `anon` e `authenticated` mantêm, como no `REVOKE ... FROM PUBLIC` mais grants diretos de uma RPC definer, não é sinalizado). Uma mudança de grant traz `notes` com o caminho de acesso por role, ex. `anon EXECUTE: via PUBLIC → direct grant (no change in access)`; `before`/`after` mantêm a ACL literal (`privileges`) ao lado de `effective`. Com `--replace-foreign-triggers`, `keptTriggerFunctions` lista as funções dos triggers removidos (nunca removidas) e o que ainda depende delas. As recusas em que o push real pararia (`FOREIGN_POLICIES`, `FOREIGN_TRIGGERS`, `DESTRUCTIVE_MIGRATION`, `PUSH_ROLE_NO_BYPASSRLS`) ficam em `blockers`. Se o Postgres rejeitaria um arquivo, o comando sai com `1` e `PUSH_WOULD_FAIL`, com `failed` (`file`, `message`, `sqlState`); nada foi persistido.
 
 ```bash
 npx accessnexus diff --against-db --json
@@ -352,6 +352,7 @@ interface LivePlan {
   wouldApply: string[];                                   // files push would execute
   skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
   droppedPolicies: ForeignPolicy[]; droppedTriggers: ForeignTrigger[]; // only with the --replace-* flags
+  keptTriggerFunctions: Array<{ function: string; dependents: string[]; orphaned: boolean }>; // functions of dropped triggers (kept)
   foreignPolicies: ForeignPolicy[]; foreignTriggers: ForeignTrigger[];
   blockers: Array<{ code: string; message: string; hint?: string }>; // refusals the real push stops at
   failed: null | { file: string | null; code: string; message: string; sqlState: string | null };
@@ -363,6 +364,7 @@ interface LivePlan {
     change: 'added' | 'removed' | 'modified';
     before?: Record<string, unknown>; after?: Record<string, unknown>;
     fields?: string[];                                    // modified: properties that differ
+    notes?: string[];                                     // grants: access path per role, e.g. 'anon EXECUTE: via PUBLIC → direct grant (no change in access)'
   }>;
   riskyChanges: Array<{ code: string; kind: string; object: string; message: string }>;
   persisted: false;

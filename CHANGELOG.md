@@ -4,6 +4,44 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-10-29
+
+### Fixed
+
+- `init --db-url` no longer takes `anon` away from definer functions. It emitted
+  `rpc({ security: 'definer' })` without `allowAnon`, so `push` revoked `anon` from every
+  SECURITY DEFINER function anon could execute (directly or via `PUBLIC`): `TO public`
+  policies calling such a helper made anonymous SELECTs fail with "permission denied for
+  function" instead of returning 0 rows. init now reads the effective privilege
+  (`has_function_privilege` for `anon` and `authenticated`) and emits `allowAnon: true` with a
+  `// NOTE:` comment where anon could execute the function; `init --json` lists them in
+  `anonExecutableFunctions` (and the human output prints them) so maintenance/admin functions
+  exposed to anon get a deliberate decision. A definer function authenticated could not
+  execute gets a `// NOTE:` and `authenticatedGrantedFunctions` (`rpc()` always grants
+  `authenticated`). Invoker functions keep their grants as before.
+- `diff --against-db` judges grants on effective access, not on the ACL's literal shape:
+  `grant_widened` is no longer reported when anon already had `EXECUTE` via `PUBLIC`. The grant
+  snapshot carries `effective` (PUBLIC / anon / authenticated, via `has_function_privilege` /
+  `has_table_privilege`) next to the literal `privileges`, and grant changes carry `notes`
+  such as `anon EXECUTE: via PUBLIC → direct grant (no change in access)`.
+- `diff --against-db` with `--replace-foreign-triggers` reported the original trigger
+  functions as `function_dropped`. They were never dropped (the plan stopped looking at them
+  once their trigger was gone); the after-snapshot now covers the same functions.
+- Generated SDK passes typescript-eslint `recommended`: `Record<string, never>` for RPCs
+  without arguments (`no-empty-object-type`), `unknown` instead of `{}` in the include
+  helpers, and no `any` in the provider type. RPCs without arguments can be called as
+  `client.rpc.name()`.
+
+### Added
+
+- `grant_narrowed` risk code: `PUBLIC`, `anon` or `authenticated` lose effective access to an
+  existing function or table (`PUBLIC` losing a privilege anon and authenticated both keep is
+  not flagged).
+- `push --replace-foreign-triggers` (and the live plan) return `keptTriggerFunctions`: the
+  functions of the dropped triggers, which are never dropped, with what still depends on them
+  (`pg_depend`: triggers in any schema, other objects) and `orphaned`. `ForeignTrigger` gains
+  `function`.
+
 ## [0.1.2] - 2026-10-29
 
 ### Added

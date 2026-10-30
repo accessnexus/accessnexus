@@ -109,7 +109,7 @@ Ele conecta com a mesma resolução de URL do `push`, pega o lock do push (sem e
     ! [function_config_changed] function public.note_count() config [...] → [...]
 ```
 
-Revise os `riskyChanges` (mudanças de volatilidade e de config `SET`, roles de policy ampliadas, policies removidas, defaults perdidos, mudanças de tipo, RLS desligado) antes do push. Passe as mesmas `--replace-foreign-policies`, `--replace-foreign-triggers` ou `--allow-destructive` que passaria ao `push` para ver o efeito delas; sem elas, as recusas aparecem em `blockers`. Se o Postgres rejeitaria um arquivo, o comando sai com `1` e `PUSH_WOULD_FAIL`, com o arquivo e o erro SQL. O `push --dry-run` roda o mesmo plano automaticamente (em `livePlan`) quando há URL de banco.
+Revise os `riskyChanges` (mudanças de volatilidade e de config `SET`, roles de policy ampliadas, policies removidas, defaults perdidos, mudanças de tipo, RLS desligado, `grant_widened` / `grant_narrowed` pelo acesso efetivo) antes do push. Passe as mesmas `--replace-foreign-policies`, `--replace-foreign-triggers` ou `--allow-destructive` que passaria ao `push` para ver o efeito delas; sem elas, as recusas aparecem em `blockers`. Se o Postgres rejeitaria um arquivo, o comando sai com `1` e `PUSH_WOULD_FAIL`, com o arquivo e o erro SQL. O `push --dry-run` roda o mesmo plano automaticamente (em `livePlan`) quando há URL de banco.
 
 ## Escreva o SQL e o SDK: `generate` {#write-sql-and-the-sdk-generate}
 
