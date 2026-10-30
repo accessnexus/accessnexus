@@ -47,6 +47,7 @@ import {
 import { checkSchema, summarizeSchema } from './schema-check.js';
 import {
   captureSnapshot,
+  snapshotFunctionOids,
   diffSnapshots,
   findRiskyChanges,
   functionsDefinedIn,
@@ -1378,6 +1379,19 @@ export interface ForeignTrigger {
   schema: string;
   table: string;
   trigger: string;
+  /** The trigger function, as `regprocedure` text (e.g. `public.touch()`). */
+  function: string;
+}
+
+/**
+ * The function of a dropped foreign trigger. push never drops it: it reports
+ * what still depends on it (pg_depend: triggers in any schema, other objects).
+ * An empty `dependents` list means it is orphaned and safe to drop by hand.
+ */
+export interface KeptTriggerFunction {
+  function: string;
+  dependents: string[];
+  orphaned: boolean;
 }
 
 /**
@@ -1392,7 +1406,7 @@ export async function findForeignTriggers(
 ): Promise<ForeignTrigger[]> {
   if (targets.tables.length === 0) return [];
   const { rows } = await client.query(
-    `SELECT n.nspname, c.relname, t.tgname
+    `SELECT n.nspname, c.relname, t.tgname, t.tgfoid::regprocedure::text AS function
        FROM pg_catalog.pg_trigger t
        JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
@@ -1404,7 +1418,45 @@ export async function findForeignTriggers(
   );
   return rows
     .filter((row) => !String(row.tgname).startsWith(`${policyPrefix}_${row.relname}_`))
-    .map((row) => ({ schema: String(row.nspname), table: String(row.relname), trigger: String(row.tgname) }));
+    .map((row) => ({ schema: String(row.nspname), table: String(row.relname), trigger: String(row.tgname), function: String(row.function) }));
+}
+
+/**
+ * After the foreign triggers are dropped: what still depends on each of their
+ * functions (pg_depend covers triggers in every schema, e.g. auth.users, and
+ * other dependent objects; calls inside other function bodies are not tracked
+ * by Postgres). The functions themselves are always kept.
+ */
+export async function describeKeptTriggerFunctions(
+  client: { query(sql: string, params?: unknown[]): Promise<{ rows: any[] }> },
+  triggers: ForeignTrigger[],
+): Promise<KeptTriggerFunction[]> {
+  const names = [...new Set(triggers.map((t) => t.function))].sort();
+  if (names.length === 0) return [];
+  const { rows } = await client.query(
+    `SELECT f.name,
+            ARRAY(SELECT DISTINCT pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid)
+                    FROM pg_catalog.pg_depend d
+                   WHERE d.refclassid = 'pg_catalog.pg_proc'::regclass AND d.refobjid = f.name::regprocedure::oid
+                     AND d.deptype IN ('n', 'a')
+                   ORDER BY 1) AS dependents
+       FROM unnest($1::text[]) AS f(name)
+      WHERE pg_catalog.to_regprocedure(f.name) IS NOT NULL`,
+    [names],
+  );
+  return rows.map((row) => {
+    const dependents = (Array.isArray(row.dependents) ? row.dependents : []).map(String);
+    return { function: String(row.name), dependents, orphaned: dependents.length === 0 };
+  });
+}
+
+function reportKeptTriggerFunctions(kept: KeptTriggerFunction[]): void {
+  if (kept.length === 0) return;
+  log(paint.bold(`  Trigger functions of the dropped triggers (kept, never dropped): ${kept.length}`));
+  for (const k of kept) {
+    log(`    ${paint.gray('=')} ${k.function}${k.orphaned ? paint.gray(' (orphaned: nothing depends on it; drop it by hand once reviewed)') : ` (still used by: ${k.dependents.join('; ')})`}`);
+  }
+  log('');
 }
 
 function describeForeignTriggers(triggers: ForeignTrigger[]): string {
@@ -1552,6 +1604,7 @@ async function runPush(opts: ParsedFlags): Promise<CommandResult> {
       skipped: [],
       droppedPolicies: [],
       droppedTriggers: [],
+      keptTriggerFunctions: [],
       seed: null,
     };
   }
@@ -1655,6 +1708,7 @@ interface PushState {
   skipped: Array<{ path: string; reason: string }>;
   droppedPolicies: ForeignPolicy[];
   droppedTriggers: ForeignTrigger[];
+  keptTriggerFunctions: KeptTriggerFunction[];
   foreignPolicies: ForeignPolicy[] | null;
   foreignTriggers: ForeignTrigger[] | null;
   /** Rehearsal only: the refusals a real push would stop at (it would apply nothing). */
@@ -1662,16 +1716,16 @@ interface PushState {
 }
 
 function newPushState(): PushState {
-  return { applied: [], skipped: [], droppedPolicies: [], droppedTriggers: [], foreignPolicies: null, foreignTriggers: null, blockers: [] };
+  return { applied: [], skipped: [], droppedPolicies: [], droppedTriggers: [], keptTriggerFunctions: [], foreignPolicies: null, foreignTriggers: null, blockers: [] };
 }
 
 function pushProgress(base: CommandResult, state: PushState): CommandResult {
-  return { ...base, applied: [...state.applied], skipped: [...state.skipped], droppedPolicies: [...state.droppedPolicies], droppedTriggers: [...state.droppedTriggers] };
+  return { ...base, applied: [...state.applied], skipped: [...state.skipped], droppedPolicies: [...state.droppedPolicies], droppedTriggers: [...state.droppedTriggers], keptTriggerFunctions: [...state.keptTriggerFunctions] };
 }
 
 /** After a rollback nothing from this push stays in the database. */
 function pushRolledBack(base: CommandResult, state: PushState): CommandResult {
-  return { ...base, applied: [], skipped: [...state.skipped], droppedPolicies: [], droppedTriggers: [], rolledBack: [...state.applied] };
+  return { ...base, applied: [], skipped: [...state.skipped], droppedPolicies: [], droppedTriggers: [], keptTriggerFunctions: [], rolledBack: [...state.applied] };
 }
 
 function readPushGroups(plan: Array<{ key: string; title: string; files: string[] }>): PushGroup[] {
@@ -1758,6 +1812,10 @@ async function applyPushInTransaction(client: any, ctx: PushContext, state: Push
       await client.query(`DROP TRIGGER ${quoteIdent(t.trigger)} ON ${quoteIdent(t.schema)}.${quoteIdent(t.table)};`);
       state.droppedTriggers.push(t);
     }
+    // Dropping a trigger never drops its function: something else (a trigger
+    // on auth.users, another table) may still use it. Report what remains.
+    state.keptTriggerFunctions = await describeKeptTriggerFunctions(client, foreignTriggers);
+    if (!rehearse) reportKeptTriggerFunctions(state.keptTriggerFunctions);
   }
 
   for (const group of ctx.groups) {
@@ -1839,6 +1897,8 @@ export interface LivePlan {
   skipped: Array<{ path: string; reason: string }>;
   droppedPolicies: ForeignPolicy[];
   droppedTriggers: ForeignTrigger[];
+  /** Functions of the dropped triggers: kept, with what still depends on them. */
+  keptTriggerFunctions: KeptTriggerFunction[];
   foreignPolicies: ForeignPolicy[];
   foreignTriggers: ForeignTrigger[];
   /** Refusals the real push stops at before applying anything. */
@@ -1895,7 +1955,9 @@ async function rehearsePush(dbUrl: string, ctx: PushContext, defaultSchema: stri
           sqlState: (data.sqlState as string | null | undefined) ?? null,
         };
       }
-      if (!failed) changes = diffSnapshots(before, await captureSnapshot(client, scope));
+      // Snapshot the same functions again, even those only reached through a
+      // trigger the push drops: dropping a trigger never drops its function.
+      if (!failed) changes = diffSnapshots(before, await captureSnapshot(client, { ...scope, functionOids: snapshotFunctionOids(before) }));
     } finally {
       await client.query('ROLLBACK').catch(() => {});
     }
@@ -1910,6 +1972,7 @@ async function rehearsePush(dbUrl: string, ctx: PushContext, defaultSchema: stri
     skipped: state.skipped,
     droppedPolicies: state.droppedPolicies,
     droppedTriggers: state.droppedTriggers,
+    keptTriggerFunctions: state.keptTriggerFunctions,
     foreignPolicies: state.foreignPolicies ?? [],
     foreignTriggers: state.foreignTriggers ?? [],
     blockers: state.blockers,
@@ -1939,6 +2002,7 @@ function reportLivePlan(plan: LivePlan): void {
     log(`  ${paint.green('+')} added: ${plan.summary.added}   ${paint.yellow('~')} modified: ${plan.summary.modified}   ${paint.red('-')} removed: ${plan.summary.removed}\n`);
     for (const line of renderPlan(plan.changes, plan.riskyChanges)) log(line);
   }
+  reportKeptTriggerFunctions(plan.keptTriggerFunctions);
   for (const blocker of plan.blockers) {
     log(`  ${paint.yellow('!')} push would refuse [${blocker.code}]: ${blocker.message}`);
   }

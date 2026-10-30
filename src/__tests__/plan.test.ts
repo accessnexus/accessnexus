@@ -142,13 +142,13 @@ describe('findRiskyChanges', () => {
     const before = snap(
       ['rls', 'public.a', { enabled: true, forced: true }],
       ['rls', 'public.b', { enabled: true, forced: true }],
-      ['grant', 'function public.f()', { privileges: ['postgres=EXECUTE'] }],
+      ['grant', 'function public.f()', { privileges: ['postgres=EXECUTE'], effective: [] }],
     );
     const after = snap(
       ['rls', 'public.a', { enabled: false, forced: false }],
       ['rls', 'public.b', { enabled: true, forced: false }],
-      ['grant', 'function public.f()', { privileges: ['PUBLIC=EXECUTE', 'anon=EXECUTE', 'postgres=EXECUTE'] }],
-      ['grant', 'function public.g()', { privileges: ['PUBLIC=EXECUTE'] }],
+      ['grant', 'function public.f()', { privileges: ['PUBLIC=EXECUTE', 'anon=EXECUTE', 'postgres=EXECUTE'], effective: ['PUBLIC=EXECUTE', 'anon=EXECUTE'] }],
+      ['grant', 'function public.g()', { privileges: ['PUBLIC=EXECUTE'], effective: ['PUBLIC=EXECUTE'] }],
     );
     const risky = findRiskyChanges(diffSnapshots(before, after));
     expect(risky.map((r) => `${r.code} ${r.object}`)).toEqual([
@@ -156,6 +156,50 @@ describe('findRiskyChanges', () => {
       'rls_disabled public.b',
       'grant_widened function public.f()',
     ]);
+  });
+});
+
+describe('findRiskyChanges on effective grants', () => {
+  const g = (privileges: string[], effective: string[]): [PlanKind, string, Record<string, unknown>] => ['grant', 'function public.f()', { privileges, effective }];
+
+  it('does not flag anon moving from PUBLIC to a direct grant (no change in access), and notes it', () => {
+    const changes = diffSnapshots(
+      snap(g(['PUBLIC=EXECUTE', 'postgres=EXECUTE'], ['PUBLIC=EXECUTE', 'anon=EXECUTE', 'authenticated=EXECUTE'])),
+      snap(g(['anon=EXECUTE', 'authenticated=EXECUTE', 'postgres=EXECUTE'], ['anon=EXECUTE', 'authenticated=EXECUTE'])),
+    );
+    const risky = findRiskyChanges(changes);
+    // PUBLIC lost its entry, but anon and authenticated keep EXECUTE: not risky.
+    expect(risky).toEqual([]);
+    expect(changes[0].notes).toContain('PUBLIC EXECUTE: granted → none (PUBLIC entry removed; see anon/authenticated)');
+    expect(changes[0].notes).toContain('anon EXECUTE: via PUBLIC → direct grant (no change in access)');
+    const text = renderPlan(changes, risky).join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+    expect(text).toContain('anon EXECUTE: via PUBLIC → direct grant (no change in access)');
+  });
+
+  it('flags anon / authenticated losing effective access as grant_narrowed', () => {
+    const risky = findRiskyChanges(diffSnapshots(
+      snap(g(['PUBLIC=EXECUTE', 'postgres=EXECUTE'], ['PUBLIC=EXECUTE', 'anon=EXECUTE', 'authenticated=EXECUTE'])),
+      snap(g(['PUBLIC=EXECUTE', 'postgres=EXECUTE', 'authenticated=EXECUTE'], ['PUBLIC=EXECUTE', 'authenticated=EXECUTE'])),
+    ));
+    expect(risky.map((r) => `${r.code} ${r.message}`)).toEqual([
+      'grant_narrowed function public.f() loses access: anon EXECUTE: via PUBLIC → none',
+    ]);
+  });
+
+  it('flags PUBLIC losing a privilege anon or authenticated does not keep', () => {
+    const risky = findRiskyChanges(diffSnapshots(
+      snap(g(['PUBLIC=EXECUTE'], ['PUBLIC=EXECUTE', 'anon=EXECUTE', 'authenticated=EXECUTE'])),
+      snap(g(['postgres=EXECUTE', 'authenticated=EXECUTE'], ['authenticated=EXECUTE'])),
+    ));
+    expect(risky.map((r) => r.message)).toEqual([
+      'function public.f() loses access: PUBLIC EXECUTE: granted → none; anon EXECUTE: via PUBLIC → none',
+    ]);
+  });
+
+  it('flags table privileges lost or gained by anon', () => {
+    const t = (effective: string[]): [PlanKind, string, Record<string, unknown>] => ['grant', 'table public.t', { privileges: [], effective }];
+    const risky = findRiskyChanges(diffSnapshots(snap(t(['anon=SELECT'])), snap(t(['anon=INSERT']))));
+    expect(risky.map((r) => r.code).sort()).toEqual(['grant_narrowed', 'grant_widened']);
   });
 });
 
@@ -178,7 +222,7 @@ describe('captureSnapshot', () => {
     const client = {
       async query(sql: string): Promise<{ rows: any[] }> {
         if (sql.includes('FROM pg_catalog.pg_class c') && sql.includes("relkind IN ('r', 'p')")) {
-          return { rows: [{ oid: 1, nspname: 'public', relname: 'notes', relrowsecurity: true, relforcerowsecurity: false, privileges: '{postgres=SELECT,anon=SELECT}' }] };
+          return { rows: [{ oid: 1, nspname: 'public', relname: 'notes', relrowsecurity: true, relforcerowsecurity: false, privileges: '{postgres=SELECT,anon=SELECT}', effective: '{anon=SELECT}' }] };
         }
         if (sql.includes('pg_catalog.pg_policy')) {
           return { rows: [{ nspname: 'public', relname: 'notes', polname: 'p', polcmd: 'r', polpermissive: true, roles: ['authenticated', 'anon'], using_expr: 'true', check_expr: null }] };
@@ -194,7 +238,7 @@ describe('captureSnapshot', () => {
     };
     const s = await captureSnapshot(client, { tables: [{ schema: 'public', table: 'notes' }], functions: [] });
     expect(s['rls:public.notes'].props).toEqual({ enabled: true, forced: false });
-    expect(s['grant:table public.notes'].props).toEqual({ privileges: ['anon=SELECT', 'postgres=SELECT'] });
+    expect(s['grant:table public.notes'].props).toEqual({ privileges: ['anon=SELECT', 'postgres=SELECT'], effective: ['anon=SELECT'] });
     expect(s['policy:public.notes.p'].props).toMatchObject({ command: 'SELECT', roles: ['anon', 'authenticated'] });
     expect(s['trigger:public.notes.t'].props).toEqual({
       timing: 'BEFORE', events: ['INSERT'], level: 'ROW', when: '(new.body IS NOT NULL)', function: 'public.trg()', enabled: true,

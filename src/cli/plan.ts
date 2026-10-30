@@ -30,6 +30,11 @@ export interface PlanChange {
   after?: Record<string, unknown>;
   /** For `modified`: the properties that differ. */
   fields?: string[];
+  /**
+   * Grants only: how each role's effective access changed, e.g.
+   * `anon EXECUTE: via PUBLIC → direct grant (no change in access)`.
+   */
+  notes?: string[];
 }
 
 export type RiskCode =
@@ -47,7 +52,8 @@ export type RiskCode =
   | 'function_volatility_changed'
   | 'function_config_changed'
   | 'function_security_changed'
-  | 'grant_widened';
+  | 'grant_widened'
+  | 'grant_narrowed';
 
 export interface RiskyChange {
   code: RiskCode;
@@ -60,6 +66,36 @@ export interface SnapshotScope {
   tables: Array<{ schema: string; table: string }>;
   /** Functions named in the SQL push applies (RPCs, trigger functions, helpers). */
   functions: Array<{ schema: string; name: string }>;
+  /** Functions to include by oid (the ones an earlier snapshot captured). */
+  functionOids?: number[];
+}
+
+const SNAPSHOT_FUNCTION_OIDS = new WeakMap<CatalogSnapshot, number[]>();
+
+/** Oids of the functions a snapshot captured (to capture the same set again). */
+export function snapshotFunctionOids(snapshot: CatalogSnapshot): number[] {
+  return SNAPSHOT_FUNCTION_OIDS.get(snapshot) ?? [];
+}
+
+/** Roles whose EFFECTIVE access the plan compares (PUBLIC = the ACL's PUBLIC entry). */
+export const PLAN_ROLES = ['PUBLIC', 'anon', 'authenticated'] as const;
+const TABLE_PRIVILEGES = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER'];
+
+/** `has_*_privilege` for anon/authenticated, false when the role does not exist. */
+function effectiveSql(fn: 'has_function_privilege' | 'has_table_privilege', oid: string, privileges: string[]): string {
+  return `ARRAY(SELECT r.rolname || '=' || pr.p
+                  FROM unnest(ARRAY['anon', 'authenticated']) AS r(rolname)
+                 CROSS JOIN unnest(ARRAY[${privileges.map((p) => `'${p}'`).join(', ')}]) AS pr(p)
+                 WHERE CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_roles x WHERE x.rolname = r.rolname)
+                            THEN pg_catalog.${fn}(r.rolname, ${oid}, pr.p) ELSE false END)`;
+}
+
+/** `role=PRIV` entries of the effective access: anon/authenticated from has_*_privilege, PUBLIC from the ACL. */
+function effectiveAccess(roleEntries: unknown, privileges: string[]): string[] {
+  const publicEntries = privileges
+    .filter((p) => p.startsWith('PUBLIC='))
+    .map((p) => p.replace(/\*$/, ''));
+  return [...new Set([...sortedStrings(roleEntries), ...publicEntries])].sort();
 }
 
 /** Properties shown in before/after but not compared (bodyHash already covers them). */
@@ -126,7 +162,8 @@ export async function captureSnapshot(client: Queryable, scope: SnapshotScope): 
     `SELECT c.oid, n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity,
             ARRAY(SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee) END
                          || '=' || a.privilege_type || CASE WHEN a.is_grantable THEN '*' ELSE '' END
-                    FROM pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) a) AS privileges
+                    FROM pg_catalog.aclexplode(COALESCE(c.relacl, pg_catalog.acldefault('r', c.relowner))) a) AS privileges,
+            ${effectiveSql('has_table_privilege', 'c.oid', TABLE_PRIVILEGES)} AS effective
        FROM pg_catalog.pg_class c
        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
        JOIN unnest($1::text[], $2::text[]) AS m(schema_name, table_name)
@@ -139,7 +176,8 @@ export async function captureSnapshot(client: Queryable, scope: SnapshotScope): 
     const name = `${t.nspname}.${t.relname}`;
     put('table', name, {});
     put('rls', name, { enabled: t.relrowsecurity === true, forced: t.relforcerowsecurity === true });
-    put('grant', `table ${name}`, { privileges: sortedStrings(t.privileges) });
+    const privileges = sortedStrings(t.privileges);
+    put('grant', `table ${name}`, { privileges, effective: effectiveAccess(t.effective, privileges) });
   }
 
   const triggerFunctionOids = new Set<number>();
@@ -241,14 +279,16 @@ export async function captureSnapshot(client: Queryable, scope: SnapshotScope): 
             p.proisstrict, p.proconfig, md5(p.prosrc) AS body_hash, pg_catalog.pg_get_functiondef(p.oid) AS def,
             ARRAY(SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee) END
                          || '=' || a.privilege_type || CASE WHEN a.is_grantable THEN '*' ELSE '' END
-                    FROM pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a) AS privileges
+                    FROM pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) a) AS privileges,
+            ${effectiveSql('has_function_privilege', 'p.oid', ['EXECUTE'])} AS effective, p.oid
        FROM pg_catalog.pg_proc p
        JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
        JOIN pg_catalog.pg_language l ON l.oid = p.prolang
       WHERE p.prokind IN ('f', 'p')
         AND ((n.nspname, p.proname) IN (SELECT * FROM unnest($1::text[], $2::text[])) OR p.oid = ANY($3::oid[]))`,
-    [scope.functions.map((f) => f.schema), scope.functions.map((f) => f.name), [...triggerFunctionOids]],
+    [scope.functions.map((f) => f.schema), scope.functions.map((f) => f.name), [...triggerFunctionOids, ...(scope.functionOids ?? [])]],
   )).rows;
+  SNAPSHOT_FUNCTION_OIDS.set(snapshot, functions.map((f) => Number(f.oid)));
   for (const f of functions) {
     const name = `${f.nspname}.${f.proname}(${f.args})`;
     put('function', name, {
@@ -261,7 +301,8 @@ export async function captureSnapshot(client: Queryable, scope: SnapshotScope): 
       bodyHash: String(f.body_hash),
       definition: String(f.def),
     });
-    put('grant', `function ${name}`, { privileges: sortedStrings(f.privileges) });
+    const privileges = sortedStrings(f.privileges);
+    put('grant', `function ${name}`, { privileges, effective: effectiveAccess(f.effective, privileges) });
   }
 
   return snapshot;
@@ -286,7 +327,15 @@ export function diffSnapshots(before: CatalogSnapshot, after: CatalogSnapshot): 
       const skip = NOT_COMPARED[a.kind] ?? [];
       const fields = [...new Set([...Object.keys(a.props), ...Object.keys(b.props)])]
         .filter((field) => !skip.includes(field) && !same(a.props[field], b.props[field]));
-      if (fields.length > 0) changes.push({ kind: a.kind, object: a.object, change: 'modified', before: a.props, after: b.props, fields });
+      if (fields.length > 0) {
+        const change: PlanChange = { kind: a.kind, object: a.object, change: 'modified', before: a.props, after: b.props, fields };
+        if (a.kind === 'grant') {
+          const notes = grantAccessChanges(a.props, b.props)
+            .map((x) => `${describeAccess(x)}${x.role === 'PUBLIC' && x.change === 'lost' ? PUBLIC_LOST_NOTE : ACCESS_NOTE[x.change]}`);
+          if (notes.length > 0) change.notes = notes;
+        }
+        changes.push(change);
+      }
     }
   }
   return changes.sort((x, y) =>
@@ -298,7 +347,45 @@ const KIND_LABEL: Record<PlanKind, string> = {
   policy: 'Policies', trigger: 'Triggers', function: 'Functions', grant: 'Grants',
 };
 
-const WIDE_ROLES = new Set(['public', 'PUBLIC', 'anon']);
+/** How `role` holds `privilege`: `via PUBLIC`, `direct grant`, `role membership` or `none`. */
+function accessSource(role: string, privilege: string, props: Record<string, unknown>): string {
+  const literal = ((props.privileges as string[]) ?? []).map((p) => p.replace(/\*$/, ''));
+  const effective = (props.effective as string[]) ?? [];
+  if (!effective.includes(`${role}=${privilege}`)) return 'none';
+  if (role === 'PUBLIC') return 'granted';
+  if (literal.includes(`${role}=${privilege}`)) return 'direct grant';
+  if (literal.includes(`PUBLIC=${privilege}`)) return 'via PUBLIC';
+  return 'role membership';
+}
+
+/**
+ * Per role and privilege: the effective-access changes of a modified grant.
+ * `lost`/`gained` drive the risk; `same` (access unchanged, ACL shape changed)
+ * only becomes a note.
+ */
+const ACCESS_NOTE = { same: ' (no change in access)', lost: ' (access lost)', gained: ' (access gained)' } as const;
+// PUBLIC's own entry: anon/authenticated may keep access through a direct grant.
+const PUBLIC_LOST_NOTE = ' (PUBLIC entry removed; see anon/authenticated)';
+
+function describeAccess(x: { role: string; privilege: string; from: string; to: string }): string {
+  return `${x.role} ${x.privilege}: ${x.from} → ${x.to}`;
+}
+
+function grantAccessChanges(before: Record<string, unknown>, after: Record<string, unknown>) {
+  const b = new Set((before.effective as string[]) ?? []);
+  const a = new Set((after.effective as string[]) ?? []);
+  const entries = [...new Set([...b, ...a])].sort();
+  const out: Array<{ role: string; privilege: string; change: 'lost' | 'gained' | 'same'; from: string; to: string }> = [];
+  for (const entry of entries) {
+    const [role, privilege] = entry.split('=');
+    const from = accessSource(role, privilege, before);
+    const to = accessSource(role, privilege, after);
+    const change = b.has(entry) && !a.has(entry) ? 'lost' : !b.has(entry) && a.has(entry) ? 'gained' : 'same';
+    if (change === 'same' && from === to) continue;
+    out.push({ role, privilege, change, from, to });
+  }
+  return out;
+}
 
 function fmt(value: unknown): string {
   if (value === null || value === undefined) return 'none';
@@ -330,14 +417,21 @@ export function findRiskyChanges(changes: PlanChange[]): RiskyChange[] {
     }
 
     if (c.kind === 'grant') {
-      const beforePrivs = new Set((c.change === 'added' ? [] : before.privileges as string[]) ?? []);
-      const widened = ((after.privileges as string[]) ?? [])
-        .filter((p) => !beforePrivs.has(p) && WIDE_ROLES.has(p.split('=')[0]));
-      // A brand-new function/table is granted to PUBLIC by default: only flag
-      // grants on objects that already existed.
-      if (c.change === 'modified' && widened.length > 0) {
-        add('grant_widened', c, `${c.object} newly grants ${widened.join(', ')}`);
-      }
+      // Risk is judged on EFFECTIVE access (has_*_privilege), not on the ACL's
+      // literal shape: anon losing a direct grant it also has via PUBLIC
+      // changes nothing. A brand-new function/table is granted to PUBLIC by
+      // default: only grants on objects that already existed are judged.
+      if (c.change !== 'modified') continue;
+      const access = grantAccessChanges(before, after);
+      // PUBLIC losing a privilege anon and authenticated both keep (the
+      // definer-RPC REVOKE ... FROM PUBLIC + direct GRANT) is not a narrowing
+      // for the Supabase API roles: it stays a note.
+      const keeps = (role: string, privilege: string) => ((after.effective as string[]) ?? []).includes(`${role}=${privilege}`);
+      const lost = access.filter((x) => x.change === 'lost'
+        && !(x.role === 'PUBLIC' && keeps('anon', x.privilege) && keeps('authenticated', x.privilege)));
+      const gained = access.filter((x) => x.change === 'gained');
+      if (lost.length > 0) add('grant_narrowed', c, `${c.object} loses access: ${lost.map(describeAccess).join('; ')}`);
+      if (gained.length > 0) add('grant_widened', c, `${c.object} newly grants access: ${gained.map(describeAccess).join('; ')}`);
       continue;
     }
 
@@ -421,7 +515,9 @@ export function renderPlan(changes: PlanChange[], risky: RiskyChange[]): string[
       const detail = c.change === 'modified' ? '' : describeProps(c.kind, (c.after ?? c.before)!);
       lines.push(`    ${mark} ${c.object}${detail ? paint.gray(` (${detail})`) : ''}${flag}`);
       if (c.change === 'modified') {
+        for (const note of c.notes ?? []) lines.push(`        ${note}`);
         for (const field of c.fields ?? []) {
+          if (c.kind === 'grant' && field === 'effective' && c.notes?.length) continue;
           if (field === 'bodyHash') {
             lines.push(`        body: ${paint.gray('changed')}`);
             continue;
