@@ -844,12 +844,24 @@ async function runDiffAgainstDb(
   }
   await loadPgModule();
 
+  // What push would read after `generate`: the .sql files already on disk (older
+  // migrations, leftovers generate does not delete), overridden by what generate writes.
+  const outputDirs: Record<string, string> = {
+    migrations: config.output.migrations,
+    policies: config.output.policies,
+    triggers: config.output.triggers,
+    rpcs: config.output.rpcs,
+  };
   const groups: PushGroup[] = ['migrations', 'policies', 'triggers', 'rpcs'].map((key) => {
     const group = generated.find((g) => g.category === key);
-    const files = (group?.files ?? [])
-      .filter((file) => file.absolutePath.endsWith('.sql'))
-      .sort((a, b) => a.absolutePath.localeCompare(b.absolutePath))
-      .map((file) => ({ path: file.displayPath, sql: file.content }));
+    const byPath = new Map<string, string>();
+    for (const file of collectSqlFiles(outputDirs[key])) byPath.set(resolve(file), readFileSync(file, 'utf-8'));
+    for (const file of group?.files ?? []) {
+      if (file.absolutePath.endsWith('.sql')) byPath.set(resolve(file.absolutePath), file.content);
+    }
+    const files = [...byPath.keys()]
+      .sort((a, b) => a.localeCompare(b))
+      .map((absolute) => ({ path: relativePathFromCwd(absolute), sql: byPath.get(absolute)! }));
     return { key, title: group?.title ?? key, files };
   });
   const migrationDestructive = groups[0].files.flatMap((file) => findDestructiveStatements(file.path, file.sql));

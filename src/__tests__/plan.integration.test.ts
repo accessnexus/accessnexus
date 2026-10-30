@@ -165,6 +165,17 @@ describe.skipIf(!DB_URL)('live change plan against a real Supabase Postgres', ()
     expect(check.json.changes.length).toBe(plan.json.changes.length);
   }, 60_000);
 
+  it('includes migrations already on disk that the database has not applied yet', async () => {
+    writeSchema(notesSchema());
+    expect((await cli('generate')).code).toBe(0);
+    // Up to date: generate would write no new migration, but push still applies __init.
+    const plan = await cli('diff', '--against-db');
+    expect(plan.json.generatedUpToDate).toBe(true);
+    expect(plan.json.wouldApply.some((f: string) => /migrations\/.*__init\.sql$/.test(f))).toBe(true);
+    expect(find(plan.json, 'table', 'public.notes')?.change).toBe('added');
+    expect(await migrationsTableAbsent()).toBe(true);
+  }, 60_000);
+
   it('database matching the schema: no changes, and push --dry-run carries the same plan', async () => {
     writeSchema(notesSchema());
     expect((await cli('generate')).code).toBe(0);
