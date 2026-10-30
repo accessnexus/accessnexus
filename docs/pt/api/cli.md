@@ -121,9 +121,33 @@ Mostra o que o `generate` mudaria; não grava nada. Rode antes do `generate`: de
 | `--sql-only` | boolean | `false` | Só SQL. |
 | `--sdk-only` | boolean | `false` | Só o SDK. |
 | `--prefix <name>` | string | `accessnexus` | Prefixo dos nomes de policies. |
-| `--check` | boolean | `false` | Sai com `1` e `GENERATED_OUT_OF_DATE` quando algo mudaria (para CI). |
+| `--check` | boolean | `false` | Sai com `1` e `GENERATED_OUT_OF_DATE` quando algo mudaria (para CI). Com `--against-db`: sai com `1` e `LIVE_DB_CHANGES` quando o banco mudaria. |
+| `--against-db` | boolean | `false` | Plano de mudanças no banco real: ensaia o push contra o banco (veja abaixo). |
+| `--url <db-url>` | string | veja [URL do banco](#database-url) | Com `--against-db`. Alias: `--db-url`. |
+| `--adapter <name>` / `--target <name>` | string | nenhum | Com `--against-db`: mesma resolução do `push`. |
+| `--allow-destructive` | boolean | `false` | Com `--against-db`: planeja como o `push --allow-destructive` faria (senão vira um blocker `DESTRUCTIVE_MIGRATION`). |
+| `--replace-foreign-policies` / `--replace-foreign-triggers` | boolean | `false` | Com `--against-db`: inclui os drops que o push faria com essas flags (senão viram blockers `FOREIGN_*`). |
 
 Arquivos removidos são reportados para policies, triggers e RPCs (um `.sql` sobrando nessas pastas). As pastas de migrations e do SDK nunca reportam remoções.
+
+Sem `--against-db`, o `diff` compara o schema com os **arquivos** gerados, não com o banco. Quando há uma URL de banco configurada, o resultado traz um `hint` apontando para o `--against-db`.
+
+### Plano contra o banco (`--against-db`) {#live-plan-against-db}
+
+O `diff --against-db` mostra o que o `push` mudaria de fato no banco. Funciona por ensaio:
+
+1. Gera o SQL do schema atual em memória (o que `generate` + `push` aplicariam) e conecta (`DB_URL_MISSING`, `PG_DRIVER_MISSING`, `DB_CONNECTION_FAILED`).
+2. Pega o advisory lock do push sem esperar: se um push estiver rodando, `PUSH_LOCKED`.
+3. `BEGIN` e um snapshot do catálogo de tudo que o schema gerencia: tabelas, RLS ligado/forçado, colunas (tipo via `format_type`, nulabilidade, default via `pg_get_expr`), constraints, índices, policies (comando, permissive, roles, `USING`/`WITH CHECK`), triggers (momento, eventos, nível, `WHEN`, função), as funções que o SQL define ou que os triggers chamam (argumentos, retorno, linguagem, volatilidade, security definer, `proconfig`, hash do corpo, `pg_get_functiondef`) e os grants dessas tabelas e funções.
+4. Roda o caminho de código do push na transação: os mesmos drops de policies/triggers estranhos (só com as flags `--replace-*`), as mesmas regras de pular/reaplicar, os mesmos arquivos na mesma ordem.
+5. Tira o snapshot de novo, `ROLLBACK`, libera o lock. Nada persiste: nenhum objeto, nenhuma linha em `accessnexus_migrations`.
+
+O resultado lista `changes` (`kind`, `object`, `change`, `before`, `after`, `fields`) e `riskyChanges`: mudança de volatilidade/config/security de função, roles de policy ampliadas (por exemplo `authenticated` → `public`), policies, triggers, funções, tabelas ou colunas removidas, default de coluna removido, mudança de tipo, `NOT NULL` relaxado, RLS desligado ou sem FORCE, `anon`/`PUBLIC` recebendo grant novo. As recusas em que o push real pararia (`FOREIGN_POLICIES`, `FOREIGN_TRIGGERS`, `DESTRUCTIVE_MIGRATION`, `PUSH_ROLE_NO_BYPASSRLS`) ficam em `blockers`. Se o Postgres rejeitaria um arquivo, o comando sai com `1` e `PUSH_WOULD_FAIL`, com `failed` (`file`, `message`, `sqlState`); nada foi persistido.
+
+```bash
+npx accessnexus diff --against-db --json
+npx accessnexus diff --against-db --check     # CI: sai com 1 quando o push mudaria o banco
+```
 
 ## push
 
@@ -134,7 +158,7 @@ Aplica o SQL gerado no banco.
 | `--url <db-url>` | string | veja [URL do banco](#database-url) | Connection string do Postgres. Alias: `--db-url` (a flag que o `init` usa); passar as duas com valores diferentes gera `INVALID_FLAG_VALUE`. |
 | `--adapter <name>` | string | nenhum | Adapter a usar quando `config.adapters` lista vários. |
 | `--target <name>` | string | nenhum | Entrada de `config.targets`. |
-| `--dry-run` | boolean | `false` | Lista os arquivos e os statements destrutivos. Com uma URL de banco, também conecta só para leitura e lista as policies estranhas (`foreignPolicies`, `wouldRefuse`); sem URL, `foreignPolicies` é `null`. Nunca escreve. |
+| `--dry-run` | boolean | `false` | Lista os arquivos e os statements destrutivos. Com uma URL de banco, também ensaia o push dos arquivos em disco numa transação desfeita ([plano contra o banco](#live-plan-against-db), em `livePlan`) e lista policies e triggers estranhos (`foreignPolicies`, `foreignTriggers`, `wouldRefuse`); sem URL, esses campos são `null`. Nada persiste. |
 | `--output <dir>` | string | `./generated` | Lê o SQL das pastas dentro de `<dir>`. |
 | `--prefix <name>` | string | `accessnexus` | Prefixo dos nomes de policies (usado na verificação de defasagem). |
 | `--schema <path>` | string | `config.schema` ou `./accessnexus.schema.ts` | Arquivo de schema (usado na verificação de defasagem). |
@@ -149,7 +173,7 @@ Etapas, em ordem:
 1. Coleta os arquivos `.sql` (recursivamente, ordenados por caminho) das pastas migrations, policies, triggers e rpcs. Nenhum: `NOTHING_TO_PUSH`.
 2. Sem `--dry-run`: exige uma URL de banco (`DB_URL_MISSING`) e o driver `pg` (`PG_DRIVER_MISSING`).
 3. Regera o SQL em memória e compara com os arquivos: qualquer diferença gera `GENERATED_OUT_OF_DATE` (também com `--dry-run`).
-4. O `--dry-run` para aqui (depois de uma verificação só de leitura das policies estranhas, quando há URL de banco).
+4. O `--dry-run` para aqui (depois do ensaio do [plano contra o banco](#live-plan-against-db), quando há URL de banco).
 5. Conecta (`DB_CONNECTION_FAILED`). Se algum arquivo contém `SECURITY DEFINER`, a role precisa ignorar o RLS (`PUSH_ROLE_NO_BYPASSRLS`).
 6. Obtém um advisory lock (espera, com um aviso, se outro push estiver com ele) e abre (`BEGIN`) uma única transação para tudo o que vem abaixo. Cria `public.accessnexus_migrations` (RLS habilitado e forçado), se não existir.
 7. Lê `pg_policies` de cada tabela que o schema gerencia. Uma policy cujo nome não é um dos que o AccessNexus gera (`<prefix>_<table>_<op>`) é estranha: o Postgres combina policies permissivas com OR, então ela continuaria concedendo acesso ao lado das geradas. Sem `--replace-foreign-policies`: `FOREIGN_POLICIES` (a mensagem e `foreignPolicies` listam tabela + policy), nada é aplicado. Com a flag: elas são removidas (`droppedPolicies`) dentro da transação.
@@ -309,6 +333,39 @@ interface DiffResult {
   summary: { added: number; modified: number; removed: number };
   changes: Array<{ path: string; status: 'added' | 'modified' | 'removed'; diff: string }>;
   warnings: SchemaIssue[];
+  hint?: string;        // set when a database URL is configured: points to diff --against-db
+}
+
+// diff --against-db: the live plan (PlanChange, RiskyChange and LivePlan are spelled out in llms.txt)
+interface DiffAgainstDbResult extends LivePlan {
+  ok: boolean;          // false with --check and changes (LIVE_DB_CHANGES) or when the push would fail (PUSH_WOULD_FAIL)
+  command: 'diff'; version: string;
+  schemaPath: string;
+  againstDb: true;
+  adapter: string; target: string | null;
+  generatedUpToDate: boolean;                             // false: planned from the schema, run generate before push
+  warnings: SchemaIssue[];
+}
+
+interface LivePlan {
+  database: string;                                       // redacted URL
+  wouldApply: string[];                                   // files push would execute
+  skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
+  droppedPolicies: ForeignPolicy[]; droppedTriggers: ForeignTrigger[]; // only with the --replace-* flags
+  foreignPolicies: ForeignPolicy[]; foreignTriggers: ForeignTrigger[];
+  blockers: Array<{ code: string; message: string; hint?: string }>; // refusals the real push stops at
+  failed: null | { file: string | null; code: string; message: string; sqlState: string | null };
+  changed: boolean;
+  summary: { added: number; modified: number; removed: number };
+  changes: Array<{
+    kind: 'table' | 'column' | 'constraint' | 'index' | 'rls' | 'policy' | 'trigger' | 'function' | 'grant';
+    object: string;                                       // e.g. 'public.notes.accessnexus_notes_select', 'public.fn(uuid)'
+    change: 'added' | 'removed' | 'modified';
+    before?: Record<string, unknown>; after?: Record<string, unknown>;
+    fields?: string[];                                    // modified: properties that differ
+  }>;
+  riskyChanges: Array<{ code: string; kind: string; object: string; message: string }>;
+  persisted: false;
 }
 
 interface PushResult {
@@ -319,7 +376,8 @@ interface PushResult {
   plan: Array<{ category: 'migrations' | 'policies' | 'triggers' | 'rpcs'; files: string[] }>;
   destructive?: DestructiveStatement[];                   // --dry-run only: all migration files
   foreignPolicies?: ForeignPolicy[] | null;               // --dry-run only: null = no database URL, not checked
-  wouldRefuse?: boolean;                                  // --dry-run only: foreign policies and no --replace-foreign-policies
+  wouldRefuse?: boolean;                                  // --dry-run only: foreign policies/triggers without their --replace-* flag, or livePlan blockers/failed
+  livePlan?: LivePlan | null;                             // --dry-run only: null = no database URL (or unreachable)
   applied: string[];
   droppedPolicies: ForeignPolicy[];                       // dropped by --replace-foreign-policies
   skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;

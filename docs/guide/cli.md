@@ -13,7 +13,7 @@ The day-to-day loop is the same for people and for coding agents:
 npx accessnexus validate          # 1. check the schema
 npx accessnexus diff              # 2. review the SQL that would change
 npx accessnexus generate          # 3. write SQL + SDK
-npx accessnexus push --dry-run    # 4. see what would be applied
+npx accessnexus diff --against-db # 4. what push would really change in the database (riskyChanges)
 npx accessnexus push              # 5. apply it
 ```
 
@@ -83,6 +83,34 @@ It also lists `destructive` statements (dropped tables or columns, column type c
 
 `--check` turns pending changes into a failure: exit `1`, `error.code` `GENERATED_OUT_OF_DATE`, `ok: false` in JSON. A difference in the `-- Generated at:` header line alone never counts as a change.
 
+### Against the live database: `diff --against-db`
+
+Plain `diff` compares the schema with the generated files, not with the database: changes made directly in the database (Studio, hand-written SQL, an imported project) are invisible to it. `diff --against-db` answers "what will `push` actually change?":
+
+```bash
+npx accessnexus diff --against-db
+npx accessnexus diff --against-db --json
+npx accessnexus diff --against-db --check   # CI: exit 1 when push would change the database
+```
+
+It connects with the same URL resolution as `push`, takes the push lock (without waiting), opens a transaction, snapshots the catalog of the managed tables and functions, applies exactly what `push` would, snapshots again and rolls back. Nothing persists. The output is grouped by kind, with `before → after` for every changed property:
+
+```text
+  Policies:
+    ~ public.notes.accessnexus_notes_select
+        using: (owner_id = ( SELECT auth.uid() AS uid)) → true
+  Functions:
+    ~ public.note_count() (risky)
+        volatility: STABLE → VOLATILE
+        config: search_path=public, work_mem=64MB → search_path=pg_catalog, public
+
+  ⚠ Risky changes: 2
+    ! [function_volatility_changed] function public.note_count() STABLE → VOLATILE
+    ! [function_config_changed] function public.note_count() config [...] → [...]
+```
+
+Review `riskyChanges` (volatility and `SET` config changes, widened policy roles, dropped policies, lost defaults, type changes, RLS disabled) before pushing. Pass the same `--replace-foreign-policies`, `--replace-foreign-triggers` or `--allow-destructive` you would pass to `push` to see their effect; without them the refusals are listed as `blockers`. If Postgres would reject a file, the command exits `1` with `PUSH_WOULD_FAIL` and names the file and the SQL error. `push --dry-run` runs the same plan automatically (as `livePlan`) when a database URL is set.
+
 ## Write SQL and the SDK: `generate`
 
 ```bash
@@ -128,7 +156,7 @@ On later runs, unchanged files are skipped, changed policy, trigger and RPC file
 
 | Flag | Effect |
 | --- | --- |
-| `--dry-run` | List the files and every destructive statement in the migrations. Needs no database URL or driver; when a URL is set it also lists foreign policies (read-only). Still refuses stale SQL. |
+| `--dry-run` | List the files and every destructive statement in the migrations. Needs no database URL or driver; when a URL is set it also rehearses the push in a rolled-back transaction and returns the [live plan](#against-the-live-database-diff-against-db) (`livePlan`) and the foreign policies and triggers. Nothing persists. Still refuses stale SQL. |
 | `--allow-destructive` | Apply migrations that drop tables or columns or change column types. |
 | `--replace-foreign-policies` | Drop the foreign policies `FOREIGN_POLICIES` listed, inside the push transaction. Only after reviewing them ([Existing project](/guide/existing-project#the-safe-first-push)). |
 | `--seed` | After a successful push, run the seed. |

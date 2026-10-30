@@ -13,7 +13,7 @@ O ciclo do dia a dia é o mesmo para pessoas e para coding agents:
 npx accessnexus validate          # 1. checa o schema
 npx accessnexus diff              # 2. revisa o SQL que mudaria
 npx accessnexus generate          # 3. escreve SQL + SDK
-npx accessnexus push --dry-run    # 4. mostra o que seria aplicado
+npx accessnexus diff --against-db # 4. o que o push mudaria de fato no banco (riskyChanges)
 npx accessnexus push              # 5. aplica
 ```
 
@@ -83,6 +83,34 @@ Ele também lista os statements `destructive` (tabelas ou colunas removidas, mud
 
 `--check` transforma mudanças pendentes em falha: exit `1`, `error.code` `GENERATED_OUT_OF_DATE`, `ok: false` no JSON. Uma diferença só na linha de cabeçalho `-- Generated at:` nunca conta como mudança.
 
+### Contra o banco real: `diff --against-db` {#against-the-live-database-diff-against-db}
+
+O `diff` simples compara o schema com os arquivos gerados, não com o banco: mudanças feitas direto no banco (Studio, SQL escrito à mão, um projeto importado) ficam invisíveis para ele. O `diff --against-db` responde "o que o `push` vai mudar de fato?":
+
+```bash
+npx accessnexus diff --against-db
+npx accessnexus diff --against-db --json
+npx accessnexus diff --against-db --check   # CI: sai com 1 quando o push mudaria o banco
+```
+
+Ele conecta com a mesma resolução de URL do `push`, pega o lock do push (sem esperar), abre uma transação, tira um snapshot do catálogo das tabelas e funções gerenciadas, aplica exatamente o que o `push` aplicaria, tira outro snapshot e desfaz tudo (rollback). Nada persiste. A saída é agrupada por tipo, com `antes → depois` para cada propriedade alterada:
+
+```text
+  Policies:
+    ~ public.notes.accessnexus_notes_select
+        using: (owner_id = ( SELECT auth.uid() AS uid)) → true
+  Functions:
+    ~ public.note_count() (risky)
+        volatility: STABLE → VOLATILE
+        config: search_path=public, work_mem=64MB → search_path=pg_catalog, public
+
+  ⚠ Risky changes: 2
+    ! [function_volatility_changed] function public.note_count() STABLE → VOLATILE
+    ! [function_config_changed] function public.note_count() config [...] → [...]
+```
+
+Revise os `riskyChanges` (mudanças de volatilidade e de config `SET`, roles de policy ampliadas, policies removidas, defaults perdidos, mudanças de tipo, RLS desligado) antes do push. Passe as mesmas `--replace-foreign-policies`, `--replace-foreign-triggers` ou `--allow-destructive` que passaria ao `push` para ver o efeito delas; sem elas, as recusas aparecem em `blockers`. Se o Postgres rejeitaria um arquivo, o comando sai com `1` e `PUSH_WOULD_FAIL`, com o arquivo e o erro SQL. O `push --dry-run` roda o mesmo plano automaticamente (em `livePlan`) quando há URL de banco.
+
 ## Escreva o SQL e o SDK: `generate` {#write-sql-and-the-sdk-generate}
 
 ```bash
@@ -128,7 +156,7 @@ Nas execuções seguintes, arquivos inalterados são pulados, arquivos de policy
 
 | Flag | Efeito |
 | --- | --- |
-| `--dry-run` | Lista os arquivos e todos os statements destrutivos nas migrations. Não precisa de URL de banco nem de driver; quando há URL, também lista as policies estranhas (só leitura). Ainda recusa SQL desatualizado. |
+| `--dry-run` | Lista os arquivos e todos os statements destrutivos nas migrations. Não precisa de URL de banco nem de driver; quando há URL, também ensaia o push numa transação desfeita e devolve o [plano contra o banco](#against-the-live-database-diff-against-db) (`livePlan`) e as policies e triggers estranhos. Nada persiste. Ainda recusa SQL desatualizado. |
 | `--allow-destructive` | Aplica migrations que removem tabelas ou colunas ou mudam tipos de coluna. |
 | `--replace-foreign-policies` | Remove as policies estranhas listadas pelo `FOREIGN_POLICIES`, dentro da transação do push. Só depois de revisá-las ([Projeto existente](/pt/guide/existing-project#the-safe-first-push)). |
 | `--seed` | Depois de um push bem-sucedido, roda o seed. |
