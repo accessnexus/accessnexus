@@ -596,13 +596,24 @@ export default defineSchema({
       CREATE FUNCTION public.count_note() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN UPDATE public.note_log SET n = n + 1; RETURN NEW; END; $$;
       CREATE TRIGGER count_note AFTER INSERT ON public.notes FOR EACH ROW EXECUTE FUNCTION public.count_note();
+      -- count_note() is shared with a trigger outside the managed tables;
+      -- touch_note() is used only by the foreign trigger (orphaned once dropped).
+      DROP SCHEMA IF EXISTS other CASCADE;
+      CREATE SCHEMA other;
+      CREATE TABLE other.events (id int);
+      CREATE TRIGGER other_count AFTER INSERT ON other.events FOR EACH ROW EXECUTE FUNCTION public.count_note();
+      CREATE FUNCTION public.touch_note() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$;
+      CREATE TRIGGER touch_note BEFORE INSERT ON public.notes FOR EACH ROW EXECUTE FUNCTION public.touch_note();
     `);
     writeSchema(notesSchema());
     expect((await cli('generate')).code).toBe(0);
 
     const dry = await cli('push', '--dry-run');
     expect(dry.json.wouldRefuse).toBe(true);
-    expect(dry.json.foreignTriggers).toEqual([{ schema: 'public', table: 'notes', trigger: 'count_note' }]);
+    expect(dry.json.foreignTriggers).toEqual([
+      { schema: 'public', table: 'notes', trigger: 'count_note', function: 'count_note()' },
+      { schema: 'public', table: 'notes', trigger: 'touch_note', function: 'touch_note()' },
+    ]);
 
     const refused = await cli('push');
     expect(refused.code).toBe(1);
@@ -610,9 +621,26 @@ export default defineSchema({
     expect(refused.json.error.hint).toContain('--replace-foreign-triggers');
     expect((await admin.query(`SELECT to_regclass('public.accessnexus_migrations') IS NULL AS absent`)).rows[0].absent).toBe(true);
 
+    // The live plan: dropping the triggers does not drop (or report as dropped) their functions.
+    const plan = await cli('diff', '--against-db', '--replace-foreign-triggers', '--url', DB_URL!);
+    expect(plan.json.riskyChanges.map((r: any) => r.code)).not.toContain('function_dropped');
+    expect(plan.json.changes.filter((c: any) => c.kind === 'function' && c.change === 'removed')).toEqual([]);
+    const kept = [
+      { function: 'count_note()', dependents: ['trigger other_count on table other.events'], orphaned: false },
+      { function: 'touch_note()', dependents: [], orphaned: true },
+    ];
+    expect(plan.json.keptTriggerFunctions).toEqual(kept);
+
     const replaced = await cli('push', '--replace-foreign-triggers');
     expect(replaced.code).toBe(0);
-    expect(replaced.json.droppedTriggers).toEqual([{ schema: 'public', table: 'notes', trigger: 'count_note' }]);
+    expect(replaced.json.droppedTriggers.map((t: any) => t.trigger)).toEqual(['count_note', 'touch_note']);
+    expect(replaced.json.keptTriggerFunctions).toEqual(kept);
+    // Both functions survive; the trigger outside the managed tables still works.
+    const fns = await admin.query(`SELECT to_regprocedure('public.count_note()') IS NOT NULL AS shared, to_regprocedure('public.touch_note()') IS NOT NULL AS orphan`);
+    expect(fns.rows[0]).toEqual({ shared: true, orphan: true });
+    await admin.query(`UPDATE public.note_log SET n = 0; INSERT INTO other.events VALUES (1)`);
+    expect((await admin.query('SELECT n FROM public.note_log')).rows[0].n).toBe(1);
+    await admin.query('DROP SCHEMA other CASCADE');
     const left = await admin.query(`SELECT tgname FROM pg_trigger WHERE tgrelid = 'public.notes'::regclass AND NOT tgisinternal`);
     expect(left.rows.map((r) => r.tgname)).not.toContain('count_note');
   }, 60_000);
