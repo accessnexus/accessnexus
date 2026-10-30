@@ -46,8 +46,8 @@ type AccessNexusTransport = {
 // not Promises, so it cannot match AccessNexusTransport structurally).
 type AccessNexusProvider = {
   auth: unknown;
-  from: (table: any) => any;
-  rpc: (name: any, args?: any) => any;
+  from(table: string): unknown;
+  rpc(name: string, args?: object): unknown;
 };
 
 function buildSelectClause(
@@ -69,7 +69,7 @@ type OrganizationsRelations = {
 type OrganizationsInclude = Partial<Record<keyof OrganizationsRelations, true>>;
 type OrganizationsWithInclude<TInclude extends OrganizationsInclude | undefined> =
   RowOf<'organizations'>
-  & (TInclude extends { 'owner': true } ? { 'owner': OrganizationsRelations['owner'] | null } : {})
+  & (TInclude extends { 'owner': true } ? { 'owner': OrganizationsRelations['owner'] | null } : unknown)
 ;
 const organizationsJoins: Record<keyof OrganizationsRelations & string, string> = {
   'owner': 'owner:profiles!organizations_owner_id_fkey(*)',
@@ -83,9 +83,9 @@ type OrgMembersRelations = {
 type OrgMembersInclude = Partial<Record<keyof OrgMembersRelations, true>>;
 type OrgMembersWithInclude<TInclude extends OrgMembersInclude | undefined> =
   RowOf<'org_members'>
-  & (TInclude extends { 'org': true } ? { 'org': OrgMembersRelations['org'] | null } : {})
-  & (TInclude extends { 'user': true } ? { 'user': OrgMembersRelations['user'] | null } : {})
-  & (TInclude extends { 'invited_by': true } ? { 'invited_by': OrgMembersRelations['invited_by'] | null } : {})
+  & (TInclude extends { 'org': true } ? { 'org': OrgMembersRelations['org'] | null } : unknown)
+  & (TInclude extends { 'user': true } ? { 'user': OrgMembersRelations['user'] | null } : unknown)
+  & (TInclude extends { 'invited_by': true } ? { 'invited_by': OrgMembersRelations['invited_by'] | null } : unknown)
 ;
 const org_membersJoins: Record<keyof OrgMembersRelations & string, string> = {
   'org': 'org:organizations!org_members_org_id_fkey(*)',
@@ -100,8 +100,8 @@ type ProjectsRelations = {
 type ProjectsInclude = Partial<Record<keyof ProjectsRelations, true>>;
 type ProjectsWithInclude<TInclude extends ProjectsInclude | undefined> =
   RowOf<'projects'>
-  & (TInclude extends { 'org': true } ? { 'org': ProjectsRelations['org'] | null } : {})
-  & (TInclude extends { 'created_by': true } ? { 'created_by': ProjectsRelations['created_by'] | null } : {})
+  & (TInclude extends { 'org': true } ? { 'org': ProjectsRelations['org'] | null } : unknown)
+  & (TInclude extends { 'created_by': true } ? { 'created_by': ProjectsRelations['created_by'] | null } : unknown)
 ;
 const projectsJoins: Record<keyof ProjectsRelations & string, string> = {
   'org': 'org:organizations!projects_org_id_fkey(*)',
@@ -117,10 +117,10 @@ type TasksRelations = {
 type TasksInclude = Partial<Record<keyof TasksRelations, true>>;
 type TasksWithInclude<TInclude extends TasksInclude | undefined> =
   RowOf<'tasks'>
-  & (TInclude extends { 'org': true } ? { 'org': TasksRelations['org'] | null } : {})
-  & (TInclude extends { 'project': true } ? { 'project': TasksRelations['project'] | null } : {})
-  & (TInclude extends { 'assignee': true } ? { 'assignee': TasksRelations['assignee'] | null } : {})
-  & (TInclude extends { 'reporter': true } ? { 'reporter': TasksRelations['reporter'] | null } : {})
+  & (TInclude extends { 'org': true } ? { 'org': TasksRelations['org'] | null } : unknown)
+  & (TInclude extends { 'project': true } ? { 'project': TasksRelations['project'] | null } : unknown)
+  & (TInclude extends { 'assignee': true } ? { 'assignee': TasksRelations['assignee'] | null } : unknown)
+  & (TInclude extends { 'reporter': true } ? { 'reporter': TasksRelations['reporter'] | null } : unknown)
 ;
 const tasksJoins: Record<keyof TasksRelations & string, string> = {
   'org': 'org:organizations!tasks_org_id_fkey(*)',
@@ -137,9 +137,9 @@ type CommentsRelations = {
 type CommentsInclude = Partial<Record<keyof CommentsRelations, true>>;
 type CommentsWithInclude<TInclude extends CommentsInclude | undefined> =
   RowOf<'comments'>
-  & (TInclude extends { 'org': true } ? { 'org': CommentsRelations['org'] | null } : {})
-  & (TInclude extends { 'task': true } ? { 'task': CommentsRelations['task'] | null } : {})
-  & (TInclude extends { 'author': true } ? { 'author': CommentsRelations['author'] | null } : {})
+  & (TInclude extends { 'org': true } ? { 'org': CommentsRelations['org'] | null } : unknown)
+  & (TInclude extends { 'task': true } ? { 'task': CommentsRelations['task'] | null } : unknown)
+  & (TInclude extends { 'author': true } ? { 'author': CommentsRelations['author'] | null } : unknown)
 ;
 const commentsJoins: Record<keyof CommentsRelations & string, string> = {
   'org': 'org:organizations!comments_org_id_fkey(*)',
@@ -154,8 +154,8 @@ type InvitationsRelations = {
 type InvitationsInclude = Partial<Record<keyof InvitationsRelations, true>>;
 type InvitationsWithInclude<TInclude extends InvitationsInclude | undefined> =
   RowOf<'invitations'>
-  & (TInclude extends { 'org': true } ? { 'org': InvitationsRelations['org'] | null } : {})
-  & (TInclude extends { 'invited_by': true } ? { 'invited_by': InvitationsRelations['invited_by'] | null } : {})
+  & (TInclude extends { 'org': true } ? { 'org': InvitationsRelations['org'] | null } : unknown)
+  & (TInclude extends { 'invited_by': true } ? { 'invited_by': InvitationsRelations['invited_by'] | null } : unknown)
 ;
 const invitationsJoins: Record<keyof InvitationsRelations & string, string> = {
   'org': 'org:organizations!invitations_org_id_fkey(*)',

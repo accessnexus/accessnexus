@@ -233,7 +233,7 @@ describe('Supabase Adapter — RPC Client Generation (manual mode)', () => {
     expect(client.content).toContain("provider.rpc('get_stats', args)");
   });
 
-  it('should use empty object for RPCs with no args', () => {
+  it('makes the args of a no-arg RPC optional and lint-clean', () => {
     const schema = defineSchema({
       users: table({ columns: { id: 'uuid' } }),
     }, {
@@ -243,7 +243,10 @@ describe('Supabase Adapter — RPC Client Generation (manual mode)', () => {
     });
 
     const client = adapter.generateClient(schema).find(o => o.path === 'client.ts')!;
-    expect(client.content).toContain('hello: (args: {})');
+    expect(client.content).toContain("hello: (args: Functions['hello']['Args'] = {})");
+    const types = adapter.generateClient(schema).find(o => o.path === 'types.ts')!;
+    expect(types.content).toContain('Args: Record<string, never>;');
+    expect(client.content).not.toMatch(/\bany\b/);
   });
 
   it('should not include rpc namespace when no RPCs', () => {

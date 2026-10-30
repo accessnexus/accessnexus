@@ -1152,8 +1152,8 @@ export class SupabaseAdapter implements Adapter {
       `// not Promises, so it cannot match AccessNexusTransport structurally).`,
       `type AccessNexusProvider = {`,
       `  auth: unknown;`,
-      `  from: (table: any) => any;`,
-      `  rpc: (name: any, args?: any) => any;`,
+      `  from(table: string): unknown;`,
+      `  rpc(name: string, args?: object): unknown;`,
       `};`,
       '',
       `function buildSelectClause(`,
@@ -1189,7 +1189,7 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`type ${withIncludeTypeName}<TInclude extends ${includeTypeName} | undefined> =`);
       lines.push(`  RowOf<'${tableName}'>`);
       for (const relation of relations) {
-        lines.push(`  & (TInclude extends { '${relation.alias}': true } ? { '${relation.alias}': ${relTypeName}['${relation.alias}'] | null } : {})`);
+        lines.push(`  & (TInclude extends { '${relation.alias}': true } ? { '${relation.alias}': ${relTypeName}['${relation.alias}'] | null } : unknown)`);
       }
       lines.push(`;`);
       lines.push(`const ${joinConstName}: Record<keyof ${relTypeName} & string, string> = {`);
@@ -1904,7 +1904,7 @@ export class SupabaseAdapter implements Adapter {
           const a = normalizeRpcArg(v);
           return `${k}${a.default !== undefined ? '?' : ''}: ${this.columnTypeToTS(a.type)}`;
         }).join('; ')} }`
-        : '{}';
+        : 'Record<string, never>';
       const returnsType = def.returns ? this.columnTypeToTS(def.returns) : 'unknown';
       lines.push(`      ${name}: {`);
       lines.push(`        Args: ${argsType};`);
@@ -1982,8 +1982,8 @@ export class SupabaseAdapter implements Adapter {
     lines.push(`// not Promises, so it cannot match AccessNexusTransport structurally).`);
     lines.push(`type AccessNexusProvider = {`);
     lines.push(`  auth: unknown;`);
-    lines.push(`  from: (table: any) => any;`);
-    lines.push(`  rpc: (name: any, args?: any) => any;`);
+    lines.push(`  from(table: string): unknown;`);
+    lines.push(`  rpc(name: string, args?: object): unknown;`);
     lines.push(`};`);
     lines.push('');
     lines.push(`function buildSelectClause(`);
@@ -2018,7 +2018,7 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`type ${withIncludeTypeName}<TInclude extends ${includeTypeName} | undefined> =`);
       lines.push(`  RowOf<'${tableName}'>`);
       for (const relation of relations) {
-        lines.push(`  & (TInclude extends { '${relation.alias}': true } ? { '${relation.alias}': ${relTypeName}['${relation.alias}'] | null } : {})`);
+        lines.push(`  & (TInclude extends { '${relation.alias}': true } ? { '${relation.alias}': ${relTypeName}['${relation.alias}'] | null } : unknown)`);
       }
       lines.push(`;`);
       lines.push(`const ${joinConstName}: Record<keyof ${relTypeName} & string, string> = {`);
@@ -2108,9 +2108,14 @@ export class SupabaseAdapter implements Adapter {
     if (rpcEntries.length > 0) {
       lines.push(`    rpc: {`);
       for (const [name, def] of rpcEntries) {
-        const argsType = def.args && Object.keys(def.args).length > 0 ? `Functions['${name}']['Args']` : '{}';
-        lines.push(`      ${name}: (args: ${argsType}) =>`);
-        lines.push(`        provider.rpc('${name}', args),`);
+        if (def.args && Object.keys(def.args).length > 0) {
+          lines.push(`      ${name}: (args: Functions['${name}']['Args']) =>`);
+          lines.push(`        provider.rpc('${name}', args),`);
+        } else {
+          // No arguments: callable as \`client.rpc.${name}()\`.
+          lines.push(`      ${name}: (args: Functions['${name}']['Args'] = {}) =>`);
+          lines.push(`        provider.rpc('${name}', args),`);
+        }
         lines.push('');
       }
       lines.push(`    },`);
