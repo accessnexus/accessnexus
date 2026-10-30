@@ -52,6 +52,10 @@ type AccessNexusProvider = {
 
 The factory is generic over the provider, so `auth` keeps the provider's type: with `createBrowserClient<Database>()` / `createServerClient()` from `@supabase/ssr` or `createClient()` from `@supabase/supabase-js`, `db.auth.signInWithOAuth(...)` is fully typed. To name the client type, pass the provider type: `AccessNexusClient<SupabaseClient<Database>>` (without it, `auth` is `unknown`). Internally the provider is used through a loose query-builder view; each method casts its result to the documented type.
 
+::: tip Import paths
+Examples import `./client.js` (NodeNext ESM). In Next.js, Vite and other bundler projects import `./client` without the extension — Turbopack cannot map `./client.js` to `client.ts`. The wrappers `init` writes already follow your project: extensionless for bundler frameworks (or a tsconfig with `moduleResolution: "bundler"`), `.js` for plain Node.
+:::
+
 ```ts
 import { createClient } from '@supabase/supabase-js';
 import { createAccessNexusClient } from './generated/sdk/client.js';

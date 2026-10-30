@@ -23,9 +23,32 @@ export interface TemplateOptions {
   sdkOutputPath: string;
   /** When present, wrap these instead of instantiating a new Supabase client. */
   existing?: { browser?: ResolvedExisting; server?: ResolvedExisting };
+  /**
+   * How the wrappers import the generated client: `'bundler'` → `./client` (Next.js,
+   * Vite and other bundlers resolve extensionless TS imports, but Turbopack cannot
+   * map `./client.js` to `client.ts`); `'node'` → `./client.js` (NodeNext ESM).
+   * Defaults to `'bundler'` for every framework except plain Node.
+   */
+  moduleResolution?: 'bundler' | 'node';
+}
+
+/** `true` when wrappers should import `./client` without an extension. */
+export function usesExtensionlessImports(framework: Framework, tsconfigModuleResolution?: string): boolean {
+  if (framework !== 'node') return true;
+  return (tsconfigModuleResolution ?? '').toLowerCase() === 'bundler';
 }
 
 export function generateFrameworkFiles(options: TemplateOptions): TemplateFile[] {
+  const resolution = options.moduleResolution ?? (options.framework === 'node' ? 'node' : 'bundler');
+  const files = frameworkFiles(options);
+  if (resolution === 'node') return files;
+  return files.map((file) => ({
+    ...file,
+    content: file.content.replaceAll("from './client.js'", "from './client'"),
+  }));
+}
+
+function frameworkFiles(options: TemplateOptions): TemplateFile[] {
   const { framework, sdkOutputPath, existing } = options;
 
   switch (framework) {

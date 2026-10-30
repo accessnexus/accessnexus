@@ -4,6 +4,16 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] - 2026-10-30
+
+### Fixed
+
+- The client wrappers `init` writes for Next.js, Vite, CRA and other bundler projects import
+  `./client` instead of `./client.js`. Turbopack (`next build`) could not resolve `./client.js`
+  to `client.ts`, so the build broke as soon as app code imported a wrapper. Plain Node keeps
+  `./client.js` unless its tsconfig uses `moduleResolution: "bundler"`. Wrappers written by an
+  earlier `init` are yours: change the import by hand (`generate` never overwrites them).
+
 ## [0.1.4] - 2026-10-30
 
 ### Added

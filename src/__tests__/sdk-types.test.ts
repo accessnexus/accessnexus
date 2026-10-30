@@ -25,10 +25,13 @@ function fixtureDir(): string {
   return dir;
 }
 
-function typecheck(files: string[]): string[] {
+/** `bundler` mirrors Next.js / Vite projects (extensionless imports); `node` is NodeNext ESM. */
+function typecheck(files: string[], resolution: 'node' | 'bundler' = 'node'): string[] {
   const program = ts.createProgram(files, {
-    strict: true, noEmit: true, target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.NodeNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext, skipLibCheck: true, lib: ['lib.es2022.d.ts', 'lib.dom.d.ts'],
+    strict: true, noEmit: true, target: ts.ScriptTarget.ES2022,
+    module: resolution === 'bundler' ? ts.ModuleKind.ESNext : ts.ModuleKind.NodeNext,
+    moduleResolution: resolution === 'bundler' ? ts.ModuleResolutionKind.Bundler : ts.ModuleResolutionKind.NodeNext,
+    skipLibCheck: true, lib: ['lib.es2022.d.ts', 'lib.dom.d.ts'],
   });
   return ts.getPreEmitDiagnostics(program).map((d) => {
     const where = d.file ? `${d.file.fileName.split('/').pop()}:${d.file.getLineAndCharacterOfPosition(d.start ?? 0).line + 1} ` : '';
@@ -343,6 +346,6 @@ export async function d() {
   return [await server.auth.getUser(), data?.id];
 }
 `);
-    expect(typecheck([join(dir, 'use.ts')])).toEqual([]);
+    expect(typecheck([join(dir, 'use.ts')], 'bundler')).toEqual([]);
   }, 60_000);
 });

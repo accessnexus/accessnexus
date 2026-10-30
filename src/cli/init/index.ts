@@ -21,7 +21,7 @@ import {
   generateSchemaTemplate,
   type HardenedFunction,
 } from './schema-gen.js';
-import { generateFrameworkFiles, type ResolvedExisting } from './templates.js';
+import { generateFrameworkFiles, usesExtensionlessImports, type ResolvedExisting } from './templates.js';
 import type { ExistingSupabase } from './detect.js';
 
 export interface InitOptions {
@@ -375,6 +375,7 @@ export async function runInit(options: InitOptions): Promise<Record<string, unkn
     framework: detection.framework,
     sdkOutputPath: sdkOutput,
     existing,
+    moduleResolution: usesExtensionlessImports(detection.framework, readTsconfigModuleResolution(projectRoot)) ? 'bundler' : 'node',
   });
 
   for (const file of templateFiles) {
@@ -541,4 +542,12 @@ function resolveExistingClient(
     };
   }
   return resolved.browser || resolved.server ? resolved : undefined;
+}
+
+/** `compilerOptions.moduleResolution` from the project's tsconfig.json (comments tolerated), if any. */
+function readTsconfigModuleResolution(projectRoot: string): string | undefined {
+  const path = join(projectRoot, 'tsconfig.json');
+  if (!existsSync(path)) return undefined;
+  const match = /"moduleResolution"\s*:\s*"([^"]+)"/i.exec(readFileSync(path, 'utf-8'));
+  return match?.[1];
 }

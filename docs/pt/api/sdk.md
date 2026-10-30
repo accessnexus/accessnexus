@@ -52,6 +52,10 @@ type AccessNexusProvider = {
 
 A factory é genérica sobre o provider, então `auth` mantém o tipo do provider: com `createBrowserClient<Database>()` / `createServerClient()` do `@supabase/ssr` ou `createClient()` do `@supabase/supabase-js`, `db.auth.signInWithOAuth(...)` fica totalmente tipado. Para nomear o tipo do client, passe o tipo do provider: `AccessNexusClient<SupabaseClient<Database>>` (sem ele, `auth` é `unknown`). Internamente o provider é usado por uma visão frouxa do query builder; cada método converte o resultado para o tipo documentado.
 
+::: tip Caminho do import
+Os exemplos importam `./client.js` (ESM NodeNext). Em projetos Next.js, Vite e outros com bundler, importe `./client` sem extensão — o Turbopack não consegue mapear `./client.js` para `client.ts`. Os wrappers que o `init` escreve já seguem o seu projeto: sem extensão nos frameworks com bundler (ou num tsconfig com `moduleResolution: "bundler"`), `.js` em Node puro.
+:::
+
 ```ts
 import { createClient } from '@supabase/supabase-js';
 import { createAccessNexusClient } from './generated/sdk/client.js';
