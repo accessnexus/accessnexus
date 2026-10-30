@@ -4,6 +4,49 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] - 2026-10-30
+
+### Added
+
+- `rpc({ returns: { table: { booking_id: 'uuid', date_time: 'timestamptz', ... } } })` emits
+  `RETURNS TABLE(...)` and types the SDK result as rows (`{ booking_id: string; ... }[]`, the
+  `supabase gen types` shape; column types map like table columns, `json`/`jsonb` → `Json`).
+  `returns: { setof: 'bookings' }` emits `RETURNS SETOF bookings` and types `Row[]` of that
+  table; `{ setof: 'uuid' }` gives `string[]`. `validate` reports bad shapes as
+  `INVALID_RPC_RETURNS`.
+- SDK: `updateOne(filter, patch, { columns? })` / `updateMany(...)` and
+  `deleteOne(filter, { columns? })` / `deleteMany(...)` on every table: one round trip
+  (`.update(patch).match(filter).select(columns)`, `.maybeSingle()` for the *One variants),
+  returning the written rows (`Row | null` / `Row[]`, narrowed by `columns`). The filter is
+  required: unknown columns and `{}` do not compile (new exported `RowFilter` type), and an
+  empty filter throws before any request, so a mistake never writes the whole table. On a
+  softDelete table they only touch live rows, and the delete variants return `null` / `[]`
+  (the trigger turns the DELETE into an UPDATE).
+- `policies: { all: rule }` applies one rule to select, insert, update and delete; explicit
+  per-operation keys override it (`{ all: policy.isOwner('user_id'), delete: policy.none() }`).
+  It expands into the usual one policy per operation (never `FOR ALL`), so USING / WITH CHECK,
+  policy names, removed-operation drops and every `validate` warning (`PUBLIC_WRITE`,
+  `USER_ROW_INSERT_OPEN`, ...) behave as if the keys were written out. Unrelated to the
+  `policy.all([...])` combinator, which is unchanged. `definePermissions` resources accept
+  `all: <level>` the same way (write pins still apply).
+
+### Fixed
+
+- `init --db-url` imported functions returning `TABLE(...)` / `SETOF ...` as an empty `rpc()`,
+  so the SDK typed them `Args: Record<string, never>; Returns: unknown` and correct calls
+  such as `rpc.get_client_bookings({ p_client_id })` did not compile. They are now imported
+  fully (args, `returns: { table }` / `{ setof }`, body). A function whose result or an
+  argument type `rpc()` still cannot express (`record`, composite types, OUT parameters) is
+  imported signature-only with its real `args` (a composite argument typed `'json'`), never
+  as an argument-less `rpc()`.
+- Changing an RPC's result type (scalar, TABLE columns, SETOF) or an argument name made `push`
+  fail with "cannot change return type of existing function". Each generated function is now
+  preceded by a guard that drops it (no CASCADE) when its result or argument names differ,
+  inside the push transaction; an unchanged function is never dropped. If a policy, view or
+  function depends on it the push fails and applies nothing — change the dependent first.
+  The live plan shows it as a changed function, not a dropped one. `rpcs.sql` changes for
+  every RPC with a body (the guard block); regenerate.
+
 ## [0.1.5] - 2026-10-30
 
 ### Fixed

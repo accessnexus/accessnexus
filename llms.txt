@@ -166,7 +166,7 @@ export default defineSchema({
     columns: { id: 'uuid', owner_id: 'uuid', name: 'text' },
     primaryKey: 'id',
     references: { owner_id: 'auth.users.id' },
-    policies: { select: policy.isOwner('owner_id'), insert: policy.isOwner('owner_id'), update: policy.isOwner('owner_id'), delete: policy.isOwner('owner_id') },
+    policies: { all: policy.isOwner('owner_id') }, // same rule for select/insert/update/delete
   }),
   tasks: table({
     columns: {
@@ -219,6 +219,14 @@ deletable); `insert` to `WITH CHECK` (what may be written); `update` to `USING` 
 may be targeted) plus an explicit `WITH CHECK` with the same rule (what the row may become),
 so an update can never move a row out of the rule. An operation without a rule is denied
 once the table has policies. String values in rules are quoted safely.
+
+`all` as a policies KEY applies one rule to all four operations; explicit keys override it:
+`policies: { all: policy.isOwner('user_id'), delete: policy.none() }`. It expands at definition
+time into the usual one-policy-per-operation (`<prefix>_<table>_<op>`, never `FOR ALL`), with
+the USING / WITH CHECK split above, and every `validate` warning applies per operation
+(`all: policy.public()` → `PUBLIC_WRITE` on insert/update/delete). A key set to `undefined`
+does not override — use `policy.none()` to block one operation. Not to be confused with the
+`policy.all([...])` combinator (AND of rules); both combine: `{ all: policy.all([a, b]) }`.
 
 Policy target role (`TO ...`): a `select` policy is granted `TO public` when some branch can be
 true for an anonymous visitor (`policy.public()`, `policy.custom(...)`, a column-to-column
@@ -291,7 +299,9 @@ Actions map `read→select`, `create→insert`, `update→update`, `delete→del
 (GLOBAL app roles from `app_metadata.role`, see above), `{ scope: 'tenant' }` (member of the
 row's tenant, needs `tenant` and `tenantColumn`), `{ scope: 'tenant', roles: [...] }` (member
 with one of those roles, needs `tenant.roleColumn`), `{ any: [...] }` (OR). Unknown roles throw
-at definition time.
+at definition time. `all: <level>` fills every action without its own level
+(`{ ownerColumn: 'user_id', all: 'own', read: '*' }`); the write pins below apply to the
+expanded `create`/`update` as if written out.
 
 Writes are pinned by default (secure unless you opt out):
 - `create` also requires `ownerColumn = (SELECT auth.uid())` — nobody can create rows
@@ -383,8 +393,19 @@ API reads too, add the condition to `select`, e.g.
 Pass RPCs as the second argument of `defineSchema`. With a `body`, AccessNexus emits
 `CREATE OR REPLACE FUNCTION` (defaults: `plpgsql`, `SECURITY INVOKER`, volatile, pinned
 `search_path`, returns `void` when `returns` is omitted) and a typed `client.rpc.<name>()`.
-`rpc({ args, returns })` without body only types the client; `rpc()` is a marker for
-Database mode. `security: 'definer'` bypasses RLS — check `(SELECT auth.uid())` yourself
+`rpc({ args, returns })` without body only types the client (no SQL); `rpc()` is a marker for
+Database mode.
+`returns` is a column type, `'void'`, `{ table: { col: 'type', ... } }` (→ `RETURNS TABLE(...)`,
+SDK `Returns: { col: T; ... }[]` like `supabase gen types`; `'text?'` → `string | null`) or
+`{ setof: 'table_name' }` (→ `RETURNS SETOF table_name`, SDK `Returns: Row[]` of that table) /
+`{ setof: 'uuid' }` (a column type → `string[]`). Without `returns` the SDK type is `unknown`.
+Bad shapes are `INVALID_RPC_RETURNS`. Postgres cannot change a function's result type or
+argument names with `CREATE OR REPLACE`, so each generated function is preceded by a guard
+that `DROP FUNCTION`s it (no CASCADE) when they differ; an unchanged function is never
+dropped. It runs inside push's transaction: if a policy, view or function depends on it the
+DROP fails and nothing is applied (change the dependent first, or give the new version
+another name); the live plan reports it as a changed function (`returns`), not a drop.
+Changing argument types creates a new overload (the old one stays). `security: 'definer'` bypasses RLS — check `(SELECT auth.uid())` yourself
 (and reject anonymous callers). For definer RPCs AccessNexus revokes EXECUTE from `PUBLIC` and
 `anon` and grants it to `authenticated` and `service_role`; pass `allowAnon: true` to keep
 anon. Invoker RPCs keep Supabase's default (callable by `anon` and `authenticated`; RLS
@@ -426,6 +447,18 @@ export default defineSchema({
     complete_all: rpc({
       args: { p_user: 'uuid' },
       body: 'UPDATE todos SET done = true WHERE user_id = p_user AND p_user = (SELECT auth.uid());',
+    }),
+    my_todo_counts: rpc({
+      returns: { table: { done: 'boolean', total: 'int' } }, // SDK: { done: boolean; total: number }[]
+      language: 'sql',
+      volatility: 'stable',
+      body: 'SELECT done, count(*)::int FROM todos WHERE user_id = (SELECT auth.uid()) GROUP BY done;',
+    }),
+    open_todos: rpc({
+      returns: { setof: 'todos' }, // SDK: Row[] of todos
+      language: 'sql',
+      volatility: 'stable',
+      body: 'SELECT * FROM todos WHERE user_id = (SELECT auth.uid()) AND NOT done;',
     }),
     reset_my_todos: rpc({
       security: 'definer', // bypasses RLS: check the caller first
@@ -514,7 +547,18 @@ export const files = [...policies, ...triggers, ...migration, ...rpcs, ...sdk].m
 `findMany(filter?, { columns?, include? })`, `findOne(filter, { columns?, include? })`,
 `findById(id, { columns?, include? })`, `create(row)`, `update(id, patch)`, `delete(id)` (a
 real DELETE; on soft-delete tables the trigger sets the column instead, so the DELETE policy
-decides), plus `rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js.
+decides), `updateOne(filter, patch, { columns? })`, `updateMany(filter, patch, { columns? })`,
+`deleteOne(filter, { columns? })`, `deleteMany(filter, { columns? })`, plus
+`rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js.
+- `updateOne` = `.update(patch).match(filter).select(columns).maybeSingle()`: one round trip,
+  `Row | null` (null when no visible row matches; more than one match is PGRST116 and nothing
+  is written) — update by any unique column (`{ slug }`). `updateMany` returns `Row[]`.
+  `deleteOne`/`deleteMany` return the deleted rows (DELETE ... RETURNING, so only rows the
+  SELECT policy shows); on a softDelete table the trigger turns the DELETE into an UPDATE and
+  they return `null` / `[]` although the rows were soft-deleted. On softDelete tables all four
+  touch live rows only. The filter is REQUIRED: keys must be columns and values their types,
+  `{}` does not compile (`RowFilter`), and an empty filter (or all values `undefined`) throws
+  `[AccessNexus] <table>.<method>: the filter must name at least one column` before any request.
 - `findOne` = `.match(filter).maybeSingle()`, `findById` = `.eq(pk, id).maybeSingle()`: a
   missing/invisible row is `{ data: null, error: null }` (not an error); more than one
   `findOne` match is an error (PGRST116), so filter on a unique column.
@@ -542,8 +586,9 @@ export async function example(userId: string) {
   const { data: owner } = await db.profiles.findOne({ email: 'owner@example.com' }, { columns: ['id', 'name'] });
   const { data: projects } = await db.projects.findMany({ org_id: 'some-org-id' }, { include: { org: true } });
   await db.profiles.update(userId, { name: 'New name' });
+  const { data: renamed } = await db.projects.updateOne({ id: 'some-project-id', org_id: 'some-org-id' }, { name: 'Renamed' }, { columns: ['id', 'name'] });
   const { data: stats } = await db.rpc.get_org_dashboard({ p_org_id: 'some-org-id' });
-  return { me, owner, projects, stats };
+  return { me, owner, projects, renamed, stats };
 }
 ```
 
@@ -594,7 +639,12 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   counts): a definer function anon could execute gets `allowAnon: true` + a `// NOTE:` and is
   listed in `anonExecutableFunctions` — show that list to the user: maintenance/admin functions
   exposed to anon need a deliberate keep/remove decision. One authenticated could not execute is
-  still granted to authenticated (rpc() cannot express it): `// NOTE:` + `authenticatedGrantedFunctions`. What cannot be expressed is left as a `// WARNING:` comment in the schema, never
+  still granted to authenticated (rpc() cannot express it): `// NOTE:` + `authenticatedGrantedFunctions`.
+  Functions returning `TABLE(...)`, `SETOF <imported table>` or `SETOF <type>` import fully as
+  `returns: { table }` / `{ setof }`. One whose result (`record`, composite, OUT params) or an
+  argument (composite type, typed `'json'`) rpc() cannot express is emitted signature-only
+  WITH its real `args` (typed client, no SQL; its SQL stays in your migrations) — never an
+  empty `rpc()` when the function has arguments. What cannot be expressed is left as a `// WARNING:` comment in the schema, never
   dropped silently: triggers with arguments, disabled, INSTEAD OF / TRUNCATE-only or non-plpgsql
   ones; array/other types with no AccessNexus equivalent (imported as `text`); generated columns;
   multi-column FKs. Imported triggers are recreated as `<prefix>_<table>_<name>`: after `push`
@@ -1224,7 +1274,8 @@ export default defineSchema({
 - `SCHEMA_VALIDATION_FAILED` — see `issues[]`; fix each `path` as its `hint` says. Common
   codes: `UNKNOWN_COLUMN`, `UNKNOWN_TABLE`, `UNKNOWN_COLUMN_TYPE`, `OWNER_COLUMN_NOT_UUID`,
   `INVALID_POLICY_RULE` (wrote `'public'` instead of `policy.public()`),
-  `UNKNOWN_POLICY_OPERATION` (`read`/`create` used as policy keys), `EMPTY_COMBINATOR`,
+  `UNKNOWN_POLICY_OPERATION` (`read`/`create` used as policy keys; `all` is valid),
+  `INVALID_RPC_RETURNS` (`returns` not a type, `'void'`, `{ table }` or `{ setof }`), `EMPTY_COMBINATOR`,
   `MISSING_COLUMNS`, `AUDIT_TABLE_MISMATCH`, `RPC_IN_TABLES`, `INVALID_TRIGGER`,
   `RPC_VOLATILITY_CONFLICT` (`immutable` contradicts `volatility`: keep only `volatility`),
   `INVALID_FUNCTION_SET` (a `set` key that is not a GUC name, or a non-string value),

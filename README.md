@@ -219,6 +219,8 @@ export async function demo(uid: string, id: string) {
   await db.posts.findMany({ status: 'draft' }, { columns: ['id', 'title'] }); // Pick<Posts, 'id' | 'title'>[]
   await db.posts.create({ title: 'Hello', author_id: uid, status: 'draft' }); // id, published, deleted_at optional
   await db.posts.update(id, { status: 'published' });
+  await db.posts.updateOne({ id, author_id: uid }, { status: 'published' }, { columns: ['id', 'status'] }); // Row | null, one round trip
+  await db.posts.deleteMany({ author_id: uid, status: 'draft' }); // filter required: {} does not compile
   await db.posts.delete(id);      // a real DELETE; on soft-delete tables the trigger sets deleted_at
   return db.auth.getUser();       // the provider's own auth, fully typed (SupabaseAuthClient)
   // RPCs declared in the schema are typed under db.rpc.<name>(args)
@@ -232,6 +234,9 @@ ways; in Database mode they *are* your `Database` rows). Relations declared via 
 expose a typed `include` option on `findMany`/`findOne`/`findById`; soft-delete tables auto-filter `deleted_at IS NULL`
 on reads (RLS itself does not hide soft-deleted rows — add `policy.custom('deleted_at IS NULL')`
 to `select` if raw API reads must not see them).
+`updateOne`/`updateMany`/`deleteOne`/`deleteMany(filter, ...)` write by any columns (e.g. a
+unique `slug`) and return the written rows; the filter must name at least one column (type
+error and runtime error otherwise), so a typo never updates or deletes the whole table.
 
 ## Centralized RBAC (multi-tenant)
 
@@ -290,6 +295,11 @@ wires them in — including the recursion-safe path for the join table itself.
 | `policy.all([...])` | AND of policies |
 | `policy.withCheck(using, check)` | `USING (using)`, `WITH CHECK (using AND check)`; `{ mode: 'replace' }` → `WITH CHECK (check)` |
 
+One rule for every operation: the `all` **key** of `policies` (not the `policy.all([...])`
+combinator) — `policies: { all: policy.isOwner('user_id'), delete: policy.none() }` generates
+the four usual per-operation policies, with explicit keys overriding. `definePermissions`
+resources take `all: 'own'` the same way.
+
 A `select` policy is granted `TO public` when some branch can pass without a user (so
 `any([custom('published = true'), isOwner(...)])` really is readable by anonymous visitors);
 writes are `TO public` only for an explicit `policy.public()`.
@@ -302,7 +312,7 @@ writes are `TO public` only for an explicit `policy.public()`.
   `lockColumns({ columns | except, unless?, name? })` (BEFORE UPDATE: API users cannot change
   those columns unless the SQL condition holds),
   `custom({ name, events, functionBody, when?, forEach?, security? })`.
-- **`rpc(config?)`** — `{ args? (name → type, or `{ type, default }` with a raw SQL default), returns?, body?, language? ('plpgsql'|'sql'), security? ('invoker'|'definer'), allowAnon?, volatility? ('volatile'|'stable'|'immutable'), immutable? (alias), set? (`{ row_security: 'off' }` → `SET` clauses; `search_path` stays pinned) }`. Marker-only `rpc()` for Database mode; add `body` for full SQL generation. Attach via `defineSchema(tables, { rpcs })`. Definer RPCs get `REVOKE EXECUTE ... FROM PUBLIC, anon` unless `allowAnon: true`.
+- **`rpc(config?)`** — `{ args? (name → type, or `{ type, default }` with a raw SQL default), returns?, body?, language? ('plpgsql'|'sql'), security? ('invoker'|'definer'), allowAnon?, volatility? ('volatile'|'stable'|'immutable'), immutable? (alias), set? (`{ row_security: 'off' }` → `SET` clauses; `search_path` stays pinned) }`. `returns` may also be `{ table: { col: 'type' } }` (`RETURNS TABLE(...)`, SDK rows `{ col: T }[]`) or `{ setof: 'table_name' }` (`RETURNS SETOF`, SDK `Row[]`); a changed result type or argument name is applied by dropping and recreating the function in the push transaction. Marker-only `rpc()` for Database mode; add `body` for full SQL generation. Attach via `defineSchema(tables, { rpcs })`. Definer RPCs get `REVOKE EXECUTE ... FROM PUBLIC, anon` unless `allowAnon: true`.
 - **Columns** — scalar strings (`'uuid'`, `'text'`, `'int'`, `'jsonb'`, `'timestamptz'`,
   `'text[]'`, `'numeric(10,2)'`, …), enum via `` "enum('a','b')" ``, nullable by suffixing `?` (`'text?'`), or the
   object form `{ type, default, unique, check, references, onDelete }`. `default` and `check`
