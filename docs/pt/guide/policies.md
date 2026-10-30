@@ -39,7 +39,31 @@ Regras práticas:
 
 - **Uma operação sem regra é negada.** Deixar `delete` de fora é o mesmo que `delete: policy.none()`, mas escrever `none()` deixa isso explícito.
 - **Uma tabela sem `policies` nega tudo** para a API. Toda tabela recebe `ENABLE` + `FORCE ROW LEVEL SECURITY`.
-- **As chaves de policy são `select`, `insert`, `update`, `delete`.** `read` / `create` são ações de [permissão](/pt/guide/permissions); usadas aqui, falham com `UNKNOWN_POLICY_OPERATION`.
+- **As chaves de policy são `select`, `insert`, `update`, `delete`, mais `all`.** `read` / `create` são ações de [permissão](/pt/guide/permissions); usadas aqui, falham com `UNKNOWN_POLICY_OPERATION`.
+
+### Uma regra para todas as operações: `all` {#one-rule-for-every-operation-all}
+
+`all` aplica uma regra a `select`, `insert`, `update` e `delete`; uma chave por operação a sobrescreve:
+
+```ts [accessnexus.schema.ts]
+import { defineSchema, policy, table } from 'accessnexus';
+
+export default defineSchema({
+  notes: table({
+    columns: { id: 'uuid', user_id: 'uuid', body: 'text' },
+    primaryKey: 'id',
+    references: { user_id: 'auth.users.id' },
+    policies: {
+      all: policy.isOwner('user_id'),
+      delete: policy.none(), // bloqueia uma operação explicitamente
+    },
+  }),
+});
+```
+
+Ela é expandida na definição da tabela em uma policy por operação (`<prefix>_<table>_<op>`), nunca numa policy `FOR ALL` do Postgres, então `select`/`delete` recebem `USING`, `insert` recebe `WITH CHECK` e `update` os dois, exatamente como se estivessem escritas uma a uma. Uma chave definida como `undefined` não sobrescreve `all`; use `policy.none()` para bloquear uma operação. O `validate` checa cada operação expandida: `all: policy.public()` gera `PUBLIC_WRITE` nas escritas, e `all: policy.isAuthenticated()` numa tabela ligada a `auth.users` gera `USER_ROW_INSERT_OPEN` no `insert`.
+
+A chave `all` não é o combinador [`policy.all([...])`](#policy-any-and-policy-all), que faz AND de regras dentro de uma operação. Os dois se combinam: `policies: { all: policy.all([a, b]) }`.
 
 ### Qual role uma policy atinge {#which-role-a-policy-targets}
 

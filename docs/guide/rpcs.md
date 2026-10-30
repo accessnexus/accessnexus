@@ -65,7 +65,7 @@ Only RPCs with a `body` end up in `rpcs.sql`.
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `args` | `Record<string, ColumnType>` | none | Argument name to column type (`'uuid'`, `'text'`, `'int'`, `'jsonb'`, `'text[]'`, ...). The order of the keys is the order of the SQL arguments. |
-| `returns` | `ColumnType \| 'void'` | `'void'` | A scalar or array column type. There is no `SETOF` / `TABLE` return: return `jsonb` (built with `json_agg` / `json_build_object`) for row sets. |
+| `returns` | `ColumnType \| 'void' \| { table } \| { setof }` | `'void'` | A scalar or array column type, or a row set: `{ table: { col: 'type', ... } }` emits `RETURNS TABLE(...)`, `{ setof: 'bookings' }` (a schema table) or `{ setof: 'uuid' }` (a column type) emits `RETURNS SETOF ...`. See [Return types](/api/rpc#return-types). |
 | `body` | `string` | none | The function body, without the `CREATE FUNCTION` wrapper. |
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | See [Writing the body](#writing-the-body). |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | See [Invoker or definer](#invoker-or-definer). |
@@ -229,7 +229,7 @@ export async function loadDashboard() {
 }
 ```
 
-Argument and return types come from the column types: `uuid`/`text` become `string`, `int`/`bigint`/`float` become `number`, `jsonb` becomes `Json` (the same type as Supabase's). A plain supabase-js call (`supabase.rpc('count_open_todos')`) reaches the same function.
+Argument and return types come from the column types: `uuid`/`text` become `string`, `int`/`bigint`/`float` become `number`, `jsonb` becomes `Json` (the same type as Supabase's). A row-set return is typed as an array: `{ table: { id: 'uuid', done: 'boolean' } }` gives `{ id: string; done: boolean }[]`, `{ setof: 'todos' }` gives `Todos[]` (the table's Row), `{ setof: 'uuid' }` gives `string[]`. A plain supabase-js call (`supabase.rpc('count_open_todos')`) reaches the same function.
 
 ## Changing or removing an RPC
 
@@ -238,9 +238,16 @@ Argument and return types come from the column types: `uuid`/`text` become `stri
 | Change in the schema | What happens in the database |
 | --- | --- |
 | Body, language, security | Replaced in place. |
-| Return type | `push` fails with `PUSH_FAILED` (Postgres cannot change a function's return type). Drop the old function by hand, then push. |
+| Return type (scalar, `TABLE` columns, `SETOF`) or argument names | The guard before the function drops the old version (`DROP FUNCTION name(argtypes)`, no `CASCADE`) and creates the new one, inside the same push transaction. Grants are re-applied: the generated `REVOKE`/`GRANT` for definer RPCs, Supabase's default privileges for invoker ones. |
 | Argument types or count | A **new** function (overload) is created. The old one stays, with its old grants. |
-| RPC removed from the schema | The function stays in the database. AccessNexus never drops functions. |
+| RPC removed from the schema | The function stays in the database. AccessNexus never drops functions it no longer declares. |
+| Parameter default removed | Not handled by the guard: Postgres rejects it. Drop the function by hand, then push. |
+
+Postgres cannot change a function's result type or argument names in place ("cannot change return type of existing function"), hence the guard. It compares in Postgres' own spelling (`format_type`, `pg_get_function_result`, `pg_get_function_identity_arguments`), so an unchanged function is never dropped. The live plan (`push --plan`, and the dry-run report) shows the drop-and-create as a changed function (`returns` changed), not as a dropped one.
+
+::: warning Dependents block the drop
+If a policy, view or other function depends on the function, the `DROP` fails and the whole push rolls back: nothing is applied. Remove or adjust the dependent first, or give the new version another name.
+:::
 
 ::: warning Drop old definer functions yourself
 After you change a definer RPC's arguments or remove it, the previous version is still callable by `authenticated`. Drop it explicitly (`DROP FUNCTION old_name(uuid);` as `postgres`) if it should no longer exist.

@@ -39,7 +39,31 @@ Rules of thumb:
 
 - **An operation without a rule is denied.** Leaving `delete` out is the same as `delete: policy.none()`, but writing `none()` makes it explicit.
 - **A table without `policies` is deny-all** for the API. Every table gets `ENABLE` + `FORCE ROW LEVEL SECURITY`.
-- **Policy keys are `select`, `insert`, `update`, `delete`.** `read` / `create` are [permission](/guide/permissions) actions; used here they fail with `UNKNOWN_POLICY_OPERATION`.
+- **Policy keys are `select`, `insert`, `update`, `delete`, plus `all`.** `read` / `create` are [permission](/guide/permissions) actions; used here they fail with `UNKNOWN_POLICY_OPERATION`.
+
+### One rule for every operation: `all`
+
+`all` applies a rule to `select`, `insert`, `update` and `delete`; a per-operation key overrides it:
+
+```ts [accessnexus.schema.ts]
+import { defineSchema, policy, table } from 'accessnexus';
+
+export default defineSchema({
+  notes: table({
+    columns: { id: 'uuid', user_id: 'uuid', body: 'text' },
+    primaryKey: 'id',
+    references: { user_id: 'auth.users.id' },
+    policies: {
+      all: policy.isOwner('user_id'),
+      delete: policy.none(), // block one operation explicitly
+    },
+  }),
+});
+```
+
+It is expanded when the table is defined into one policy per operation (`<prefix>_<table>_<op>`), never a Postgres `FOR ALL` policy, so `select`/`delete` get `USING`, `insert` gets `WITH CHECK` and `update` both, exactly as if written out. A key set to `undefined` does not override `all`; use `policy.none()` to block an operation. `validate` checks each expanded operation: `all: policy.public()` raises `PUBLIC_WRITE` for the writes, and `all: policy.isAuthenticated()` on a table keyed to `auth.users` raises `USER_ROW_INSERT_OPEN` for `insert`.
+
+The `all` key is not the [`policy.all([...])`](#policy-any-and-policy-all) combinator, which ANDs rules inside one operation. They combine: `policies: { all: policy.all([a, b]) }`.
 
 ### Which role a policy targets
 

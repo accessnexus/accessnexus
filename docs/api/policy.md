@@ -312,6 +312,8 @@ all(rules: PolicyRule[]): AllRule; // { kind: 'all', rules }
 
 SQL: each rule in parentheses, joined by `AND`.
 
+Not to be confused with the `all` key of a table's `policies` (`policies: { all: rule }`), which applies one rule to every operation. See [Policies](/guide/policies#one-rule-for-every-operation-all).
+
 ```ts
 import { policy } from 'accessnexus';
 

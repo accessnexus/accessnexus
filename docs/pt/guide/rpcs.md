@@ -65,7 +65,7 @@ Só as RPCs com `body` entram em `rpcs.sql`.
 | Opção | Tipo | Padrão | Observações |
 | --- | --- | --- | --- |
 | `args` | `Record<string, ColumnType>` | nenhum | Nome do argumento para tipo de coluna (`'uuid'`, `'text'`, `'int'`, `'jsonb'`, `'text[]'`, ...). A ordem das chaves é a ordem dos argumentos no SQL. |
-| `returns` | `ColumnType \| 'void'` | `'void'` | Um tipo de coluna escalar ou array. Não existe retorno `SETOF` / `TABLE`: retorne `jsonb` (montado com `json_agg` / `json_build_object`) para conjuntos de linhas. |
+| `returns` | `ColumnType \| 'void' \| { table } \| { setof }` | `'void'` | Um tipo de coluna escalar ou array, ou um conjunto de linhas: `{ table: { col: 'type', ... } }` emite `RETURNS TABLE(...)`, `{ setof: 'bookings' }` (uma tabela do schema) ou `{ setof: 'uuid' }` (um tipo de coluna) emite `RETURNS SETOF ...`. Veja [Tipos de retorno](/pt/api/rpc#return-types). |
 | `body` | `string` | nenhum | O corpo da função, sem o invólucro `CREATE FUNCTION`. |
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | Veja [Escrevendo o corpo](#writing-the-body). |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | Veja [Invoker ou definer](#invoker-or-definer). |
@@ -229,7 +229,7 @@ export async function loadDashboard() {
 }
 ```
 
-Os tipos de argumento e de retorno vêm dos tipos de coluna: `uuid`/`text` viram `string`, `int`/`bigint`/`float` viram `number`, `jsonb` vira `Json` (o mesmo tipo do Supabase). Uma chamada comum do supabase-js (`supabase.rpc('count_open_todos')`) chega à mesma função.
+Os tipos de argumento e de retorno vêm dos tipos de coluna: `uuid`/`text` viram `string`, `int`/`bigint`/`float` viram `number`, `jsonb` vira `Json` (o mesmo tipo do Supabase). Um retorno de conjunto de linhas é tipado como array: `{ table: { id: 'uuid', done: 'boolean' } }` dá `{ id: string; done: boolean }[]`, `{ setof: 'todos' }` dá `Todos[]` (o Row da tabela), `{ setof: 'uuid' }` dá `string[]`. Uma chamada comum do supabase-js (`supabase.rpc('count_open_todos')`) chega à mesma função.
 
 ## Alterando ou removendo uma RPC {#changing-or-removing-an-rpc}
 
@@ -238,9 +238,16 @@ O `push` reexecuta `rpcs.sql` com `CREATE OR REPLACE FUNCTION`, que tem as limit
 | Mudança no schema | O que acontece no banco |
 | --- | --- |
 | Corpo, linguagem, security | Substituída no lugar. |
-| Tipo de retorno | O `push` falha com `PUSH_FAILED` (o Postgres não consegue mudar o tipo de retorno de uma função). Remova a função antiga à mão e depois faça o push. |
+| Tipo de retorno (escalar, colunas de `TABLE`, `SETOF`) ou nomes de argumento | O guard antes da função remove a versão antiga (`DROP FUNCTION name(argtypes)`, sem `CASCADE`) e cria a nova, dentro da mesma transação do push. Os grants são reaplicados: o `REVOKE`/`GRANT` gerado para RPCs definer, os default privileges do Supabase para as invoker. |
 | Tipos ou quantidade de argumentos | Uma função **nova** (overload) é criada. A antiga continua, com os grants antigos. |
-| RPC removida do schema | A função continua no banco. O AccessNexus nunca remove funções. |
+| RPC removida do schema | A função continua no banco. O AccessNexus nunca remove funções que não declara mais. |
+| Default de parâmetro removido | Não é tratado pelo guard: o Postgres rejeita. Remova a função à mão e depois faça o push. |
+
+O Postgres não consegue mudar o tipo de resultado nem os nomes dos argumentos de uma função no lugar ("cannot change return type of existing function"), daí o guard. Ele compara na grafia do próprio Postgres (`format_type`, `pg_get_function_result`, `pg_get_function_identity_arguments`), então uma função inalterada nunca é removida. O plano ao vivo (`push --plan` e o relatório do dry-run) mostra o drop-e-create como função alterada (`returns` mudou), não como função removida.
+
+::: warning Dependentes bloqueiam o drop
+Se uma policy, view ou outra função depende da função, o `DROP` falha e o push inteiro sofre rollback: nada é aplicado. Remova ou ajuste o dependente antes, ou dê outro nome à nova versão.
+:::
 
 ::: warning Remova você mesmo as funções definer antigas
 Depois de mudar os argumentos de uma RPC definer ou removê-la, a versão anterior continua podendo ser chamada por `authenticated`. Remova-a explicitamente (`DROP FUNCTION old_name(uuid);` como `postgres`) se ela não deve mais existir.

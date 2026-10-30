@@ -449,6 +449,48 @@ export default defineSchema({
 
 Do not combine `onDelete: 'cascade'` into a soft-delete table (`CASCADE_INTO_SOFT_DELETE`): use `'restrict'` and soft-delete the children first.
 
+## Row-set RPC
+
+`returns: { table: { ... } }` emits `RETURNS TABLE(...)` and types the SDK result as an array of rows. The invoker function runs under the caller's RLS, so it only sees the caller's bookings anyway; the `WHERE` keeps the plan tight. `policies.all` gives the owner every operation, and `delete: policy.none()` takes one back.
+
+```ts [accessnexus.schema.ts]
+import { defineSchema, policy, rpc, table } from 'accessnexus';
+
+export default defineSchema({
+  bookings: table({
+    columns: { id: 'uuid', user_id: 'uuid', date_time: 'timestamptz', services: 'json' },
+    primaryKey: 'id',
+    references: { user_id: 'auth.users.id' },
+    policies: { all: policy.isOwner('user_id'), delete: policy.none() },
+  }),
+}, {
+  rpcs: {
+    my_bookings: rpc({
+      returns: { table: { booking_id: 'uuid', date_time: 'timestamptz', services: 'json' } },
+      language: 'sql',
+      volatility: 'stable',
+      body: `SELECT id, date_time, services FROM public.bookings
+             WHERE user_id = (SELECT auth.uid()) ORDER BY date_time`,
+    }),
+  },
+});
+```
+
+```ts [src/bookings.ts]
+import { createClient } from '@supabase/supabase-js';
+import { createAccessNexusClient } from './generated/sdk/client.js';
+
+const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'public-anon-key'));
+
+export async function upcoming() {
+  const { data, error } = await db.rpc.my_bookings({});
+  if (error) throw error;
+  return data; // { booking_id: string; date_time: string; services: Json }[]
+}
+```
+
+To return whole rows of a table use `{ setof: 'bookings' }` (SDK `Bookings[]`). Changing the result columns later is handled by `push`: see [Changing or removing an RPC](/guide/rpcs#changing-or-removing-an-rpc).
+
 ## Related
 
 - [Security model](/guide/security)

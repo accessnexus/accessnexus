@@ -31,7 +31,7 @@ As RPCs vão no segundo argumento do [`defineSchema`](/pt/api/schema#defineschem
 | Opção | Tipo | Padrão | Descrição |
 | --- | --- | --- | --- |
 | `args` | `Record<string, ColumnType \| { type, default? }>` | `{}` | Nome do argumento para o tipo, na ordem de declaração. Tipos como em [tipos de coluna](/pt/api/schema#column-types); um `?` no final só afeta o tipo TS. `{ type: 'int', default: '20' }` emite `DEFAULT 20` (SQL cru) e torna o argumento opcional no client; todo argumento depois de um com default também precisa de um. |
-| `returns` | `ColumnType \| 'void'` | `'void'` | Tipo de retorno. Omitido: `RETURNS VOID` no SQL, `unknown` no SDK. |
+| `returns` | `ColumnType \| 'void' \| { table } \| { setof }` | `'void'` | Tipo de retorno. Omitido: `RETURNS VOID` no SQL, `unknown` no SDK. Veja [Tipos de retorno](#return-types) para conjuntos de linhas. |
 | `body` | `string` | `undefined` | Corpo da função, sem o invólucro `CREATE FUNCTION`. Sem ele, nenhum SQL é gerado. |
 | `language` | `'plpgsql' \| 'sql'` | `'plpgsql'` | `LANGUAGE`. |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | `SECURITY INVOKER` ou `SECURITY DEFINER`. |
@@ -50,6 +50,18 @@ Uma função chamada dentro de uma policy (`policy.custom('is_member(org_id)')`)
 Tipos enum (`"enum('a','b')"`) são aceitos pelo `validate` em `args` e `returns`, mas são emitidos literalmente na assinatura SQL, o que o Postgres rejeita. Use `'text'` e faça o cast dentro do body.
 :::
 
+## Tipos de retorno {#return-types}
+
+| `returns` | SQL | `Returns` no SDK |
+| --- | --- | --- |
+| `'int'`, `'jsonb'`, ... (um tipo de coluna) | `RETURNS INT` | o tipo TS da coluna (`number`, `Json`, ...) |
+| `'void'` ou omitido | `RETURNS VOID` | `unknown` |
+| `{ table: { booking_id: 'uuid', date_time: 'timestamptz', services: 'json', has_review: 'boolean' } }` | `RETURNS TABLE(booking_id UUID, date_time TIMESTAMPTZ, services JSON, has_review BOOLEAN)` | `{ booking_id: string; date_time: string; services: Json; has_review: boolean }[]` |
+| `{ setof: 'bookings' }` (uma tabela do schema) | `RETURNS SETOF bookings` | `Bookings[]` (o Row dessa tabela) |
+| `{ setof: 'uuid' }` (um tipo de coluna) | `RETURNS SETOF UUID` | `string[]` |
+
+As colunas de `table` viram TS como as colunas de tabela (`json`/`jsonb` → `Json`, `timestamptz`/`date` → `string`, `int`/`numeric` → `number`); um tipo nullable como `'text?'` dá `string | null`. O formato de array é o mesmo que o `supabase gen types` produz. Os nomes das colunas de resultado precisam ser identificadores válidos (`INVALID_IDENTIFIER`) e os tipos conhecidos (`UNKNOWN_COLUMN_TYPE`); um tipo de retorno desconhecido, um `table` vazio, um `setof` que não é tabela do schema nem tipo de coluna, ou qualquer outro formato é `INVALID_RPC_RETURNS`.
+
 ## SQL gerado {#generated-sql}
 
 ```sql
@@ -66,6 +78,8 @@ $$;
 ```
 
 Com `language: 'plpgsql'`, um body que não começa com `DECLARE` ou `BEGIN` é envolvido em `BEGIN ... END;`. Com `language: 'sql'`, ou com um body que começa com `DECLARE` / `BEGIN`, ele é emitido como foi escrito.
+
+Cada função é precedida por um guard `DO $$ ... $$`: quando já existe uma função com esse nome e tipos de argumento, mas com nomes de argumento ou tipo de resultado diferentes (escalar, colunas de `TABLE` ou `SETOF`), ele executa `DROP FUNCTION <name>(<argtypes>)` (sem `CASCADE`) para o `CREATE OR REPLACE` funcionar. Uma função inalterada nunca é removida. Veja [Alterando ou removendo uma RPC](/pt/guide/rpcs#changing-or-removing-an-rpc).
 
 ## Segurança e grants {#security-and-grants}
 
@@ -118,6 +132,20 @@ export default defineSchema({
              DELETE FROM public.todos WHERE user_id = (SELECT auth.uid());`,
     }),
     // Só a assinatura: a função já existe no banco
+    // Conjunto de linhas: RETURNS TABLE(...), SDK { id: string; done: boolean }[]
+    my_todos: rpc({
+      returns: { table: { id: 'uuid', done: 'boolean' } },
+      language: 'sql',
+      volatility: 'stable',
+      body: 'SELECT id, done FROM todos WHERE user_id = (SELECT auth.uid());',
+    }),
+    // RETURNS SETOF todos, SDK Todos[]
+    open_todos: rpc({
+      returns: { setof: 'todos' },
+      language: 'sql',
+      volatility: 'stable',
+      body: 'SELECT * FROM todos WHERE NOT done;',
+    }),
     search_todos: rpc({ args: { q: 'text' }, returns: 'jsonb' }),
   },
 });
@@ -144,7 +172,9 @@ interface RpcDef {
 type RpcLanguage = 'plpgsql' | 'sql';
 type RpcSecurity = 'invoker' | 'definer';
 type RpcVolatility = 'volatile' | 'stable' | 'immutable';
-type RpcReturnType = ColumnType | 'void';
+type RpcReturnType = ColumnType | 'void' | RpcTableReturn | RpcSetofReturn;
+interface RpcTableReturn { readonly table: Readonly<Record<string, ColumnType>>; }
+interface RpcSetofReturn { readonly setof: string; } // uma tabela do schema ou um tipo de coluna
 ```
 
 `_rpc: true` marca o objeto como RPC; qualquer item em `rpcs` sem essa marca é reportado como `INVALID_RPC`. Todos esses tipos são exportados por `accessnexus`.

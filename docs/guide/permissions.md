@@ -60,6 +60,7 @@ A real schema also declares `orgs` and `org_members`; see the [walkthrough](#mul
 | `ownerColumn` | Column holding the owner's user id. Required for `'own'` |
 | `tenantColumn` | Column holding the row's tenant id. Required for `{ scope: 'tenant' }`. Use `'id'` when the row is the tenant itself |
 | `read`, `create`, `update`, `delete` | A permission level per action. An action left out is denied |
+| `all` | A level for every action without its own: `{ ownerColumn: 'user_id', all: 'own', read: '*' }`. Write pins apply to the expanded `create`/`update` |
 | `pinOwnerOnCreate` | Default on. See [Write pins](#write-pins) |
 | `pinTenant` | Default on. See [Write pins](#write-pins) |
 

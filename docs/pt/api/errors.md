@@ -152,7 +152,7 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 | `RLS_DISABLED` | warning | `<table>.enableRLS` | `enableRLS: false`: qualquer um com a anon key consegue ler e gravar a tabela. | Remova `enableRLS: false` e adicione policies. |
 | `RLS_DISABLED_WITH_POLICIES` | error | `<table>.enableRLS` | `enableRLS: false` junto com `policies`. | Remova `enableRLS: false`. |
 | `INVALID_POLICIES` | error | `<table>.policies` | `policies` não é um objeto. | `{ select: policy.isAuthenticated() }`. |
-| `UNKNOWN_POLICY_OPERATION` | error | `<table>.policies.<op>` | A chave não é `select`, `insert`, `update` nem `delete` (ex.: `read`, `create`). | Use os nomes das operações SQL; `read`/`create` pertencem ao `definePermissions`. |
+| `UNKNOWN_POLICY_OPERATION` | error | `<table>.policies.<op>` | A chave não é `select`, `insert`, `update`, `delete` nem `all` (ex.: `read`, `create`). | Use os nomes das operações SQL, ou `all` para uma regra em todas as operações; `read`/`create` pertencem ao `definePermissions`. |
 | `INVALID_POLICY_RULE` | error | `<table>.policies.<op>` | Não foi construída com `policy.*` (ex.: `'public'`), `hasRole` sem role, ou `custom` com expressão vazia. | `policy.public()`, `policy.hasRole('admin')`, uma expressão SQL não vazia. |
 | `UNKNOWN_POLICY_KIND` | error | `<table>.policies.<op>` | Um objeto de regra tem um `kind` desconhecido. | Construa as regras com `policy.*`. |
 | `EMPTY_COMBINATOR` | error | `<table>.policies.<op>` | `policy.any([])` ou `policy.all([])`. | Passe pelo menos uma regra, ou use `policy.none()`. |
@@ -185,6 +185,7 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 | Código | Severidade | Path | Significado | Correção |
 | --- | --- | --- | --- | --- |
 | `INVALID_RPC` | error | `rpcs.<name>` | Uma entrada de `rpcs` não foi criada com `rpc()`, ou sua `volatility` não é `'volatile'` / `'stable'` / `'immutable'`. | `rpcs: { name: rpc({ ... }) }`. |
+| `INVALID_RPC_RETURNS` | error | `rpcs.<name>.returns` | `returns` é um tipo desconhecido, um `{ table: {} }` vazio, um `{ setof }` que não é tabela do schema nem tipo de coluna, ou outro formato. | Um tipo de coluna, `'void'`, `{ table: { col: 'type' } }` ou `{ setof: 'table_name' }`. Os nomes das colunas de resultado são checados como `INVALID_IDENTIFIER` e os tipos como `UNKNOWN_COLUMN_TYPE`. |
 | `RPC_VOLATILITY_CONFLICT` | error | `rpcs.<name>.volatility` | `immutable` contradiz `volatility` (ex. `immutable: true, volatility: 'stable'`). | Mantenha só `volatility`. |
 | `INVALID_FUNCTION_SET` | error | `rpcs.<name>.set`, `<table>.triggers[<i>].set` | `set` não é um objeto, uma chave não é nome de parâmetro de configuração, ou um valor não é string. | `set: { row_security: 'off' }`. |
 | `SEARCH_PATH_PINNED` | warning | `rpcs.<name>.set.search_path`, `<table>.triggers[<i>].set.search_path` | `set.search_path` difere de `pg_catalog, public`; funções geradas sempre fixam esse valor, então ele é ignorado. | Remova e qualifique com o schema tudo que está fora de `public` no corpo. |
