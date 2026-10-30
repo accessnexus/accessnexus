@@ -509,12 +509,25 @@ export const files = [...policies, ...triggers, ...migration, ...rpcs, ...sdk].m
 
 ## Generated SDK
 
-`createAccessNexusClient(supabase)` wraps a supabase-js client with typed per-table accessors:
-`findMany(filter?, { include? })`, `findById(id, { include? })`, `create(row)`,
-`update(id, patch)`, `delete(id)` (a real DELETE; on soft-delete tables the trigger sets the
-column instead, so the DELETE policy decides), plus
-`rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js. `include`
-embeds tables declared in `references`. RLS still applies: the SDK runs as the signed-in user.
+`createAccessNexusClient(supabase)` wraps a supabase-js client (`createClient`, or
+`createBrowserClient`/`createServerClient` from @supabase/ssr) with typed per-table accessors:
+`findMany(filter?, { columns?, include? })`, `findOne(filter, { columns?, include? })`,
+`findById(id, { columns?, include? })`, `create(row)`, `update(id, patch)`, `delete(id)` (a
+real DELETE; on soft-delete tables the trigger sets the column instead, so the DELETE policy
+decides), plus `rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js.
+- `findOne` = `.match(filter).maybeSingle()`, `findById` = `.eq(pk, id).maybeSingle()`: a
+  missing/invisible row is `{ data: null, error: null }` (not an error); more than one
+  `findOne` match is an error (PGRST116), so filter on a unique column.
+- `columns: ['id', 'name']` sends `select('id, name')` and types the rows as
+  `Pick<Row, 'id' | 'name'>`; unknown column names do not compile. Empty array = `*`.
+- `include` embeds tables declared in `references` (combines with `columns`).
+- `auth` is typed as the provider's own `auth` (`TClient['auth']`), so
+  `db.auth.signInWithOAuth(...)` typechecks. Name the client type with
+  `AccessNexusClient<SupabaseClient<Database>>` (bare `AccessNexusClient` has `auth: unknown`).
+- `json`/`jsonb` are typed `Json` (exported; identical to Supabase's `Json`). Manual-mode row
+  types are type aliases matching `supabase gen types` for the same table (assignable both
+  ways); in Database mode Row/Insert/Update are your `Database['public']['Tables'][t]` types.
+RLS still applies: the SDK runs as the signed-in user.
 `<Table>Create` types make nullable columns, columns with a `default` and an auto-generated
 (uuid/bigint) primary key optional; everything else is required.
 
@@ -525,11 +538,12 @@ import { createAccessNexusClient } from './generated/sdk/client.js';
 const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'public-anon-key'));
 
 export async function example(userId: string) {
-  const { data: me } = await db.profiles.findById(userId);
+  const { data: me } = await db.profiles.findById(userId); // null when missing
+  const { data: owner } = await db.profiles.findOne({ email: 'owner@example.com' }, { columns: ['id', 'name'] });
   const { data: projects } = await db.projects.findMany({ org_id: 'some-org-id' }, { include: { org: true } });
   await db.profiles.update(userId, { name: 'New name' });
   const { data: stats } = await db.rpc.get_org_dashboard({ p_org_id: 'some-org-id' });
-  return { me, projects, stats };
+  return { me, owner, projects, stats };
 }
 ```
 

@@ -229,7 +229,7 @@ export async function loadDashboard() {
 }
 ```
 
-Os tipos de argumento e de retorno vêm dos tipos de coluna: `uuid`/`text` viram `string`, `int`/`bigint`/`float` viram `number`, `jsonb` vira `Record<string, unknown>`. Uma chamada comum do supabase-js (`supabase.rpc('count_open_todos')`) chega à mesma função.
+Os tipos de argumento e de retorno vêm dos tipos de coluna: `uuid`/`text` viram `string`, `int`/`bigint`/`float` viram `number`, `jsonb` vira `Json` (o mesmo tipo do Supabase). Uma chamada comum do supabase-js (`supabase.rpc('count_open_todos')`) chega à mesma função.
 
 ## Alterando ou removendo uma RPC {#changing-or-removing-an-rpc}
 

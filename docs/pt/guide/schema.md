@@ -79,7 +79,7 @@ columns: {
 | `date`, `timestamp`, `timestamptz`, `time` | `string` |
 | `int`, `smallint`, `bigint`, `serial`, `float`, `decimal`, `numeric`, `numeric(p,s)` | `number` |
 | `boolean` | `boolean` |
-| `json`, `jsonb` | `Record<string, unknown>` |
+| `json`, `jsonb` | `Json` (igual ao do Supabase: `string \| number \| boolean \| null \| { [key: string]: Json \| undefined } \| Json[]`) |
 | `text[]`, `uuid[]` | `string[]` |
 | `int[]` | `number[]` |
 | `"enum('a','b')"` | `string` |

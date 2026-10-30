@@ -27,7 +27,7 @@ O `create` e o `update` do SDK retornam a linha (`INSERT/UPDATE ... RETURNING`),
 
 ### Leituras não retornam nada, ou `findById` / `update` retornam "no rows" {#reads-return-nothing-or-findbyid-update-return-no-rows}
 
-O RLS esconde linhas em vez de lançar erros. Um `SELECT` retorna `[]`, um `DELETE` afeta 0 linhas, e o `findById` / `update` do SDK (que usam `.single()`) retornam o erro `PGRST116` do PostgREST.
+O RLS esconde linhas em vez de lançar erros. Um `SELECT` retorna `[]`, um `DELETE` afeta 0 linhas, o `findById` / `findOne` do SDK (que usam `.maybeSingle()`) retornam `data: null` sem erro, e o `update` (que usa `.single()`) retorna o erro `PGRST116` do PostgREST.
 
 - A tabela não tem `policies` (deny-all, `NO_POLICIES`), ou não tem regra para aquela operação.
 - A requisição é anônima: a sessão expirou, ou o client foi criado sem a sessão do usuário.

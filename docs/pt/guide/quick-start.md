@@ -278,7 +278,7 @@ export async function addNote(body: string) {
 }
 ```
 
-Cada tabela ganha `findMany(filter?)`, `findById(id)`, `create(row)`, `update(id, patch)` e `delete(id)`. Os resultados são `{ data, error }`, como no `supabase-js`. O RLS continua valendo: o SDK roda como o usuário logado, então `findMany()` retorna só as notas desse usuário.
+Cada tabela ganha `findMany(filter?, options?)`, `findOne(filter, options?)`, `findById(id, options?)`, `create(row)`, `update(id, patch)` e `delete(id)`; `options.columns` seleciona (e tipa) só algumas colunas. `findOne` e `findById` retornam `data: null` sem erro quando nenhuma linha bate. `accessnexus.auth` é o próprio `auth` do client do Supabase, com tipos completos. Os resultados são `{ data, error }`, como no `supabase-js`. O RLS continua valendo: o SDK roda como o usuário logado, então `findMany()` retorna só as notas desse usuário.
 
 ::: tip O ciclo típico
 Edite o schema e depois `validate` → `diff` → `generate` → `push --dry-run` → `push`. Um agente de código segue o mesmo ciclo com `--json`.

@@ -27,7 +27,7 @@ The SDK's `create` and `update` return the row (`INSERT/UPDATE ... RETURNING`), 
 
 ### Reads return nothing, or `findById` / `update` return "no rows"
 
-RLS hides rows instead of raising errors. A `SELECT` returns `[]`, a `DELETE` affects 0 rows, and the SDK's `findById` / `update` (which use `.single()`) return PostgREST error `PGRST116`.
+RLS hides rows instead of raising errors. A `SELECT` returns `[]`, a `DELETE` affects 0 rows, the SDK's `findById` / `findOne` (which use `.maybeSingle()`) return `data: null` without an error, and `update` (which uses `.single()`) returns PostgREST error `PGRST116`.
 
 - The table has no `policies` (deny-all, `NO_POLICIES`), or no rule for that operation.
 - The request is anonymous: the session expired, or the client was created without the user's session.

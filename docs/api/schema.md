@@ -183,8 +183,8 @@ A column is a type string, or a [`ColumnDef`](#columndef) object. Append `?` to 
 | `'decimal'` | `NUMERIC` | `number` |
 | `'numeric'`, `'numeric(10)'`, `'numeric(10,2)'` | `NUMERIC`, `NUMERIC(10)`, `NUMERIC(10,2)` | `number` |
 | `'boolean'` | `BOOLEAN` | `boolean` |
-| `'json'` | `JSON` | `Record<string, unknown>` |
-| `'jsonb'` | `JSONB` | `Record<string, unknown>` |
+| `'json'` | `JSON` | `Json` |
+| `'jsonb'` | `JSONB` | `Json` |
 | `'date'` | `DATE` | `string` |
 | `'timestamp'` | `TIMESTAMP` | `string` |
 | `'timestamptz'` | `TIMESTAMPTZ` | `string` |

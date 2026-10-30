@@ -6,9 +6,9 @@ Um wrapper tipado sobre um client do supabase-js, gerado em `output.sdk` (padrã
 
 | Modo | Arquivo | Conteúdo |
 | --- | --- | --- |
-| Manual | `types.ts` | Por tabela: `<Table>` (linha), `<Table>Create`, `<Table>Update`; e uma interface `Database` no formato do Supabase, incluindo `Functions` para cada RPC. |
-| Manual | `client.ts` | `createAccessNexusClient`, `AccessNexusClient`. Importa de `./types.js`. |
-| Database | `client.ts` | `createAccessNexusClient`, `AccessNexusClient`. Importa `Database` de `adapterOptions.databaseTypes` (padrão `'./database.types'`, relativo à pasta do SDK). |
+| Manual | `types.ts` | `Json`; por tabela: `<Table>` (linha), `<Table>Create`, `<Table>Update`; e uma interface `Database` no formato do Supabase, incluindo `Functions` para cada RPC. |
+| Manual | `client.ts` | `createAccessNexusClient`, `AccessNexusClient`, `AccessNexusProvider`, `ColumnsOf`, `SelectedRow`; reexporta `Json`. Importa de `./types.js`. |
+| Database | `client.ts` | `createAccessNexusClient`, `AccessNexusClient`, `AccessNexusProvider`, `ColumnsOf`, `SelectedRow`. Importa `Database` de `adapterOptions.databaseTypes` (padrão `'./database.types'`, relativo à pasta do SDK). |
 
 `<Table>` é o nome da tabela em PascalCase (`org_members` vira `OrgMembers`). Os dois arquivos são derivados: nunca edite, gere de novo.
 
@@ -18,7 +18,8 @@ O `accessnexus init` também escreve ao lado deles um wrapper que cria o client 
 
 | Tipo | Definição |
 | --- | --- |
-| `<Table>` | Uma propriedade por coluna, tipada como em [tipos de coluna](/pt/api/schema#column-types). Colunas enum viram uma union dos seus valores. |
+| `Json` | `string \| number \| boolean \| null \| { [key: string]: Json \| undefined } \| Json[]`, idêntico ao `Json` do `supabase gen types`. Usado em colunas `json`/`jsonb` e em args/retornos de RPC. |
+| `<Table>` | Um type alias (não uma interface) com uma propriedade por coluna, tipada como em [tipos de coluna](/pt/api/schema#column-types): `\| null` quando nullable, `string` para uuid/text/datas/timestamps, `number` para numéricos, `Json` para json/jsonb, colunas enum como union dos seus valores. É o formato que o `supabase gen types` produz para a mesma tabela, então as linhas são atribuíveis nos dois sentidos, e o `Database` gerado pode ser passado para `createClient<Database>()`. |
 | `<Table>Create` | Obrigatórias: colunas não nulas sem `default`. Opcionais: colunas nullable, colunas com `default` e uma primary key `uuid` ou `bigint`. |
 | `<Table>Update` | `Partial<Omit<<Table>, '<primaryKey>'>>` |
 | `Database` | `{ public: { Tables: { <table>: { Row; Insert; Update; Relationships: [] } }; Views; Functions: { <rpc>: { Args; Returns } }; Enums; CompositeTypes } }` |
@@ -34,13 +35,14 @@ function createAccessNexusClient<TClient extends AccessNexusProvider>(provider: 
   rpc: { [name: string]: (args) => Promise<{ data; error }> }; // só quando o schema tem RPCs
 };
 
-type AccessNexusClient = ReturnType<typeof createAccessNexusClient>;
+type AccessNexusClient<TClient extends AccessNexusProvider = AccessNexusProvider> =
+  ReturnType<typeof createAccessNexusClient<TClient>>;
 
 // Formato frouxo que um client real do supabase-js satisfaz
 type AccessNexusProvider = {
   auth: unknown;
-  from: (table: any) => any;
-  rpc: (name: any, args?: any) => any;
+  from(table: string): unknown;
+  rpc(name: string, args?: object): unknown;
 };
 ```
 
@@ -48,7 +50,7 @@ type AccessNexusProvider = {
 | --- | --- | --- |
 | `provider` | `AccessNexusProvider` | Um client do supabase-js (`createClient(...)`, `createBrowserClient(...)`, `createServerClient(...)`) ou qualquer objeto com `auth`, `from` e `rpc`. |
 
-Internamente, o provider é usado por meio de um tipo estrito `AccessNexusTransport` (`from<T>(table)` retornando query builders tipados). Nem `AccessNexusProvider` nem `AccessNexusTransport` são exportados.
+A factory é genérica sobre o provider, então `auth` mantém o tipo do provider: com `createBrowserClient<Database>()` / `createServerClient()` do `@supabase/ssr` ou `createClient()` do `@supabase/supabase-js`, `db.auth.signInWithOAuth(...)` fica totalmente tipado. Para nomear o tipo do client, passe o tipo do provider: `AccessNexusClient<SupabaseClient<Database>>` (sem ele, `auth` é `unknown`). Internamente o provider é usado por uma visão frouxa do query builder; cada método converte o resultado para o tipo documentado.
 
 ```ts
 import { createClient } from '@supabase/supabase-js';
@@ -73,11 +75,14 @@ Toda tabela do schema ganha estes acessores. `<pk>` é a `primaryKey` da tabela 
 
 | Método | Assinatura | Query enviada |
 | --- | --- | --- |
-| `findMany` | `(filter?: Partial<Row>, options?: { include?: Include }) => QueryResult<Row[]>` | `from(t).select('*'[, joins])[.is(softDelete, null)].match(filter ?? {})` |
-| `findById` | `(id: string, options?: { include?: Include }) => QueryResult<Row>` | `from(t).select('*'[, joins]).eq(<pk>, id)[.is(softDelete, null)].single()` |
+| `findMany` | `(filter?: Partial<Row>, options?: { columns?; include? }) => QueryResult<Selected[]>` | `from(t).select(<colunas ou *>[, joins])[.is(softDelete, null)].match(filter ?? {})` |
+| `findOne` | `(filter: Partial<Row>, options?: { columns?; include? }) => QueryResult<Selected>` | `from(t).select(<colunas ou *>[, joins])[.is(softDelete, null)].match(filter).maybeSingle()` |
+| `findById` | `(id: string, options?: { columns?; include? }) => QueryResult<Selected>` | `from(t).select(<colunas ou *>[, joins]).eq(<pk>, id)[.is(softDelete, null)].maybeSingle()` |
 | `create` | `(data: Create) => QueryResult<Row>` | `from(t).insert(data).select().single()` |
 | `update` | `(id: string, data: Update) => QueryResult<Row>` | `from(t).update(data).eq(<pk>, id).select().single()` |
-| `delete` | `(id: string) => QueryResult<Row[]>` | `from(t).delete().eq(<pk>, id)` |
+| `delete` | `(id: string) => QueryResult<null>` | `from(t).delete().eq(<pk>, id)` |
+
+`Selected` é `Row` (mais as relações do `include`), ou `Pick<Row, ...columns>` quando `columns` é informado.
 
 ```ts
 type QueryResult<T> = Promise<{ data: T | null; error: unknown }>;
@@ -97,7 +102,26 @@ Observações:
 - `id` é tipado como `string` para qualquer tipo de primary key.
 - `create` e `update` retornam a linha gravada (`INSERT/UPDATE ... RETURNING`), então a policy de `select` da tabela precisa admitir essa linha, ou a chamada falha com erro de RLS.
 - `delete` envia um DELETE de verdade. Numa tabela com `softDelete`, o trigger transforma isso em `SET <column> = NOW()`, então quem decide é a policy de DELETE. O supabase-js retorna `data: null` para um delete sem `.select()`.
-- Numa tabela com `softDelete`, `findMany` e `findById` adicionam `.is(<column>, null)`. O RLS em si não esconde linhas com soft delete.
+- `findOne` e `findById` usam `maybeSingle()`: nenhuma linha (ou nenhuma visível) é `{ data: null, error: null }`, não um erro. Mais de uma linha batendo com o filtro do `findOne` é erro (PGRST116), então filtre por uma coluna única (`{ slug }`, `{ email }`).
+- Numa tabela com `softDelete`, `findMany`, `findOne` e `findById` adicionam `.is(<column>, null)`. O RLS em si não esconde linhas com soft delete.
+
+### columns
+
+`options.columns` é um array de nomes de coluna. Envia `select('a, b')` em vez de `select('*')` e estreita o resultado para `Pick<Row, 'a' | 'b'>`. Os nomes são checados em tempo de compilação contra as colunas da tabela (`ColumnsOf<'tabela'>`): um nome desconhecido é erro de tipo. Em runtime os nomes passam como vieram; um array vazio seleciona `*`. Combina com `include` (os embeds são acrescentados).
+
+```ts
+import { createClient } from '@supabase/supabase-js';
+import { createAccessNexusClient } from './generated/sdk/client.js';
+
+const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'public-anon-key'));
+
+export async function lookup(slug: string) {
+  // data: Pick<Posts, 'id' | 'title'> | null — null (sem erro) quando nenhum post tem esse slug
+  const { data: post } = await db.posts.findOne({ slug }, { columns: ['id', 'title'] });
+  // db.posts.findMany({}, { columns: ['nope'] }) não compila
+  return post?.title;
+}
+```
 
 ### include
 
@@ -149,10 +173,10 @@ export async function dashboard(orgId: string) {
 
 ## auth
 
-`client.auth` é o objeto `auth` do provider, repassado sem alterações (`db.auth.signInWithPassword(...)`, `db.auth.getUser()`, ...). O tipo dele é o tipo de `auth` do provider.
+`client.auth` é o objeto `auth` do provider, repassado sem alterações (`db.auth.signInWithPassword(...)`, `db.auth.signInWithOAuth(...)`, `db.auth.getUser()`, ...). O tipo dele é `TClient['auth']`, o próprio tipo de `auth` do provider (`SupabaseAuthClient` para um client do supabase-js ou do @supabase/ssr).
 
 ## Dicas de tipagem {#typing-tips}
 
 - Modo manual: importe os tipos de linha de `types.ts` (`import type { Posts, PostsCreate } from './generated/sdk/types.js'`).
-- Modo Database: gere de novo o `database.types.ts` com a Supabase CLI depois de cada `push` e então rode `accessnexus generate`.
-- `AccessNexusClient` é o tipo do client, para passá-lo adiante: `function load(db: AccessNexusClient) { ... }`.
+- Modo Database: os tipos de linha são `Database['public']['Tables'][t]['Row' | 'Insert' | 'Update']` do seu próprio arquivo, idênticos aos do Supabase. Gere de novo o `database.types.ts` com a Supabase CLI depois de cada `push` e então rode `accessnexus generate`.
+- `AccessNexusClient<SupabaseClient<Database>>` é o tipo do client, para passá-lo adiante: `function load(db: AccessNexusClient<SupabaseClient<Database>>) { ... }`. `AccessNexusClient` sem o argumento também funciona, com `auth: unknown`.

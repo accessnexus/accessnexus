@@ -4,6 +4,38 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] - 2026-10-30
+
+### Added
+
+- SDK: `findOne(filter, options?)` on every table: `.match(filter).maybeSingle()`, returning
+  `Row | null` without an error when nothing matches (lookups by `slug`, `email`, ...).
+- SDK: `columns` option on `findMany`/`findOne`/`findById`: `{ columns: ['id', 'name'] }` sends
+  `select('id, name')` and narrows the result to `Pick<Row, 'id' | 'name'>`. Unknown column
+  names are compile errors; it combines with `include`. New exported helper types `ColumnsOf`
+  and `SelectedRow`; `AccessNexusProvider` is now exported.
+- SDK (manual mode): `types.ts` exports `Json`, identical to the `Json` of `supabase gen types`
+  (also re-exported from `client.ts`).
+
+### Changed
+
+- SDK: `auth` keeps the provider's type (`TClient['auth']`) instead of `unknown`, so
+  `db.auth.signInWithOAuth(...)` typechecks with `createClient` / `createBrowserClient` /
+  `createServerClient`. `AccessNexusClient` takes the provider type:
+  `AccessNexusClient<SupabaseClient<Database>>` (the argument is optional).
+- SDK: `json`/`jsonb` columns (and RPC args/returns) are typed `Json` instead of
+  `Record<string, unknown>`, so rows are compatible with Supabase's generated types (jsonb can
+  be an array, string, number, boolean or null). Code that read properties straight off a
+  jsonb value now needs a narrowing check.
+- SDK: manual-mode row types are type aliases instead of interfaces, so they satisfy
+  supabase-js' `GenericTable` and the generated `Database` can be passed to
+  `createClient<Database>()`. Interface declaration merging on them no longer works.
+- SDK: `findById` uses `maybeSingle()` instead of `single()`: a missing (or RLS-hidden) row is
+  now `{ data: null, error: null }` instead of a PGRST116 error. Code that relied on `error`
+  to detect "not found" should check `data === null`.
+- SDK: `delete(id)` is typed `QueryResult<null>` (supabase-js returns `data: null` for a
+  delete without `.select()`).
+
 ## [0.1.3] - 2026-10-29
 
 ### Fixed

@@ -278,7 +278,7 @@ export async function addNote(body: string) {
 }
 ```
 
-Each table gets `findMany(filter?)`, `findById(id)`, `create(row)`, `update(id, patch)` and `delete(id)`. Results are `{ data, error }`, like `supabase-js`. RLS still applies: the SDK runs as the signed-in user, so `findMany()` returns only that user's notes.
+Each table gets `findMany(filter?, options?)`, `findOne(filter, options?)`, `findById(id, options?)`, `create(row)`, `update(id, patch)` and `delete(id)`; `options.columns` selects (and types) only some columns. `findOne` and `findById` return `data: null` without an error when no row matches. `accessnexus.auth` is the Supabase client's own `auth`, fully typed. Results are `{ data, error }`, like `supabase-js`. RLS still applies: the SDK runs as the signed-in user, so `findMany()` returns only that user's notes.
 
 ::: tip The typical loop
 Edit the schema, then `validate` → `diff` → `generate` → `push --dry-run` → `push`. A coding agent follows the same loop with `--json`.

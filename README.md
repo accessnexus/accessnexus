@@ -214,18 +214,22 @@ const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'publ
 
 export async function demo(uid: string, id: string) {
   await db.profiles.findMany({ /* filter */ });
-  await db.profiles.findById(uid);
+  await db.profiles.findById(uid);                 // data: null (no error) when missing
+  await db.profiles.findOne({ email: 'a@b.co' });  // single row by any column, or null
+  await db.posts.findMany({ status: 'draft' }, { columns: ['id', 'title'] }); // Pick<Posts, 'id' | 'title'>[]
   await db.posts.create({ title: 'Hello', author_id: uid, status: 'draft' }); // id, published, deleted_at optional
   await db.posts.update(id, { status: 'published' });
   await db.posts.delete(id);      // a real DELETE; on soft-delete tables the trigger sets deleted_at
-  return db.auth;                 // passed straight through from the provider
+  return db.auth.getUser();       // the provider's own auth, fully typed (SupabaseAuthClient)
   // RPCs declared in the schema are typed under db.rpc.<name>(args)
 }
 ```
 
 `<Table>Create` types make nullable columns, columns with a default and auto-generated
-(uuid/bigint) primary keys optional. Relations declared via `references` expose a typed
-`include` option on `findMany`/`findById`; soft-delete tables auto-filter `deleted_at IS NULL`
+(uuid/bigint) primary keys optional. `json`/`jsonb` columns are typed `Json`, the same type
+`supabase gen types` emits, and row types match Supabase's generated rows (assignable both
+ways; in Database mode they *are* your `Database` rows). Relations declared via `references`
+expose a typed `include` option on `findMany`/`findOne`/`findById`; soft-delete tables auto-filter `deleted_at IS NULL`
 on reads (RLS itself does not hide soft-deleted rows — add `policy.custom('deleted_at IS NULL')`
 to `select` if raw API reads must not see them).
 
