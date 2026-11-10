@@ -964,7 +964,10 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
 - `migration discard` — drop the NEWEST migration when the database never applied it
   (checks `public.accessnexus_migrations` through `--url`/`--target`/env; without a database
   only with `--force`) and restore the snapshot to the state before it (the snapshot keeps a
-  history). It does NOT regenerate (`regenerated: null`): change the schema, then `generate`.
+  history). It does NOT regenerate the migration (`regenerated: null`). Derived files (SDK,
+  policies, triggers, RPCs): when the schema already matches the restored state they are
+  rewritten (`refreshed: [paths]`); otherwise they still carry the discarded change and are
+  listed in `stale: [paths]` with a `hint` — revert the schema and run `generate`.
   `migration amend` = discard + generate, and reports the file it wrote in `regenerated`
   (`null` when the schema matches the restored state). Refuses with
   `MIGRATION_ALREADY_APPLIED`; `MIGRATION_HISTORY_MISSING` for snapshots from < 0.4.1.

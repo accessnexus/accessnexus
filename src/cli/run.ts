@@ -31,7 +31,7 @@ import {
 import { runInit } from './init/index.js';
 import { findDestructiveStatements, findNotNullColumnAdds, type DestructiveStatement } from './destructive.js';
 import { TEST_DB_STANDINS_SQL } from '../testing/index.js';
-import { discardLastMigration, lastSnapshotMigration, resolveVersionedMigrations } from './migrations.js';
+import { discardLastMigration, lastSnapshotMigration, resolveVersionedMigrations, schemaMatchesSnapshot } from './migrations.js';
 import {
   CliError,
   EXIT,
@@ -327,6 +327,7 @@ async function runMigrationDiscard(opts: ParsedFlags, regenerate: boolean): Prom
   const { config, fileConfig } = await loadConfigWithSource(opts);
   const outputBase = config.output.migrations;
   const last = lastSnapshotMigration(outputBase);
+  // `discard` also refreshes or reports the derived files (types, client, SQL).
   if (!last) {
     throw new CliError('NO_MIGRATION_TO_DISCARD', `No migration snapshot in ${prettyPath(outputBase)}`, {
       hint: 'There is nothing to discard: run `npx accessnexus generate` first.',
@@ -389,8 +390,28 @@ async function runMigrationDiscard(opts: ParsedFlags, regenerate: boolean): Prom
     checkedDatabase: dbUrl ? redactUrl(dbUrl) : null,
   };
   if (!regenerate) {
-    log(`  ${paint.gray('Nothing regenerated: change the schema, then run `npx accessnexus generate` (or use `migration amend`).')}\n`);
-    return { ...result, regenerated: null };
+    // The SDK and the SQL files were generated with the discarded change. When the
+    // schema already matches the restored state, rewrite them now (no migration is
+    // involved); otherwise report them, so nothing compiles against a column the
+    // database will never get.
+    const schema = await loadSchema(config.schema);
+    const adapter = new SupabaseAdapter({ policyPrefix: config.naming.policyPrefix, ...config.adapterOptions });
+    const derived = collectGeneratedOutputs(schema, adapter, config).filter((group) => group.category !== 'migrations');
+    if (schemaMatchesSnapshot(schema, outputBase)) {
+      const written = writeGeneratedOutputs(derived).filter((file) => file.status !== 'unchanged').map((file) => file.path);
+      log(`  ${paint.green('✓')} The schema matches the restored state: ${written.length > 0 ? `refreshed ${written.length} derived file(s)` : 'derived files already match'}.\n`);
+      return { ...result, regenerated: null, refreshed: written, stale: [] };
+    }
+    const stale = derived.flatMap((group) => group.files).filter((file) => existsSync(file.absolutePath)).map((file) => file.displayPath);
+    log(`  ${paint.yellow('!')} The schema still contains the discarded change, and so do the SDK and SQL files generated from it.`);
+    log(`  ${paint.gray('Revert the change in the schema, then run `npx accessnexus generate` (or `migration amend` to regenerate the migration too).')}\n`);
+    return {
+      ...result,
+      regenerated: null,
+      refreshed: [],
+      stale,
+      hint: 'The schema still contains the discarded change: revert it and run `npx accessnexus generate` so the SDK and SQL files match the database again (or use `migration amend`).',
+    };
   }
   const generate = await runGenerate(opts);
   const files = (generate.files as Array<{ path: string; category: string; status: string }> | undefined) ?? [];

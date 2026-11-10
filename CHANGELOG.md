@@ -4,6 +4,21 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.3-next] - 2026-11-10
+
+Third round of the field report.
+
+### Fixed
+
+- `migration discard` no longer leaves the SDK ahead of the database. When the schema already
+  matches the restored state, it rewrites the derived files (types, client, React Query, SQL),
+  listed in `refreshed`. Otherwise it writes nothing and lists them in `stale`, with a hint to
+  revert the schema and run `generate`.
+- Releases: the `latest` dist-tag is decided from the published versions, not from the current
+  `latest`. When a stable version exists, `latest` is its highest stable version, and it is
+  restored if it drifted to a pre-release. With only pre-releases published, `latest` follows
+  the newest one, because npm always needs a `latest`.
+
 ## [0.4.2-next] - 2026-11-10
 
 Second round of the field report: what validating 0.4.1-next in the multi-tenant app found.

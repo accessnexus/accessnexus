@@ -255,7 +255,7 @@ npx accessnexus migration discard --target staging
 npx accessnexus migration amend --target staging --json   # discard + generate
 ```
 
-The JSON result has `discarded` (the migration file), `restoredTo` (the previous migration, or `null` when the snapshot was removed and the next `generate` writes a new `__init`), `checkedDatabase` (redacted URL, or `null` with `--force`) and `regenerated`: `null` for `discard`; for `amend`, the migration `generate` wrote (`null` when the schema matches the restored state). `amend` also returns `generate` (the full `generate` result).
+The JSON result has `discarded` (the migration file), `restoredTo` (the previous migration, or `null` when the snapshot was removed and the next `generate` writes a new `__init`), `checkedDatabase` (redacted URL, or `null` with `--force`) `refreshed` / `stale` (for `discard`: the derived SDK and SQL files it rewrote because the schema already matches the restored state, or the ones that still carry the discarded change — revert the schema and run `generate`) and `regenerated`: `null` for `discard`; for `amend`, the migration `generate` wrote (`null` when the schema matches the restored state). `amend` also returns `generate` (the full `generate` result).
 
 ### migration data {#migration-data}
 

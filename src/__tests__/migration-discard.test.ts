@@ -90,6 +90,38 @@ describe('migration discard (no database)', () => {
     expect(readFileSync(join(cwd, 'generated', 'migrations', fresh), 'utf-8')).toContain('title TEXT');
   }, 30_000);
 
+  it('keeps the SDK in line with the database: refreshes it, or reports it as stale', async () => {
+    const types = () => readFileSync(join(cwd, 'generated', 'sdk', 'types.ts'), 'utf-8');
+    writeSchema();
+    expect((await cli('generate')).code).toBe(0);
+    await tick();
+    writeSchema(", archived_reason: 'text?'");
+    expect((await cli('generate')).code).toBe(0);
+    expect(types()).toContain('archived_reason');
+
+    // Schema reverted first: discard rewrites the derived files at once.
+    writeSchema();
+    const res = await cli('migration', 'discard', '--force');
+    expect(res.code).toBe(0);
+    expect(res.json.stale).toEqual([]);
+    expect(res.json.refreshed).toContain('generated/sdk/types.ts');
+    expect(types()).not.toContain('archived_reason');
+    expect((await cli('diff')).json.changed).toBe(false);
+
+    // Schema still changed: discard writes nothing derived and lists what is now ahead of the database.
+    await tick();
+    writeSchema(", archived_reason: 'text?'");
+    expect((await cli('generate')).code).toBe(0);
+    const ahead = await cli('migration', 'discard', '--force');
+    expect(ahead.json.refreshed).toEqual([]);
+    expect(ahead.json.stale).toContain('generated/sdk/types.ts');
+    expect(ahead.json.hint).toMatch(/revert it and run/);
+    writeSchema();
+    expect((await cli('generate')).code).toBe(0);
+    expect(types()).not.toContain('archived_reason');
+    expect((await cli('diff')).json.changed).toBe(false);
+  }, 30_000);
+
   it('refuses when the snapshot predates the history (nothing deleted)', async () => {
     writeSchema();
     expect((await cli('generate', '--sql-only')).code).toBe(0);
@@ -119,8 +151,9 @@ describe.skipIf(!DB_URL)('migration discard against a real database', () => {
     pg = pg.default ?? pg;
     admin = new pg.Client({ connectionString: DB_URL });
     await admin.connect();
+    // Integration files share the database: wait for the others (they hold the lock).
     await admin.query('SELECT pg_advisory_lock(727274)');
-  });
+  }, 600_000);
   afterAll(async () => { await admin?.end(); });
 
   it('discards a pending migration and refuses an applied one', async () => {

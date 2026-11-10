@@ -1042,3 +1042,10 @@ export function discardLastMigration(outputBase: string): { discarded: string; r
   }));
   return { discarded, restoredTo: previous.lastMigrationFile };
 }
+
+/** Does `schema` generate exactly the state the migration snapshot records (no pending DDL)? */
+export function schemaMatchesSnapshot(schema: SchemaDef, outputBase: string): boolean {
+  const snapshot = readMigrationSnapshot(resolve(outputBase, '.snapshot.json'));
+  if (!snapshot || snapshot.version === 1) return false;
+  return snapshot.schemaHash === stableHash(stableStringify(buildSchemaState(schema)));
+}
