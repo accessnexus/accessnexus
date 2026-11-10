@@ -1,8 +1,8 @@
 # Limits & roadmap
 
-What v0.3.0 does not do, so you can plan around it, and what is planned next. Anything under [Roadmap](#roadmap) is **not available** today.
+What v0.4.0 does not do, so you can plan around it, and what is planned next. Anything under [Roadmap](#roadmap) is **not available** today.
 
-## Current limits (v0.3.0)
+## Current limits (v0.4.0)
 
 | Area | Limit | What to do |
 | --- | --- | --- |
