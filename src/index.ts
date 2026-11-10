@@ -7,6 +7,7 @@
 export { definePermissions } from './core/permissions/index.js';
 export { policy } from './core/policy/index.js';
 export { rpc } from './core/rpc/index.js';
+export { channel } from './core/realtime/index.js';
 export { defineConfig, defineSchema, table } from './core/schema/index.js';
 export type { DefineConfigOptions, AccessNexusTarget, ResolvedConfig } from './core/schema/builders.js';
 export { defineSeed } from './core/seed/builders.js';
@@ -19,6 +20,8 @@ export type {
   // Permissions types
   AnyPermission, PermissionLevel, PermissionsDef, PermissionsInput, ResourcePermissions, TenantConfig, TenantScope,
   PolicyOperation, PolicyRule, PublicSchema, RowOf,
+  // Realtime types
+  ChannelAccess, ChannelDef, ChannelRule, TableRealtime,
   // RPC types
   RpcDef,
   RpcLanguage, RpcReturnType, RpcTableReturn, RpcSetofReturn, RpcSecurity, RpcVolatility, ScalarType, SchemaDef, SeedSqlOptions, SoftDeleteTrigger, LockColumnsTrigger,

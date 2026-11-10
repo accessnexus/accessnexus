@@ -225,12 +225,21 @@ export async function runInit(options: InitOptions): Promise<Record<string, unkn
           introspectedFunctions = result.functions;
           schemaContent = generateSchemaFromIntrospection({
             tables: result.tables,
+            realtimePolicies: result.realtimePolicies,
             functions: result.functions,
             policyPrefix,
             hardened: hardenedFunctions,
             anonExecutable: anonExecutableFunctions,
             authenticatedGranted: authenticatedGrantedFunctions,
           });
+          const realtimeTables = result.tables.filter((t) => t.realtime).map((t) => t.name);
+          if (realtimeTables.length > 0) {
+            info(`Realtime is on for ${realtimeTables.length} table${realtimeTables.length > 1 ? 's' : ''} (imported as realtime: true): ${realtimeTables.join(', ')}`);
+          }
+          if (result.realtimePolicies.length > 0) {
+            info(`realtime.messages has ${result.realtimePolicies.length} Broadcast/Presence polic${result.realtimePolicies.length > 1 ? 'ies' : 'y'}; `
+              + 'not imported (push leaves them as they are). Port them to channels: { ... } with channel() to manage them in the schema.');
+          }
           if (anonExecutableFunctions.length > 0) {
             info(`anon can execute ${anonExecutableFunctions.length} SECURITY DEFINER function${anonExecutableFunctions.length > 1 ? 's' : ''} `
               + 'in the source database (via PUBLIC or a direct grant); imported with allowAnon: true. '

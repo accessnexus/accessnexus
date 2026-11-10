@@ -7,6 +7,7 @@ import type { ColumnInput, ForeignKeyAction } from './columns.js';
 import type { TablePolicies } from './policy.js';
 import type { SeedDef } from './seed.js';
 import type { TableTriggers } from './triggers.js';
+import type { TableRealtime } from './realtime.js';
 
 /**
  * Table definition — the core building block of a AccessNexus schema.
@@ -50,6 +51,13 @@ export interface TableDef<
 
   /** Soft delete column (if present, delete becomes update) */
   softDelete?: keyof TColumns & string;
+
+  /**
+   * Supabase Realtime (Postgres Changes): `true` publishes the table's row
+   * changes to subscribers (`client.<table>.subscribe(...)`), filtered by its
+   * SELECT policy; `false` unpublishes it. See {@link TableRealtime}.
+   */
+  realtime?: TableRealtime;
 }
 
 /** Index definition */

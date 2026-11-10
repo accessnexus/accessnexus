@@ -208,6 +208,28 @@ export async function dashboard(orgId: string) {
 
 `client.auth` é o objeto `auth` do provider, repassado sem alterações (`db.auth.signInWithPassword(...)`, `db.auth.signInWithOAuth(...)`, `db.auth.getUser()`, ...). O tipo dele é `TClient['auth']`, o próprio tipo de `auth` do provider (`SupabaseAuthClient` para um client do supabase-js ou do @supabase/ssr).
 
+## Realtime {#realtime}
+
+Tabelas com `realtime: true` ganham `subscribe`, e os canais declarados com [`channel()`](/pt/api/realtime#channel) aparecem em `client.channels`. Veja o [guia de Realtime](/pt/guide/realtime).
+
+```ts
+const stop = db.tasks.subscribe((change) => {
+  // change.eventType: 'INSERT' | 'UPDATE' | 'DELETE'; change.new is a Tasks row
+}, { event: '*', filter: { project_id: projectId }, onStatus: (status) => console.log(status) });
+stop(); // unsubscribe (removes the channel)
+
+const room = db.channels.project_room(projectId); // supabase-js RealtimeChannel, private
+room.on('broadcast', { event: 'cursor' }, ({ payload }) => draw(payload)).subscribe();
+```
+
+| Opção do `subscribe` | Tipo | Descrição |
+| --- | --- | --- |
+| `event` | `'INSERT' \| 'UPDATE' \| 'DELETE' \| '*'` | Evento a ouvir (padrão `'*'`); restringe o `change` do listener. |
+| `filter` | `RealtimeFilter<Row>` | Uma coluna: um valor (eq), um array (in), ou `{ eq \| neq \| lt \| lte \| gt \| gte \| in }`. Duas colunas ou `null` lançam erro. Ignorado pelo Realtime em DELETE. |
+| `onStatus` | `(status, error?) => void` | `SUBSCRIBED`, `CHANNEL_ERROR`, `TIMED_OUT`, `CLOSED`. |
+
+`change` é `RealtimeChange<Row>`: `{ eventType, new, old, schema, table, commit_timestamp, errors }`, em que `new` é a linha em INSERT/UPDATE (vazio em DELETE) e `old` traz a primary key (tabelas com RLS não enviam mais que isso). `client.channels.<name>(param)` retorna `ChannelOf<TClient>`: o tipo `RealtimeChannel` do client Supabase que você passou.
+
 ## TanStack Query (React Query) {#tanstack-query-react-query}
 
 Com `adapterOptions: { reactQuery: true }`, o `generate` também escreve `react-query.ts` ao lado do `client.ts`: query keys, `queryOptions` para cada leitura e opções de mutation para cada escrita e RPC, encapsulando o client gerado. Ele precisa do `@tanstack/react-query` v5 no seu app (`npm i @tanstack/react-query`); o AccessNexus em si não depende dele. O arquivo é o mesmo no modo manual e no Database mode.
@@ -233,6 +255,7 @@ export function Tasks({ projectId }: { projectId: string }) {
 | `q.<table>.findMany / findOne / findById(...)` | `queryOptions({ queryKey, queryFn })` | Mesmos argumentos e generics do client (`columns` e `include` restringem `data`). Funciona com `useQuery`, `useSuspenseQuery`, `prefetchQuery`, `getQueryData(...queryKey)`. |
 | `q.<table>.create / update / delete / updateOne / updateMany / deleteOne / deleteMany()` | `{ mutationKey, mutationFn, onSuccess }` | Variáveis: `create(row)`, `update({ id, data })`, `delete(id)`, `updateOne/updateMany({ filter, data })`, `deleteOne/deleteMany(filter)`. A proteção de filtro vazio do client continua lançando erro. |
 | `q.rpc.<name>.query(args)` / `q.rpc.<name>.mutation()` | opções de query / mutation | Use `query` para leituras e `mutation` para escritas (ela invalida todas as queries do AccessNexus). |
+| `q.<table>.invalidateOnChange({ event?, filter? })` | `() => void` | Só em tabelas com `realtime: true`: assina e invalida a tabela (e as tabelas que a embutem) a cada mudança. Precisa de `queryClient`. Use num effect: `useEffect(() => q.tasks.invalidateOnChange(), [])`. |
 | `accessNexusKeys` | fábrica de keys | `accessNexusKeys.<table>.all` = `['accessnexus', '<table>']`; `list`, `one`, `byId` e `rpc.<name>` abaixo dela. |
 
 - O `queryFn` transforma `{ data, error }` em valor ou rejeição: o `error` é lançado como veio (o `PostgrestError` do Supabase, com `code` / `message` / `details`). Listas resolvem para `[]` em vez de `null`; `findOne` / `findById` resolvem para `null` quando nenhuma linha visível bate.

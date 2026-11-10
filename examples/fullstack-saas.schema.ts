@@ -2,13 +2,14 @@
 // AccessNexus - Full Example Schema
 // Project Management SaaS (multi-tenant)
 // Demonstrates ALL features: policies, permissions,
-// triggers, RPCs, seed, soft delete, enums, refs
+// triggers, RPCs, seed, soft delete, enums, refs, Realtime
 //
 // In your project, import from 'accessnexus' instead of '../src/index.js':
 //   import { defineSchema, table, policy, ... } from 'accessnexus';
 // ============================================
 
 import {
+  channel,
   definePermissions,
   defineSchema,
   policy,
@@ -300,6 +301,8 @@ const schema = defineSchema({
           RETURN NEW;`,
       }),
     ],
+    // Realtime: members get task changes live (only the rows their SELECT policy shows)
+    realtime: true,
     policies: {
       ...permissions.policiesFor('tasks'),
       // The reporter is whoever creates the task (assignee is set by others)
@@ -327,6 +330,7 @@ const schema = defineSchema({
       author_id: 'profiles.id',
     },
     softDelete: 'deleted_at',
+    realtime: true,
     triggers: [
       trigger.updatedAt('updated_at'),
       // A comment stays on its task (and org)
@@ -501,6 +505,26 @@ const schema = defineSchema({
             LIMIT COALESCE(p_limit, 20)
           ) t
         );`,
+    }),
+  },
+
+  // ============================================
+  // 4. Realtime channels (Broadcast / Presence)
+  // ============================================
+  channels: {
+    // Cursors and "who is viewing" for a project: open to whoever can read the
+    // project row (its RLS decides), e.g. supabase channel 'project:<uuid>'.
+    project_room: channel({
+      topic: 'project:{id}',
+      table: 'projects',
+      broadcast: { receive: true, send: true },
+      presence: { receive: true, send: true },
+    }),
+    // Org-wide announcements: members listen, only app admins send.
+    org_announcements: channel({
+      topic: 'org:{id}',
+      table: 'organizations',
+      broadcast: { receive: true, send: policy.hasRole('admin') },
     }),
   },
 });

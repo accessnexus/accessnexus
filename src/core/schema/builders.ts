@@ -5,6 +5,7 @@
 
 import { withExpandedPolicies } from '../policy/expand.js';
 import type { ColumnInput } from '../types/columns.js';
+import type { ChannelDef } from '../types/realtime.js';
 import type { RpcDef } from '../types/rpc.js';
 import type { SchemaDef, TableDef } from '../types/schema.js';
 import type { SupabaseDatabase, SupabaseSchemaInput } from '../types/supabase.js';
@@ -15,6 +16,12 @@ import type { SupabaseDatabase, SupabaseSchemaInput } from '../types/supabase.js
 export interface SchemaOptions {
   /** RPC (PostgreSQL function) definitions */
   rpcs?: Record<string, RpcDef>;
+  /**
+   * Private Realtime channels (Broadcast / Presence) and who may use them,
+   * built with `channel()`. Generates RLS policies on `realtime.messages` and
+   * typed `client.channels.<name>(param)` accessors.
+   */
+  channels?: Record<string, ChannelDef>;
 }
 
 /**
@@ -108,6 +115,17 @@ export function defineSchema(tables: Record<string, any>, options?: SchemaOption
   if (options?.rpcs && Object.keys(options.rpcs).length > 0) {
     Object.defineProperty(result, '__rpcs', {
       value: options.rpcs,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
+
+  // Attach channels the same way. An empty object is kept: it still tells the
+  // generator to drop channel policies that are no longer declared.
+  if (options?.channels) {
+    Object.defineProperty(result, '__channels', {
+      value: options.channels,
       enumerable: false,
       writable: false,
       configurable: false,

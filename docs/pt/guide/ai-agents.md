@@ -90,10 +90,12 @@ npx accessnexus validate --json
       "primaryKey": "id",
       "rls": true,
       "policies": ["select", "insert", "update", "delete"],
-      "triggers": [{ "kind": "updated_at", "name": null }]
+      "triggers": [{ "kind": "updated_at", "name": null }],
+      "realtime": null
     }
   ],
   "rpcs": [],
+  "channels": [],
   "issues": [],
   "summary": { "errors": 0, "warnings": 0 }
 }

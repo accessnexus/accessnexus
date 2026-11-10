@@ -16,6 +16,7 @@ function defineSchema<DB extends SupabaseDatabase>(
 
 interface SchemaOptions {
   rpcs?: Record<string, RpcDef>;
+  channels?: Record<string, ChannelDef>;
 }
 ```
 
@@ -23,6 +24,7 @@ interface SchemaOptions {
 | --- | --- | --- | --- |
 | `tables` | `Record<string, TableDef>` or `SupabaseSchemaInput<DB>` | required | Table name to table definition. Names must be lowercase snake_case. |
 | `options.rpcs` | `Record<string, RpcDef>` | `undefined` | Postgres functions built with [`rpc()`](/api/rpc). Stored as a non-enumerable `__rpcs` property, so `Object.keys(schema)` lists only tables. |
+| `options.channels` | `Record<string, ChannelDef>` | `undefined` | Private Realtime channels (Broadcast / Presence) built with [`channel()`](/api/realtime#channel); names are lowercase snake_case. Stored as a non-enumerable `__channels` property. `{}` removes every channel policy on the next push. |
 
 The schema file must `export default` the result. The CLI loads it with esbuild, so it may import sibling files.
 
@@ -133,6 +135,7 @@ interface TableDef<TColumns extends Record<string, ColumnInput>> {
   enableRLS?: boolean;
   indexes?: IndexDef[];
   softDelete?: keyof TColumns & string;
+  realtime?: boolean | { replicaIdentity?: 'default' | 'full' };
 }
 ```
 
@@ -148,6 +151,7 @@ interface TableDef<TColumns extends Record<string, ColumnInput>> {
 | `enableRLS` | `boolean` | `true` | Only `false` has an effect: RLS is not enabled for the table. |
 | `indexes` | `IndexDef[]` | `[]` | Explicit indexes. See [IndexDef](#indexdef). |
 | `softDelete` | column name | `undefined` | DELETE becomes `UPDATE ... SET <column> = NOW()`; the SDK filters `<column> IS NULL`. The column should be `'timestamptz?'`. |
+| `realtime` | `boolean \| { replicaIdentity }` | `undefined` (unmanaged) | Supabase Realtime (Postgres Changes): `true` adds the table to the `supabase_realtime` publication and gives the SDK a typed `subscribe`; `false` removes it. See [Realtime](/guide/realtime). |
 
 Unknown keys (for example `polices`) are reported by `validate` as `UNKNOWN_TABLE_KEY`.
 

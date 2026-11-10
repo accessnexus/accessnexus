@@ -11,6 +11,8 @@ import { introspectedColumnType, pgTypeToAccessNexus } from './pg-type-map.js';
 
 export interface SchemaGenOptions {
   tables: IntrospectedTable[];
+  /** Policies found on realtime.messages (listed in a comment, not imported). */
+  realtimePolicies?: string[];
   policyPrefix: string;
   /** User-defined functions to emit as RPCs (from the direct-DB introspection). */
   functions?: IntrospectedFunction[];
@@ -169,8 +171,22 @@ export function generateSchemaFromIntrospection(options: SchemaGenOptions): stri
       lines.push('    enableRLS: false,');
     }
 
+    if (t.realtime) {
+      lines.push('    // In the supabase_realtime publication: subscribers get row changes their');
+      lines.push('    // SELECT policy shows them (client.<table>.subscribe).');
+      lines.push(t.replicaIdentityFull ? "    realtime: { replicaIdentity: 'full' }," : '    realtime: true,');
+    }
+
     lines.push('  }),');
     if (i < tables.length - 1) lines.push('');
+  }
+
+  const realtimePolicies = options.realtimePolicies ?? [];
+  if (realtimePolicies.length > 0) {
+    lines.push('');
+    lines.push(`  // realtime.messages has ${realtimePolicies.length} Broadcast/Presence polic${realtimePolicies.length === 1 ? 'y' : 'ies'} (not imported; push leaves`);
+    lines.push(`  // them as they are): ${realtimePolicies.join(', ')}.`);
+    lines.push("  // To manage them here, describe the channels with channel() under defineSchema's `channels` option.");
   }
 
   // RPCs from user-defined database functions.
@@ -595,6 +611,8 @@ export function buildRuntimeSchema(tables: IntrospectedTable[]): SchemaDef {
         tableDef.references[fk.column] = `${fk.referencedTable}.${fk.referencedColumn}`;
       }
     }
+
+    if (t.realtime) tableDef.realtime = true;
 
     schema[t.name] = tableDef;
   }

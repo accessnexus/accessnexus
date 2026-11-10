@@ -16,6 +16,7 @@ function defineSchema<DB extends SupabaseDatabase>(
 
 interface SchemaOptions {
   rpcs?: Record<string, RpcDef>;
+  channels?: Record<string, ChannelDef>;
 }
 ```
 
@@ -23,6 +24,7 @@ interface SchemaOptions {
 | --- | --- | --- | --- |
 | `tables` | `Record<string, TableDef>` ou `SupabaseSchemaInput<DB>` | obrigatório | Nome da tabela para a definição da tabela. Os nomes precisam ser snake_case minúsculo. |
 | `options.rpcs` | `Record<string, RpcDef>` | `undefined` | Funções do Postgres criadas com [`rpc()`](/pt/api/rpc). Guardadas numa propriedade não enumerável `__rpcs`, então `Object.keys(schema)` lista só as tabelas. |
+| `options.channels` | `Record<string, ChannelDef>` | `undefined` | Canais privados do Realtime (Broadcast / Presence) criados com [`channel()`](/pt/api/realtime#channel); os nomes são snake_case em minúsculas. Guardados numa propriedade não enumerável `__channels`. `{}` remove todas as policies de canal no próximo push. |
 
 O arquivo de schema precisa fazer `export default` do resultado. A CLI carrega o arquivo com esbuild, então ele pode importar arquivos vizinhos.
 
@@ -133,6 +135,7 @@ interface TableDef<TColumns extends Record<string, ColumnInput>> {
   enableRLS?: boolean;
   indexes?: IndexDef[];
   softDelete?: keyof TColumns & string;
+  realtime?: boolean | { replicaIdentity?: 'default' | 'full' };
 }
 ```
 
@@ -148,6 +151,7 @@ interface TableDef<TColumns extends Record<string, ColumnInput>> {
 | `enableRLS` | `boolean` | `true` | Só `false` tem efeito: o RLS não é habilitado na tabela. |
 | `indexes` | `IndexDef[]` | `[]` | Índices explícitos. Veja [IndexDef](#indexdef). |
 | `softDelete` | nome de coluna | `undefined` | O DELETE vira `UPDATE ... SET <column> = NOW()`; o SDK filtra `<column> IS NULL`. A coluna deve ser `'timestamptz?'`. |
+| `realtime` | `boolean \| { replicaIdentity }` | `undefined` (não gerenciado) | Supabase Realtime (Postgres Changes): `true` adiciona a tabela à publication `supabase_realtime` e dá ao SDK um `subscribe` tipado; `false` a remove. Veja [Realtime](/pt/guide/realtime). |
 
 Chaves desconhecidas (por exemplo `polices`) são reportadas pelo `validate` como `UNKNOWN_TABLE_KEY`.
 

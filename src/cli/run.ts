@@ -921,9 +921,11 @@ async function runValidate(opts: ParsedFlags): Promise<CommandResult> {
   log(`  ${paint.green('✓')} Schema is valid — ${summary.tables.length} tables (${summary.mode} mode)\n`);
   for (const t of summary.tables) {
     const lock = t.rls ? paint.green('RLS') : paint.yellow('no RLS');
-    log(`  ${t.name} (${t.columns} columns, ${lock}${t.policies.length ? `: ${t.policies.join('/')}` : ''})`);
+    const realtime = t.realtime === true ? ', Realtime' : '';
+    log(`  ${t.name} (${t.columns} columns, ${lock}${t.policies.length ? `: ${t.policies.join('/')}` : ''}${realtime})`);
   }
   if (summary.rpcs.length > 0) log(`\n  RPCs: ${summary.rpcs.join(', ')}`);
+  if (summary.channels.length > 0) log(`\n  Channels: ${summary.channels.join(', ')}`);
   log('');
 
   return {

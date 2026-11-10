@@ -109,6 +109,9 @@ export interface SupabaseTableDef<TRow extends Record<string, unknown> = Record<
 
   /** Soft delete column (autocompleted from Database type) */
   softDelete?: keyof TRow & string;
+
+  /** Supabase Realtime (Postgres Changes) for this table; see `TableDef.realtime`. */
+  realtime?: import('./realtime.js').TableRealtime;
 }
 
 /**

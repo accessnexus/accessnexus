@@ -114,7 +114,7 @@ Static checks run by `validate`, `generate`, `diff` and `push`. In Database mode
 | `SCHEMA_EMPTY` | warning | `(schema)` | The schema has no tables. | Add tables. |
 | `INVALID_TABLE` | error | `<table>` | A table entry is not an object. | `<table>: table({ ... })`. |
 | `RPC_IN_TABLES` | error | `<table>` | An `rpc()` was placed among the tables. | Pass it in `defineSchema(tables, { rpcs: { ... } })`. |
-| `UNKNOWN_TABLE_KEY` | error | `<table>.<key>` | Unknown table option (it would be ignored, e.g. `polices`), or tables nested under a key such as `tables:`. | Use the suggested option; valid: `columns`, `primaryKey`, `references`, `onDelete`, `policies`, `triggers`, `enableRLS`, `indexes`, `softDelete`. |
+| `UNKNOWN_TABLE_KEY` | error | `<table>.<key>` | Unknown table option (it would be ignored, e.g. `polices`), or tables nested under a key such as `tables:`. | Use the suggested option; valid: `columns`, `primaryKey`, `compositePrimaryKey`, `references`, `onDelete`, `policies`, `triggers`, `enableRLS`, `indexes`, `softDelete`, `realtime`. |
 | `MISSING_COLUMNS` | error | `<table>.columns` | Some tables declare `columns` and this one does not. | Declare columns on every table (manual) or on none (Database mode). |
 
 ### Identifiers
@@ -191,3 +191,19 @@ Static checks run by `validate`, `generate`, `diff` and `push`. In Database mode
 | `SEARCH_PATH_PINNED` | warning | `rpcs.<name>.set.search_path`, `<table>.triggers[<i>].set.search_path` | `set.search_path` differs from `pg_catalog, public`; generated functions always pin that value, so it is ignored. | Remove it and schema-qualify anything outside `public` in the body. |
 
 RPCs also produce `INVALID_IDENTIFIER` (name or argument name), `UNKNOWN_COLUMN_TYPE` (argument type), `INVALID_DEFAULT` (an argument default that is not a SQL string, or an argument without default after one with a default) and `UNWRAPPED_AUTH_CALL` (body).
+
+### Realtime
+
+| Code | Severity | Path | Meaning | Fix |
+| --- | --- | --- | --- | --- |
+| `INVALID_REALTIME` | error | `<table>.realtime` | `realtime` is not `true`, `false` or `{ replicaIdentity: 'default' \| 'full' }`. | Use one of those values. |
+| `REALTIME_NOT_READABLE` | warning | `<table>.realtime` | The table is published but has no select policy (or `policy.none()`): Realtime delivers a change only to users whose SELECT policy shows the row, so nobody receives anything. | Add `policies.select`. |
+| `REALTIME_RLS_DISABLED` | warning | `<table>.realtime` | The table is published with `enableRLS: false`: every subscriber, anon included, receives every row change. | Remove `enableRLS: false` and add a select policy. |
+| `REALTIME_REPLICA_FULL_WITH_RLS` | warning | `<table>.realtime.replicaIdentity` | `replicaIdentity: 'full'` on a table with RLS: Supabase still sends only the primary key in `old`, so it only grows the WAL. | Drop `replicaIdentity`. |
+| `INVALID_CHANNEL` | error | `channels.<name>...` | `channels` is not an object; a channel is not built with `channel()`; unknown option; bad `topic` (characters, no prefix, more than one parameter); `table` with no `{param}` in the topic or with a composite primary key; a `{placeholder}` in `policy.custom` that is not the topic parameter. | Fix the option named in the message; topics look like `'lobby'` or `'room:{id}'`. |
+| `CHANNEL_RULE_NOT_SUPPORTED` | error | `channels.<name>.<broadcast\|presence>.<receive\|send>` | A rule that reads columns of a table row (`isOwner`, `belongsTo`, `matchesField`, `withCheck`): channel policies run on `realtime.messages`. | `true`, `isAuthenticated`, `public`, `none`, `hasRole`, `custom` (with `{param}`), `any` / `all`; set `table` to require that the user can read the row. |
+| `CHANNEL_TABLE_NOT_READABLE` | warning | `channels.<name>.table` | The channel's table has no select policy, so the row check never passes. | Add a select policy to the table. |
+| `CHANNEL_PUBLIC_SEND` | warning | `channels.<name>.<broadcast\|presence>.send` | Anonymous users can send or track presence. | Use `true` or a narrower rule. |
+| `CHANNEL_CLOSED` | warning | `channels.<name>` | The channel has no receive or send rule. | Add rules, or remove the channel. |
+
+Channels also produce `INVALID_IDENTIFIER` (name not snake_case or longer than 40 characters), `UNKNOWN_TABLE` (`table`), `INVALID_POLICY_RULE`, `EMPTY_COMBINATOR` and `UNWRAPPED_AUTH_CALL` (`policy.custom`).

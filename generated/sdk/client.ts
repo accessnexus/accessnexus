@@ -47,9 +47,17 @@ interface QueryBuilder extends PromiseLike<unknown> {
   maybeSingle(): QueryBuilder;
 }
 
+// Internal, loosely typed view of a supabase-js RealtimeChannel.
+interface RealtimeChannelLike {
+  on(type: string, filter: object, callback: (payload: unknown) => void): RealtimeChannelLike;
+  subscribe(callback?: (status: string, error?: Error) => void): unknown;
+}
+
 type AccessNexusTransport = {
   from(table: string): QueryBuilder;
   rpc(name: string, args: object): QueryBuilder;
+  channel?(name: string, options?: object): RealtimeChannelLike;
+  removeChannel?(channel: RealtimeChannelLike): unknown;
 };
 
 /**
@@ -60,7 +68,96 @@ export type AccessNexusProvider = {
   auth: unknown;
   from(table: string): unknown;
   rpc(name: string, args?: object): unknown;
+  channel?(name: string, options?: object): unknown;
+  removeChannel?(channel: never): unknown;
 };
+
+function realtimeTransport(provider: AccessNexusTransport, what: string): Required<Pick<AccessNexusTransport, 'channel' | 'removeChannel'>> {
+  if (typeof provider.channel !== 'function' || typeof provider.removeChannel !== 'function') {
+    throw new Error(`[AccessNexus] ${what} needs a Supabase client with Realtime (channel / removeChannel)`);
+  }
+  return provider as Required<Pick<AccessNexusTransport, 'channel' | 'removeChannel'>>;
+}
+
+/** Postgres Changes event to listen to. */
+export type RealtimeEvent = 'INSERT' | 'UPDATE' | 'DELETE' | '*';
+type RealtimeMeta = { schema: string; table: string; commit_timestamp: string; errors: string[] | null };
+/**
+ * One row change. `old` holds only the primary key (RLS tables send no more);
+ * DELETE has no `new` row.
+ */
+export type RealtimeChange<Row> =
+  | (RealtimeMeta & { eventType: 'INSERT'; new: Row; old: Record<string, never> })
+  | (RealtimeMeta & { eventType: 'UPDATE'; new: Row; old: Partial<Row> })
+  | (RealtimeMeta & { eventType: 'DELETE'; new: Record<string, never>; old: Partial<Row> });
+/** The change type of `subscribe`, narrowed by its `event` option. */
+export type RealtimeChangeOf<Row, TEvent extends RealtimeEvent> =
+  TEvent extends '*' ? RealtimeChange<Row> : Extract<RealtimeChange<Row>, { eventType: TEvent }>;
+type RealtimeFilterValue<V> = V | readonly V[] | { eq: V } | { neq: V } | { lt: V } | { lte: V } | { gt: V } | { gte: V } | { in: readonly V[] };
+/**
+ * Server-side filter of `subscribe`: exactly one column (Realtime accepts one),
+ * `{ project_id: id }`, `{ status: ['todo', 'done'] }` (in) or `{ views: { gt: 10 } }`.
+ * DELETE events ignore filters.
+ */
+export type RealtimeFilter<Row> = { [K in keyof Row]?: RealtimeFilterValue<NonNullable<Row[K]>> };
+/** Options of `subscribe`. */
+export type RealtimeSubscribeOptions<Row, TEvent extends RealtimeEvent = '*'> = {
+  event?: TEvent;
+  filter?: RealtimeFilter<Row>;
+  /** Channel status: SUBSCRIBED, CHANNEL_ERROR, TIMED_OUT or CLOSED. */
+  onStatus?: (status: string, error?: Error) => void;
+};
+
+const REALTIME_OPS = new Set(['eq', 'neq', 'lt', 'lte', 'gt', 'gte', 'in']);
+
+function realtimeFilter(filter: object | undefined): string | undefined {
+  const entries = Object.entries(filter ?? {}).filter(([, value]) => value !== undefined);
+  if (entries.length === 0) return undefined;
+  if (entries.length > 1) {
+    throw new Error('[AccessNexus] subscribe: Realtime filters on one column only');
+  }
+  const [column, value] = entries[0];
+  if (value === null) throw new Error(`[AccessNexus] subscribe: cannot filter ${column} on null`);
+  if (Array.isArray(value)) return `${column}=in.(${value.map(String).join(',')})`;
+  if (typeof value === 'object') {
+    const ops = Object.entries(value as Record<string, unknown>);
+    if (ops.length === 1 && REALTIME_OPS.has(ops[0][0])) {
+      const [op, operand] = ops[0];
+      return Array.isArray(operand) ? `${column}=${op}.(${operand.map(String).join(',')})` : `${column}=${op}.${String(operand)}`;
+    }
+  }
+  return `${column}=eq.${String(value)}`;
+}
+
+let realtimeSeq = 0;
+
+function realtimeSubscribe(
+  provider: AccessNexusTransport,
+  schema: string,
+  table: string,
+  listener: (change: unknown) => void,
+  options?: { event?: string; filter?: object; onStatus?: (status: string, error?: Error) => void },
+): () => void {
+  const realtime = realtimeTransport(provider, `${table}.subscribe`);
+  const filter = realtimeFilter(options?.filter);
+  realtimeSeq += 1;
+  const channel = realtime.channel(`accessnexus:${table}:${realtimeSeq}`);
+  channel
+    .on('postgres_changes', { event: options?.event ?? '*', schema, table, ...(filter ? { filter } : {}) }, listener)
+    .subscribe(options?.onStatus);
+  return () => {
+    void realtime.removeChannel(channel);
+  };
+}
+
+/** The provider's own RealtimeChannel type (unknown for a bare AccessNexusProvider). */
+export type ChannelOf<TClient extends AccessNexusProvider> =
+  TClient['channel'] extends ((...args: never[]) => infer C) | undefined ? C : unknown;
+
+function openChannel(provider: AccessNexusTransport, topic: string): RealtimeChannelLike {
+  // Private: Realtime checks the realtime.messages policies on join, send and receive.
+  return realtimeTransport(provider, `channel ${topic}`).channel(topic, { config: { private: true } });
+}
 
 function selectClause(
   columns: readonly string[] | undefined,
@@ -552,6 +649,15 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
         const match = requireFilter(filter, 'tasks.deleteMany');
         return provider.from('tasks').delete().match(match).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'tasks', TColumns>[]>;
       },
+
+      // Row changes over Supabase Realtime (Postgres Changes), only for rows the
+      // SELECT policy shows. DELETE events are not RLS-filtered and carry only the
+      // primary key. Returns a function that unsubscribes.
+      subscribe: <TEvent extends RealtimeEvent = '*'>(
+        listener: (change: RealtimeChangeOf<RowOf<'tasks'>, TEvent>) => void,
+        options?: RealtimeSubscribeOptions<RowOf<'tasks'>, TEvent>,
+      ) =>
+        realtimeSubscribe(provider, 'public', 'tasks', listener as (change: unknown) => void, options),
     },
 
     comments: {
@@ -626,6 +732,15 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
         const match = requireFilter(filter, 'comments.deleteMany');
         return provider.from('comments').delete().match(match).is('deleted_at', null).select(selectClause(options?.columns)) as unknown as QueryResult<SelectedRow<'comments', TColumns>[]>;
       },
+
+      // Row changes over Supabase Realtime (Postgres Changes), only for rows the
+      // SELECT policy shows. DELETE events are not RLS-filtered and carry only the
+      // primary key. Returns a function that unsubscribes.
+      subscribe: <TEvent extends RealtimeEvent = '*'>(
+        listener: (change: RealtimeChangeOf<RowOf<'comments'>, TEvent>) => void,
+        options?: RealtimeSubscribeOptions<RowOf<'comments'>, TEvent>,
+      ) =>
+        realtimeSubscribe(provider, 'public', 'comments', listener as (change: unknown) => void, options),
     },
 
     audit_log: {
@@ -786,6 +901,15 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
       search_tasks: (args: Functions['search_tasks']['Args']) =>
         provider.rpc('search_tasks', args) as unknown as QueryResult<Functions['search_tasks']['Returns']>,
 
+    },
+
+    // Private Realtime channels (Broadcast / Presence). Who may join, receive
+    // and send is decided by the realtime.messages policies of the schema.
+    channels: {
+      project_room: (id: string) =>
+        openChannel(provider, 'project:' + id) as ChannelOf<TClient>,
+      org_announcements: (id: string) =>
+        openChannel(provider, 'org:' + id) as ChannelOf<TClient>,
     },
 
   };

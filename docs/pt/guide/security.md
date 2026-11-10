@@ -173,6 +173,10 @@ A lista completa, com as correções, está em [Solução de problemas](/pt/guid
 
 O `validate` não consegue provar que uma policy expressa o que você quis dizer. Ele checa estrutura, não intenção: um `isOwner` na coluna errada, ou uma RPC definer que esquece de checar quem chama, passa.
 
+### O Realtime segue as mesmas policies {#realtime-follows-the-same-policies}
+
+Uma tabela com `realtime: true` entrega uma mudança só aos assinantes cuja policy de SELECT mostra a linha. As regras de canal viram policies de RLS em `realtime.messages`; com `table`, entrar também exige que o usuário consiga dar SELECT na linha que o tópico nomeia, checado como esse usuário. Um tópico malformado é negado, nunca vira erro. O `push` só remove policies de canal com nomes `<prefix>_rt_` próprios dele. Veja [Realtime](/pt/guide/realtime).
+
 ## O que o AccessNexus não protege {#what-accessnexus-does-not-protect}
 
 ::: warning Fora do alcance do gerador
@@ -184,12 +188,15 @@ O `validate` não consegue provar que uma policy expressa o que você quis dizer
 - **Regras removidas do schema.** Na v0.2.1, o `push` recria as policies que o schema declara, mas não remove uma policy gerada cuja operação você tirou (por exemplo, apagar `delete:` das `policies` de uma tabela), e não remove triggers ou RPCs removidos. Para revogar acesso, defina a operação como `policy.none()` em vez de apagar a chave, ou remova o objeto antigo à mão.
 - **Os grants padrão do Supabase.** Tabelas e RPCs invoker mantêm os grants padrão do Supabase (`anon` e `authenticated` podem chamá-las); é o RLS que protege as linhas lá dentro.
 - **Linhas com soft delete.** Elas continuam visíveis pelo RLS; só o SDK as filtra. Adicione `deleted_at IS NULL` ao `select` se leituras diretas pela API não devem vê-las.
+- **Deletes no Realtime.** O Supabase não aplica RLS a eventos DELETE: todo assinante de uma tabela publicada os recebe, só com a primary key. Não codifique segredos em primary keys de tabelas publicadas.
+- **Canais públicos do Realtime.** Policies em `realtime.messages` só valem para canais privados (os `channels.*` do SDK são privados). Desative o acesso público nas configurações de Realtime do projeto para que clients não possam entrar num tópico como público.
 :::
 
 ## Veja também {#related}
 
 - [Policies](/pt/guide/policies) e [Permissões](/pt/guide/permissions)
 - [RPCs](/pt/guide/rpcs): checando quem chama em código definer
+- [Realtime](/pt/guide/realtime): publication e autorização de canais
 - [Exemplos](/pt/guide/cookbook): as regras acima, aplicadas
 - [Projetos existentes](/pt/guide/existing-project): como as policies importadas continuam fail-closed
 - [Solução de problemas](/pt/guide/troubleshooting)

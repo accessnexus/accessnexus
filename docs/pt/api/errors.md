@@ -114,7 +114,7 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 | `SCHEMA_EMPTY` | warning | `(schema)` | O schema não tem tabelas. | Adicione tabelas. |
 | `INVALID_TABLE` | error | `<table>` | Uma entrada de tabela não é um objeto. | `<table>: table({ ... })`. |
 | `RPC_IN_TABLES` | error | `<table>` | Um `rpc()` foi colocado no meio das tabelas. | Passe-o em `defineSchema(tables, { rpcs: { ... } })`. |
-| `UNKNOWN_TABLE_KEY` | error | `<table>.<key>` | Opção de tabela desconhecida (seria ignorada, ex.: `polices`), ou tabelas aninhadas sob uma chave como `tables:`. | Use a opção sugerida; válidas: `columns`, `primaryKey`, `references`, `onDelete`, `policies`, `triggers`, `enableRLS`, `indexes`, `softDelete`. |
+| `UNKNOWN_TABLE_KEY` | error | `<table>.<key>` | Opção de tabela desconhecida (seria ignorada, ex.: `polices`), ou tabelas aninhadas sob uma chave como `tables:`. | Use a opção sugerida; válidas: `columns`, `primaryKey`, `compositePrimaryKey`, `references`, `onDelete`, `policies`, `triggers`, `enableRLS`, `indexes`, `softDelete`, `realtime`. |
 | `MISSING_COLUMNS` | error | `<table>.columns` | Algumas tabelas declaram `columns` e esta não. | Declare colunas em todas as tabelas (manual) ou em nenhuma (Database mode). |
 
 ### Identificadores {#identifiers}
@@ -191,3 +191,19 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 | `SEARCH_PATH_PINNED` | warning | `rpcs.<name>.set.search_path`, `<table>.triggers[<i>].set.search_path` | `set.search_path` difere de `pg_catalog, public`; funções geradas sempre fixam esse valor, então ele é ignorado. | Remova e qualifique com o schema tudo que está fora de `public` no corpo. |
 
 As RPCs também produzem `INVALID_IDENTIFIER` (nome ou nome de argumento), `UNKNOWN_COLUMN_TYPE` (tipo de argumento), `INVALID_DEFAULT` (um default de argumento que não é uma string SQL, ou um argumento sem default depois de um com default) e `UNWRAPPED_AUTH_CALL` (body).
+
+### Realtime {#realtime}
+
+| Código | Severidade | Path | Significado | Correção |
+| --- | --- | --- | --- | --- |
+| `INVALID_REALTIME` | error | `<table>.realtime` | `realtime` não é `true`, `false` nem `{ replicaIdentity: 'default' \| 'full' }`. | Use um desses valores. |
+| `REALTIME_NOT_READABLE` | warning | `<table>.realtime` | A tabela está publicada mas não tem policy de select (ou tem `policy.none()`): o Realtime entrega uma mudança só a quem tem a linha visível pela policy de SELECT, então ninguém recebe nada. | Adicione `policies.select`. |
+| `REALTIME_RLS_DISABLED` | warning | `<table>.realtime` | A tabela está publicada com `enableRLS: false`: todo assinante, inclusive anon, recebe toda mudança de linha. | Remova `enableRLS: false` e adicione uma policy de select. |
+| `REALTIME_REPLICA_FULL_WITH_RLS` | warning | `<table>.realtime.replicaIdentity` | `replicaIdentity: 'full'` numa tabela com RLS: o Supabase continua enviando só a primary key em `old`, então isso apenas aumenta o WAL. | Remova `replicaIdentity`. |
+| `INVALID_CHANNEL` | error | `channels.<name>...` | `channels` não é um objeto; um canal não foi criado com `channel()`; opção desconhecida; `topic` inválido (caracteres, sem prefixo, mais de um parâmetro); `table` sem `{param}` no tópico ou com primary key composta; um `{placeholder}` em `policy.custom` que não é o parâmetro do tópico. | Corrija a opção citada na mensagem; tópicos são como `'lobby'` ou `'room:{id}'`. |
+| `CHANNEL_RULE_NOT_SUPPORTED` | error | `channels.<name>.<broadcast\|presence>.<receive\|send>` | Uma regra que lê colunas de uma linha de tabela (`isOwner`, `belongsTo`, `matchesField`, `withCheck`): as policies de canal rodam em `realtime.messages`. | `true`, `isAuthenticated`, `public`, `none`, `hasRole`, `custom` (com `{param}`), `any` / `all`; defina `table` para exigir que o usuário consiga ler a linha. |
+| `CHANNEL_TABLE_NOT_READABLE` | warning | `channels.<name>.table` | A tabela do canal não tem policy de select, então a checagem da linha nunca passa. | Adicione uma policy de select à tabela. |
+| `CHANNEL_PUBLIC_SEND` | warning | `channels.<name>.<broadcast\|presence>.send` | Usuários anônimos podem enviar ou registrar presença. | Use `true` ou uma regra mais restrita. |
+| `CHANNEL_CLOSED` | warning | `channels.<name>` | O canal não tem regra de receive nem de send. | Adicione regras, ou remova o canal. |
+
+Os canais também produzem `INVALID_IDENTIFIER` (nome fora de snake_case ou com mais de 40 caracteres), `UNKNOWN_TABLE` (`table`), `INVALID_POLICY_RULE`, `EMPTY_COMBINATOR` e `UNWRAPPED_AUTH_CALL` (`policy.custom`).

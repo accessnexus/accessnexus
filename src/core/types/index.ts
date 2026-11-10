@@ -6,3 +6,4 @@ export * from './supabase.js';
 export * from './triggers.js';
 export * from './rpc.js';
 export * from './seed.js';
+export * from './realtime.js';

@@ -208,6 +208,29 @@ export async function dashboard(orgId: string) {
 
 `client.auth` is the provider's `auth` object, passed through unchanged (`db.auth.signInWithPassword(...)`, `db.auth.signInWithOAuth(...)`, `db.auth.getUser()`, ...). Its type is `TClient['auth']`, the provider's own `auth` type (`SupabaseAuthClient` for a supabase-js or @supabase/ssr client).
 
+## Realtime
+
+Tables with `realtime: true` get `subscribe`, and channels declared with [`channel()`](/api/realtime#channel) appear under `client.channels`. See the [Realtime guide](/guide/realtime).
+
+```ts
+const stop = db.tasks.subscribe((change) => {
+  // change.eventType: 'INSERT' | 'UPDATE' | 'DELETE'; change.new is a Tasks row
+}, { event: '*', filter: { project_id: projectId }, onStatus: (status) => console.log(status) });
+stop(); // unsubscribe (removes the channel)
+
+const room = db.channels.project_room(projectId); // supabase-js RealtimeChannel, private
+room.on('broadcast', { event: 'cursor' }, ({ payload }) => draw(payload)).subscribe();
+```
+
+| Option of `subscribe` | Type | Description |
+| --- | --- | --- |
+| `event` | `'INSERT' \| 'UPDATE' \| 'DELETE' \| '*'` | Event to listen to (default `'*'`); narrows the listener's `change`. |
+| `filter` | `RealtimeFilter<Row>` | One column: a value (eq), an array (in), or `{ eq \| neq \| lt \| lte \| gt \| gte \| in }`. Two columns or `null` throw. Ignored by Realtime for DELETE. |
+| `onStatus` | `(status, error?) => void` | `SUBSCRIBED`, `CHANNEL_ERROR`, `TIMED_OUT`, `CLOSED`. |
+
+`change` is `RealtimeChange<Row>`: `{ eventType, new, old, schema, table, commit_timestamp, errors }`, where `new` is the row on INSERT/UPDATE (empty on DELETE) and `old` holds the primary key (RLS tables send no more). `client.channels.<name>(param)` returns `ChannelOf<TClient>`: the `RealtimeChannel` type of the Supabase client you passed in.
+
+
 ## TanStack Query (React Query)
 
 With `adapterOptions: { reactQuery: true }`, `generate` also writes `react-query.ts` next to `client.ts`: query keys, `queryOptions` for every read and mutation options for every write and RPC, wrapping the generated client. It needs `@tanstack/react-query` v5 in your app (`npm i @tanstack/react-query`); AccessNexus itself does not depend on it. The file is the same in manual and Database mode.
@@ -233,6 +256,7 @@ export function Tasks({ projectId }: { projectId: string }) {
 | `q.<table>.findMany / findOne / findById(...)` | `queryOptions({ queryKey, queryFn })` | Same arguments and generics as the client (`columns`, `include` narrow `data`). Works with `useQuery`, `useSuspenseQuery`, `prefetchQuery`, `getQueryData(...queryKey)`. |
 | `q.<table>.create / update / delete / updateOne / updateMany / deleteOne / deleteMany()` | `{ mutationKey, mutationFn, onSuccess }` | Variables: `create(row)`, `update({ id, data })`, `delete(id)`, `updateOne/updateMany({ filter, data })`, `deleteOne/deleteMany(filter)`. The empty-filter guard of the client still throws. |
 | `q.rpc.<name>.query(args)` / `q.rpc.<name>.mutation()` | query / mutation options | Use `query` for reads, `mutation` for writes (it invalidates every AccessNexus query). |
+| `q.<table>.invalidateOnChange({ event?, filter? })` | `() => void` | Only on `realtime: true` tables: subscribes and invalidates the table (and the tables that embed it) on every change. Needs `queryClient`. Use in an effect: `useEffect(() => q.tasks.invalidateOnChange(), [])`. |
 | `accessNexusKeys` | key factory | `accessNexusKeys.<table>.all` = `['accessnexus', '<table>']`; `list`, `one`, `byId` and `rpc.<name>` below it. |
 
 - `queryFn` turns `{ data, error }` into a value or a rejection: `error` is thrown as-is (the Supabase `PostgrestError`, with `code` / `message` / `details`). Lists resolve to `[]` instead of `null`; `findOne` / `findById` resolve to `null` when no visible row matches.

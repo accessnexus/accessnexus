@@ -89,6 +89,10 @@ export interface IntrospectedTable {
   triggers?: IntrospectedTrigger[];
   /** Whether RLS is enabled on the table (only known with a direct DB connection). */
   rlsEnabled?: boolean;
+  /** In the supabase_realtime publication (direct DB only). */
+  realtime?: boolean;
+  /** REPLICA IDENTITY FULL (direct DB only). */
+  replicaIdentityFull?: boolean;
 }
 
 export interface IntrospectionResult {

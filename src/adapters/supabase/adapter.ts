@@ -6,6 +6,7 @@
 import { baseType, isNullable, normalizeColumn } from '../../core/types/columns.js';
 import { primaryKeyColumns, singlePrimaryKey } from '../../core/types/schema.js';
 import type { RpcArg, RpcSetofReturn, RpcTableReturn } from '../../core/types/rpc.js';
+import type { ChannelDef, ChannelRule } from '../../core/types/realtime.js';
 import type {
   Adapter,
   GeneratedOutput,
@@ -195,7 +196,179 @@ export class SupabaseAdapter implements Adapter {
       });
     }
 
+    const realtime = this.generateRealtimeSQL(schema);
+    if (realtime) outputs.push({ path: 'realtime.sql', content: realtime });
+
     return outputs;
+  }
+
+  // ---- Realtime ----
+
+  /**
+   * `realtime.sql` (policies folder): publication membership of the tables
+   * that declare `realtime`, and the `realtime.messages` policies of
+   * `channels`. Idempotent, so push re-applies it whenever it changes. `null`
+   * when the schema uses neither.
+   */
+  generateRealtimeSQL(schema: SchemaDef): string | null {
+    const channels = (schema as any).__channels as Record<string, ChannelDef> | undefined;
+    const tables = Object.entries(schema).filter(([, def]) => def.realtime !== undefined);
+    if (tables.length === 0 && channels === undefined) return null;
+
+    const { schemaName, policyPrefix } = this.options;
+    const lines: string[] = [];
+    if (this.options.timestamps) {
+      lines.push(`-- ============================================`);
+      lines.push(`-- AccessNexus: Auto-generated Realtime setup`);
+      if (!this.options.deterministic) {
+        lines.push(`-- Generated at: ${new Date().toISOString()}`);
+      }
+      lines.push(`-- ============================================`);
+      lines.push('');
+    }
+
+    if (tables.length > 0) {
+      lines.push(`-- Postgres Changes: publication membership (supabase_realtime).`);
+      lines.push(`-- Subscribers only receive rows their SELECT policy shows them.`);
+      lines.push(`DO $$`);
+      lines.push(`BEGIN`);
+      lines.push(`  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN`);
+      lines.push(`    RAISE WARNING 'AccessNexus: publication supabase_realtime does not exist; Realtime table changes were not applied';`);
+      lines.push(`    RETURN;`);
+      lines.push(`  END IF;`);
+      for (const [tableName, def] of tables) {
+        const inPublication = `SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND schemaname = ${quoteLiteral(schemaName)} AND tablename = ${quoteLiteral(tableName)}`;
+        if (def.realtime) {
+          lines.push(`  IF NOT EXISTS (${inPublication}) THEN`);
+          lines.push(`    ALTER PUBLICATION supabase_realtime ADD TABLE ${schemaName}.${tableName};`);
+        } else {
+          lines.push(`  IF EXISTS (${inPublication}) THEN`);
+          lines.push(`    ALTER PUBLICATION supabase_realtime DROP TABLE ${schemaName}.${tableName};`);
+        }
+        lines.push(`  END IF;`);
+      }
+      lines.push(`END $$;`);
+      lines.push('');
+      for (const [tableName, def] of tables) {
+        if (!def.realtime) continue;
+        const identity = typeof def.realtime === 'object' && def.realtime.replicaIdentity === 'full' ? 'FULL' : 'DEFAULT';
+        lines.push(`ALTER TABLE ${schemaName}.${tableName} REPLICA IDENTITY ${identity};`);
+      }
+      lines.push('');
+    }
+
+    if (channels !== undefined) {
+      const policyNames: string[] = [];
+      const statements: string[] = [];
+      for (const [channelName, def] of Object.entries(channels)) {
+        statements.push(`-- Channel ${channelName}: topic ${def.topic}${def.table ? ` (row of ${def.table})` : ''}`);
+        for (const extension of ['broadcast', 'presence'] as const) {
+          for (const action of ['receive', 'send'] as const) {
+            const name = `${policyPrefix}_rt_${channelName}_${extension}_${action}`;
+            statements.push(`DROP POLICY IF EXISTS "${name}" ON realtime.messages;`);
+            const rule = def[extension]?.[action];
+            if (rule === undefined || rule === false || (typeof rule === 'object' && rule.kind === 'none')) continue;
+            policyNames.push(name);
+            const condition = this.channelConditionSQL(schema, def, extension, rule);
+            const role = rule === true ? 'authenticated' : this.policyRoleFor(action === 'receive' ? 'select' : 'insert', rule);
+            if (action === 'receive') {
+              statements.push(
+                `CREATE POLICY "${name}"`,
+                `  ON realtime.messages FOR SELECT`,
+                `  TO ${role}`,
+                `  USING (`,
+                `    ${condition}`,
+                `  );`,
+              );
+            } else {
+              statements.push(
+                `CREATE POLICY "${name}"`,
+                `  ON realtime.messages FOR INSERT`,
+                `  TO ${role}`,
+                `  WITH CHECK (`,
+                `    ${condition}`,
+                `  );`,
+              );
+            }
+          }
+        }
+        statements.push('');
+      }
+
+      lines.push(`-- Broadcast / Presence authorization: RLS on realtime.messages (private channels).`);
+      lines.push(`-- Drop channel policies of this prefix that the schema no longer declares.`);
+      lines.push(`DO $$`);
+      lines.push(`DECLARE`);
+      lines.push(`  stale record;`);
+      lines.push(`BEGIN`);
+      lines.push(`  FOR stale IN`);
+      lines.push(`    SELECT policyname FROM pg_policies`);
+      lines.push(`    WHERE schemaname = 'realtime' AND tablename = 'messages'`);
+      lines.push(`      AND starts_with(policyname, ${quoteLiteral(`${policyPrefix}_rt_`)})`);
+      if (policyNames.length > 0) {
+        lines.push(`      AND policyname NOT IN (${policyNames.map((n) => quoteLiteral(n)).join(', ')})`);
+      }
+      lines.push(`  LOOP`);
+      lines.push(`    EXECUTE format('DROP POLICY %I ON realtime.messages', stale.policyname);`);
+      lines.push(`  END LOOP;`);
+      lines.push(`END $$;`);
+      lines.push('');
+      lines.push(...statements);
+    }
+
+    return `${lines.join('\n').trimEnd()}\n`;
+  }
+
+  /** USING / WITH CHECK of one channel policy on realtime.messages. */
+  private channelConditionSQL(
+    schema: SchemaDef,
+    def: ChannelDef,
+    extension: 'broadcast' | 'presence',
+    rule: Exclude<ChannelRule, false>,
+  ): string {
+    const topic = parseChannelTopic(def.topic);
+    const param = topic.param
+      ? `substr(realtime.topic(), ${topic.prefix.length + 1})`
+      : undefined;
+    const parts: string[] = [`realtime.messages.extension = ${quoteLiteral(extension)}`];
+    if (topic.param) {
+      parts.push(`left(realtime.topic(), ${topic.prefix.length}) = ${quoteLiteral(topic.prefix)}`);
+      parts.push(`length(realtime.topic()) > ${topic.prefix.length}`);
+    } else {
+      parts.push(`realtime.topic() = ${quoteLiteral(topic.prefix)}`);
+    }
+
+    if (rule === true) {
+      parts.push('(SELECT auth.uid()) IS NOT NULL');
+    } else {
+      let sql = this.ruleToSQL(rule);
+      if (topic.param && param) {
+        sql = sql.replaceAll(`{${topic.param}}`, param);
+      }
+      parts.push(`(${sql})`);
+    }
+
+    if (def.table && param) {
+      const tableDef = schema[def.table];
+      const pk = tableDef ? (singlePrimaryKey(tableDef) ?? 'id') : 'id';
+      const pkType = tableDef?.columns[pk] !== undefined ? baseType(normalizeColumn(tableDef.columns[pk]).type) : undefined;
+      // The topic parameter is text: compare without a cast that could raise on
+      // a malformed topic, and keep the primary-key index usable.
+      let match: string;
+      if (pkType === 'uuid') {
+        match = `${def.table}.${pk} = CASE WHEN ${param} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN ${param}::uuid END`;
+      } else if (pkType === 'int' || pkType === 'smallint' || pkType === 'bigint' || pkType === 'serial') {
+        match = `${def.table}.${pk} = CASE WHEN ${param} ~ '^[0-9]{1,18}$' THEN ${param}::bigint END`;
+      } else if (pkType === 'text' || pkType === 'varchar') {
+        match = `${def.table}.${pk} = ${param}`;
+      } else {
+        match = `${def.table}.${pk}::text = ${param}`;
+      }
+      // Runs as the subscriber, so the table's own SELECT policy decides.
+      parts.push(`EXISTS (SELECT 1 FROM ${this.options.schemaName}.${def.table} WHERE ${match})`);
+    }
+
+    return parts.join('\n    AND ');
   }
 
   /** Typed SDK files (`types.ts` + `client.ts`, or `client.ts` in Database mode). */
@@ -1208,6 +1381,9 @@ export class SupabaseAdapter implements Adapter {
   private emitClientBody(schema: SchemaDef, lines: string[], mode: 'manual' | 'database'): void {
     const rpcs = (schema as any).__rpcs as Record<string, RpcDef> | undefined;
     const rpcEntries = rpcs ? Object.entries(rpcs) : [];
+    const channels = Object.entries(((schema as any).__channels as Record<string, ChannelDef> | undefined) ?? {});
+    const realtimeTables = Object.entries(schema).filter(([, def]) => !!def.realtime).map(([name]) => name);
+    const usesRealtime = realtimeTables.length > 0 || channels.length > 0;
 
     lines.push(
       `type Tables = Database['public']['Tables'];`,
@@ -1252,9 +1428,21 @@ export class SupabaseAdapter implements Adapter {
       `  maybeSingle(): QueryBuilder;`,
       `}`,
       '',
+      ...(usesRealtime ? [
+        `// Internal, loosely typed view of a supabase-js RealtimeChannel.`,
+        `interface RealtimeChannelLike {`,
+        `  on(type: string, filter: object, callback: (payload: unknown) => void): RealtimeChannelLike;`,
+        `  subscribe(callback?: (status: string, error?: Error) => void): unknown;`,
+        `}`,
+        '',
+      ] : []),
       `type AccessNexusTransport = {`,
       `  from(table: string): QueryBuilder;`,
       `  rpc(name: string, args: object): QueryBuilder;`,
+      ...(usesRealtime ? [
+        `  channel?(name: string, options?: object): RealtimeChannelLike;`,
+        `  removeChannel?(channel: RealtimeChannelLike): unknown;`,
+      ] : []),
       `};`,
       '',
       `/**`,
@@ -1265,8 +1453,13 @@ export class SupabaseAdapter implements Adapter {
       `  auth: unknown;`,
       `  from(table: string): unknown;`,
       `  rpc(name: string, args?: object): unknown;`,
+      ...(usesRealtime ? [
+        `  channel?(name: string, options?: object): unknown;`,
+        `  removeChannel?(channel: never): unknown;`,
+      ] : []),
       `};`,
       '',
+      ...(usesRealtime ? this.realtimeClientHelpers(realtimeTables.length > 0, channels.length > 0) : []),
       `function selectClause(`,
       `  columns: readonly string[] | undefined,`,
       `  joins?: Record<string, string>,`,
@@ -1429,6 +1622,17 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`        const match = ${guard('deleteMany')};`);
       lines.push(`        return ${from}.delete().match(match)${live}.select(selectClause(options?.columns)) as unknown as QueryResult<${wRow}[]>;`);
       lines.push(`      },`);
+      if (tableDef.realtime) {
+        lines.push('');
+        lines.push(`      // Row changes over Supabase Realtime (Postgres Changes), only for rows the`);
+        lines.push(`      // SELECT policy shows. DELETE events are not RLS-filtered and carry only the`);
+        lines.push(`      // primary key. Returns a function that unsubscribes.`);
+        lines.push(`      subscribe: <TEvent extends RealtimeEvent = '*'>(`);
+        lines.push(`        listener: (change: RealtimeChangeOf<RowOf<'${tableName}'>, TEvent>) => void,`);
+        lines.push(`        options?: RealtimeSubscribeOptions<RowOf<'${tableName}'>, TEvent>,`);
+        lines.push(`      ) =>`);
+        lines.push(`        realtimeSubscribe(provider, '${this.options.schemaName}', '${tableName}', listener as (change: unknown) => void, options),`);
+      }
       lines.push(`    },`);
       lines.push('');
     }
@@ -1446,6 +1650,25 @@ export class SupabaseAdapter implements Adapter {
       lines.push('');
     }
 
+    if (channels.length > 0) {
+      lines.push(`    // Private Realtime channels (Broadcast / Presence). Who may join, receive`);
+      lines.push(`    // and send is decided by the realtime.messages policies of the schema.`);
+      lines.push(`    channels: {`);
+      for (const [channelName, def] of channels) {
+        const topic = parseChannelTopic(def.topic);
+        if (topic.param) {
+          const arg = JS_RESERVED.has(topic.param) ? `${topic.param}_` : topic.param;
+          lines.push(`      ${channelName}: (${arg}: string) =>`);
+          lines.push(`        openChannel(provider, ${quoteTsString(topic.prefix)} + ${arg}) as ChannelOf<TClient>,`);
+        } else {
+          lines.push(`      ${channelName}: () =>`);
+          lines.push(`        openChannel(provider, ${quoteTsString(topic.prefix)}) as ChannelOf<TClient>,`);
+        }
+      }
+      lines.push(`    },`);
+      lines.push('');
+    }
+
     lines.push(`  };`);
     lines.push(`}`);
     lines.push('');
@@ -1455,6 +1678,109 @@ export class SupabaseAdapter implements Adapter {
     lines.push(` */`);
     lines.push(`export type AccessNexusClient<TClient extends AccessNexusProvider = AccessNexusProvider> =`);
     lines.push(`  ReturnType<typeof createAccessNexusClient<TClient>>;`);
+  }
+
+  /** Shared Realtime types and runtime helpers of the generated client. */
+  private realtimeClientHelpers(tables: boolean, channels: boolean): string[] {
+    const out: string[] = [];
+    out.push(
+      `function realtimeTransport(provider: AccessNexusTransport, what: string): Required<Pick<AccessNexusTransport, 'channel' | 'removeChannel'>> {`,
+      `  if (typeof provider.channel !== 'function' || typeof provider.removeChannel !== 'function') {`,
+      `    throw new Error(\`[AccessNexus] \${what} needs a Supabase client with Realtime (channel / removeChannel)\`);`,
+      `  }`,
+      `  return provider as Required<Pick<AccessNexusTransport, 'channel' | 'removeChannel'>>;`,
+      `}`,
+      '',
+    );
+    if (tables) {
+      out.push(
+        `/** Postgres Changes event to listen to. */`,
+        `export type RealtimeEvent = 'INSERT' | 'UPDATE' | 'DELETE' | '*';`,
+        `type RealtimeMeta = { schema: string; table: string; commit_timestamp: string; errors: string[] | null };`,
+        `/**`,
+        ` * One row change. \`old\` holds only the primary key (RLS tables send no more);`,
+        ` * DELETE has no \`new\` row.`,
+        ` */`,
+        `export type RealtimeChange<Row> =`,
+        `  | (RealtimeMeta & { eventType: 'INSERT'; new: Row; old: Record<string, never> })`,
+        `  | (RealtimeMeta & { eventType: 'UPDATE'; new: Row; old: Partial<Row> })`,
+        `  | (RealtimeMeta & { eventType: 'DELETE'; new: Record<string, never>; old: Partial<Row> });`,
+        `/** The change type of \`subscribe\`, narrowed by its \`event\` option. */`,
+        `export type RealtimeChangeOf<Row, TEvent extends RealtimeEvent> =`,
+        `  TEvent extends '*' ? RealtimeChange<Row> : Extract<RealtimeChange<Row>, { eventType: TEvent }>;`,
+        `type RealtimeFilterValue<V> = V | readonly V[] | { eq: V } | { neq: V } | { lt: V } | { lte: V } | { gt: V } | { gte: V } | { in: readonly V[] };`,
+        `/**`,
+        ` * Server-side filter of \`subscribe\`: exactly one column (Realtime accepts one),`,
+        ` * \`{ project_id: id }\`, \`{ status: ['todo', 'done'] }\` (in) or \`{ views: { gt: 10 } }\`.`,
+        ` * DELETE events ignore filters.`,
+        ` */`,
+        `export type RealtimeFilter<Row> = { [K in keyof Row]?: RealtimeFilterValue<NonNullable<Row[K]>> };`,
+        `/** Options of \`subscribe\`. */`,
+        `export type RealtimeSubscribeOptions<Row, TEvent extends RealtimeEvent = '*'> = {`,
+        `  event?: TEvent;`,
+        `  filter?: RealtimeFilter<Row>;`,
+        `  /** Channel status: SUBSCRIBED, CHANNEL_ERROR, TIMED_OUT or CLOSED. */`,
+        `  onStatus?: (status: string, error?: Error) => void;`,
+        `};`,
+        '',
+        `const REALTIME_OPS = new Set(['eq', 'neq', 'lt', 'lte', 'gt', 'gte', 'in']);`,
+        '',
+        `function realtimeFilter(filter: object | undefined): string | undefined {`,
+        `  const entries = Object.entries(filter ?? {}).filter(([, value]) => value !== undefined);`,
+        `  if (entries.length === 0) return undefined;`,
+        `  if (entries.length > 1) {`,
+        `    throw new Error('[AccessNexus] subscribe: Realtime filters on one column only');`,
+        `  }`,
+        `  const [column, value] = entries[0];`,
+        `  if (value === null) throw new Error(\`[AccessNexus] subscribe: cannot filter \${column} on null\`);`,
+        `  if (Array.isArray(value)) return \`\${column}=in.(\${value.map(String).join(',')})\`;`,
+        `  if (typeof value === 'object') {`,
+        `    const ops = Object.entries(value as Record<string, unknown>);`,
+        `    if (ops.length === 1 && REALTIME_OPS.has(ops[0][0])) {`,
+        `      const [op, operand] = ops[0];`,
+        `      return Array.isArray(operand) ? \`\${column}=\${op}.(\${operand.map(String).join(',')})\` : \`\${column}=\${op}.\${String(operand)}\`;`,
+        `    }`,
+        `  }`,
+        `  return \`\${column}=eq.\${String(value)}\`;`,
+        `}`,
+        '',
+        `let realtimeSeq = 0;`,
+        '',
+        `function realtimeSubscribe(`,
+        `  provider: AccessNexusTransport,`,
+        `  schema: string,`,
+        `  table: string,`,
+        `  listener: (change: unknown) => void,`,
+        `  options?: { event?: string; filter?: object; onStatus?: (status: string, error?: Error) => void },`,
+        `): () => void {`,
+        `  const realtime = realtimeTransport(provider, \`\${table}.subscribe\`);`,
+        `  const filter = realtimeFilter(options?.filter);`,
+        `  realtimeSeq += 1;`,
+        `  const channel = realtime.channel(\`accessnexus:\${table}:\${realtimeSeq}\`);`,
+        `  channel`,
+        `    .on('postgres_changes', { event: options?.event ?? '*', schema, table, ...(filter ? { filter } : {}) }, listener)`,
+        `    .subscribe(options?.onStatus);`,
+        `  return () => {`,
+        `    void realtime.removeChannel(channel);`,
+        `  };`,
+        `}`,
+        '',
+      );
+    }
+    if (channels) {
+      out.push(
+        `/** The provider's own RealtimeChannel type (unknown for a bare AccessNexusProvider). */`,
+        `export type ChannelOf<TClient extends AccessNexusProvider> =`,
+        `  TClient['channel'] extends ((...args: never[]) => infer C) | undefined ? C : unknown;`,
+        '',
+        `function openChannel(provider: AccessNexusTransport, topic: string): RealtimeChannelLike {`,
+        `  // Private: Realtime checks the realtime.messages policies on join, send and receive.`,
+        `  return realtimeTransport(provider, \`channel \${topic}\`).channel(topic, { config: { private: true } });`,
+        `}`,
+        '',
+      );
+    }
+    return out;
   }
 
   // ---- TypeScript Generation (manual mode) ----
@@ -2151,7 +2477,7 @@ export class SupabaseAdapter implements Adapter {
       `import type { AccessNexusClient, AccessNexusProvider, ColumnsOf${includeTypes.map((t) => `, ${t}`).join('')} } from './client.js';`,
       '',
       `type Client = AccessNexusClient;`,
-      `type TableKey = Exclude<keyof Client, 'auth' | 'rpc'>;`,
+      `type TableKey = Exclude<keyof Client, 'auth' | 'rpc' | 'channels'>;`,
       `type FilterOf<K extends TableKey> = NonNullable<Parameters<Client[K]['findMany']>[0]>;`,
       `type CreateOf<K extends TableKey> = Parameters<Client[K]['create']>[0];`,
       `type UpdateOf<K extends TableKey> = Parameters<Client[K]['update']>[1];`,
@@ -2288,6 +2614,20 @@ export class SupabaseAdapter implements Adapter {
         `        mutationFn: (filter: FilterOf<'${t}'>) => unwrapList(client.${t}.deleteMany(filter)),`,
         `        onSuccess: invalidate(${affected}),`,
         `      }),`,
+      );
+      if (schema[t].realtime) {
+        lines.push(
+          `      // Keeps queries fresh: on every Realtime change of ${t} (that RLS lets this`,
+          `      // user see), invalidates ${t} and the tables that embed it. Call it in an`,
+          `      // effect and return its result: useEffect(() => q.${t}.invalidateOnChange(), []).`,
+          `      invalidateOnChange: (options?: Parameters<Client['${t}']['subscribe']>[1]) => {`,
+          `        if (!queryClient) throw new Error('[AccessNexus] ${t}.invalidateOnChange needs createAccessNexusQueries(client, { queryClient })');`,
+          `        const refresh = invalidate(${affected});`,
+          `        return client.${t}.subscribe(() => { void refresh(); }, options);`,
+          `      },`,
+        );
+      }
+      lines.push(
         `    },`,
         '',
       );
@@ -2358,3 +2698,27 @@ const RPC_SCALAR_TYPES = new Set([
 function normalizeRpcArg(arg: RpcArg): { type: string; default?: string } {
   return typeof arg === 'string' ? { type: arg } : { type: arg.type, default: arg.default };
 }
+
+/**
+ * `'project:{id}'` → `{ prefix: 'project:', param: 'id' }`; `'lobby'` →
+ * `{ prefix: 'lobby' }`. Validated by `validate` (INVALID_CHANNEL).
+ */
+export function parseChannelTopic(topic: string): { prefix: string; param?: string } {
+  const match = /^([A-Za-z0-9:_.-]*)\{([a-z][a-z0-9_]*)\}$/.exec(topic);
+  if (match) return { prefix: match[1], param: match[2] };
+  return { prefix: topic };
+}
+
+/** A TypeScript single-quoted string literal. */
+function quoteTsString(value: string): string {
+  return `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+}
+
+/** JS/TS words that cannot name a parameter of the generated client. */
+const JS_RESERVED = new Set([
+  'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else',
+  'enum', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof',
+  'new', 'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'var', 'void',
+  'while', 'with', 'yield', 'let', 'static', 'implements', 'interface', 'package', 'private', 'protected',
+  'public', 'await', 'arguments', 'eval',
+]);

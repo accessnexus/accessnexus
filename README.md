@@ -331,9 +331,16 @@ writes are `TO public` only for an explicit `policy.public()`.
   reports `INVALID_DEFAULT` for a bare word.
 - **Table options** — `columns`, `primaryKey` (or `compositePrimaryKey: ['a', 'b']`), `references`, `onDelete` (`{ col: 'cascade' |
   'set null' | 'restrict' | 'no action' }`; foreign keys are `NO ACTION` by default),
-  `policies`, `triggers`, `enableRLS`, `indexes`, `softDelete`. RLS is enabled and forced on
+  `policies`, `triggers`, `enableRLS`, `indexes`, `softDelete`, `realtime`. RLS is enabled and forced on
   every table: a table without `policies` is deny-all for the API (service role only).
   `enableRLS: false` is the explicit opt-out (the table is then open to the anon key).
+- **Realtime** — `realtime: true` on a table adds it to the `supabase_realtime` publication
+  (subscribers only get rows their SELECT policy shows) and gives the SDK a typed
+  `db.<table>.subscribe(listener, { event, filter })`. `defineSchema(tables, { channels })` with
+  `channel({ topic: 'project:{id}', table: 'projects', broadcast: { receive: true, send: true },
+  presence: { ... } })` turns Broadcast/Presence rules into RLS policies on `realtime.messages`
+  (with `table`, only users who can read that row may join) and adds `db.channels.<name>(id)`
+  (a private supabase-js channel). See the [Realtime guide](https://accessnexus.github.io/accessnexus/guide/realtime).
 - **`defineConfig`** (`accessnexus.config.ts`) — `schema`, `seed`, `output.{dir,migrations,policies,triggers,rpcs,sdk}`, `adapter` (default `supabase`), `adapterOptions`, `naming.policyPrefix` (default `accessnexus`), `generate.{sqlOnly,sdkOnly}`, `targets` (for `--target`).
 - **`defineSeed`** — manual `defineSeed(schema, data)` or Database-mode `defineSeed<DB>(data)`.
   Users referenced through `auth.users` FKs are created with a random password

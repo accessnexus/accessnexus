@@ -4,6 +4,43 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-10
+
+### Added
+
+- Supabase Realtime, from the schema:
+  - Table option `realtime: true` adds the table to the `supabase_realtime` publication,
+    `realtime: false` removes it, and leaving it out leaves the publication alone. It works in
+    manual and Database mode. `{ replicaIdentity: 'full' }` also sets `REPLICA IDENTITY FULL`.
+    Push applies the new idempotent `generated/policies/realtime.sql`. A database without the
+    publication gets a warning, not an error.
+  - `channel()` and `defineSchema(tables, { channels })` declare private Broadcast / Presence
+    channels. Each `receive` / `send` rule becomes an RLS policy on `realtime.messages`
+    (`<prefix>_rt_<channel>_<broadcast|presence>_<receive|send>`). The policy is scoped to the
+    extension and the topic (`'lobby'` or `'project:{id}'`). With `table`, every rule also
+    requires that the user can SELECT the row the topic names, checked as the user, so the
+    table's RLS decides; malformed keys are denied without errors. Rules: `true`, `false`,
+    `policy.isAuthenticated / public / none / hasRole / custom` (`{param}` placeholder) and
+    `any` / `all`. Push drops `<prefix>_rt_*` policies that are no longer declared and never
+    touches other policies on `realtime.messages`.
+  - SDK: `client.<table>.subscribe(listener, { event?, filter?, onStatus? })` on realtime
+    tables returns an unsubscribe function. Changes are typed from the row and narrowed by
+    `event`. Filters (one column, as Realtime allows) are typed: value, array (`in`) or
+    `{ eq | neq | lt | lte | gt | gte | in }`. `client.channels.<name>(param)` returns the
+    provider's private `RealtimeChannel`. New exported types: `RealtimeEvent`,
+    `RealtimeChange`, `RealtimeChangeOf`, `RealtimeFilter`, `RealtimeSubscribeOptions`,
+    `ChannelOf`. Schemas without Realtime generate the same client as before.
+  - React Query: `q.<table>.invalidateOnChange({ event?, filter? })` invalidates a realtime
+    table's queries, and those of the tables that embed it, on every change.
+  - `validate`: `INVALID_REALTIME`, `INVALID_CHANNEL` and `CHANNEL_RULE_NOT_SUPPORTED`
+    (errors); `REALTIME_NOT_READABLE`, `REALTIME_RLS_DISABLED`,
+    `REALTIME_REPLICA_FULL_WITH_RLS`, `CHANNEL_TABLE_NOT_READABLE`, `CHANNEL_PUBLIC_SEND` and
+    `CHANNEL_CLOSED` (warnings). `validate --json` adds `realtime` per table and `channels`.
+  - `init --db-url` imports published tables as `realtime: true` (with `replicaIdentity: 'full'`
+    when set). It lists the existing `realtime.messages` policies in the schema and the output
+    without importing them.
+- Exported types `ChannelDef`, `ChannelAccess`, `ChannelRule` and `TableRealtime`.
+
 ## [0.2.1] - 2026-11-10
 
 ### Security

@@ -8,7 +8,7 @@ import { queryOptions, type QueryClient } from '@tanstack/react-query';
 import type { AccessNexusClient, AccessNexusProvider, ColumnsOf, OrganizationsInclude, OrgMembersInclude, ProjectsInclude, TasksInclude, CommentsInclude, InvitationsInclude } from './client.js';
 
 type Client = AccessNexusClient;
-type TableKey = Exclude<keyof Client, 'auth' | 'rpc'>;
+type TableKey = Exclude<keyof Client, 'auth' | 'rpc' | 'channels'>;
 type FilterOf<K extends TableKey> = NonNullable<Parameters<Client[K]['findMany']>[0]>;
 type CreateOf<K extends TableKey> = Parameters<Client[K]['create']>[0];
 type UpdateOf<K extends TableKey> = Parameters<Client[K]['update']>[1];
@@ -383,6 +383,14 @@ export function createAccessNexusQueries<TClient extends AccessNexusProvider>(
         mutationFn: (filter: FilterOf<'tasks'>) => unwrapList(client.tasks.deleteMany(filter)),
         onSuccess: invalidate(accessNexusKeys.tasks.all, accessNexusKeys.comments.all),
       }),
+      // Keeps queries fresh: on every Realtime change of tasks (that RLS lets this
+      // user see), invalidates tasks and the tables that embed it. Call it in an
+      // effect and return its result: useEffect(() => q.tasks.invalidateOnChange(), []).
+      invalidateOnChange: (options?: Parameters<Client['tasks']['subscribe']>[1]) => {
+        if (!queryClient) throw new Error('[AccessNexus] tasks.invalidateOnChange needs createAccessNexusQueries(client, { queryClient })');
+        const refresh = invalidate(accessNexusKeys.tasks.all, accessNexusKeys.comments.all);
+        return client.tasks.subscribe(() => { void refresh(); }, options);
+      },
     },
 
     comments: {
@@ -437,6 +445,14 @@ export function createAccessNexusQueries<TClient extends AccessNexusProvider>(
         mutationFn: (filter: FilterOf<'comments'>) => unwrapList(client.comments.deleteMany(filter)),
         onSuccess: invalidate(accessNexusKeys.comments.all),
       }),
+      // Keeps queries fresh: on every Realtime change of comments (that RLS lets this
+      // user see), invalidates comments and the tables that embed it. Call it in an
+      // effect and return its result: useEffect(() => q.comments.invalidateOnChange(), []).
+      invalidateOnChange: (options?: Parameters<Client['comments']['subscribe']>[1]) => {
+        if (!queryClient) throw new Error('[AccessNexus] comments.invalidateOnChange needs createAccessNexusQueries(client, { queryClient })');
+        const refresh = invalidate(accessNexusKeys.comments.all);
+        return client.comments.subscribe(() => { void refresh(); }, options);
+      },
     },
 
     audit_log: {

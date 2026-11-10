@@ -86,7 +86,22 @@ jobs:
             GRANT EXECUTE ON FUNCTION auth.jwt() TO anon, authenticated;
             ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS email_confirmed_at timestamptz;"
 
+      - name: Prepare Supabase Realtime stand-ins
+        run: |
+          docker exec ${{ job.services.postgres.id }} psql -v ON_ERROR_STOP=1 -U supabase_admin -d postgres -c "
+            CREATE TABLE IF NOT EXISTS realtime.messages (
+              id uuid NOT NULL DEFAULT gen_random_uuid(), topic text NOT NULL, extension text NOT NULL,
+              payload jsonb, event text, private boolean DEFAULT false,
+              inserted_at timestamp NOT NULL DEFAULT now(), updated_at timestamp NOT NULL DEFAULT now());
+            ALTER TABLE realtime.messages ENABLE ROW LEVEL SECURITY;
+            CREATE OR REPLACE FUNCTION realtime.topic() RETURNS text LANGUAGE sql STABLE AS \$\$
+              SELECT nullif(current_setting('realtime.topic', true), '')::text \$\$;
+            GRANT USAGE ON SCHEMA realtime TO postgres, anon, authenticated;
+            GRANT SELECT, INSERT ON realtime.messages TO anon, authenticated;
+            GRANT EXECUTE ON FUNCTION realtime.topic() TO anon, authenticated;
+            ALTER TABLE realtime.messages OWNER TO postgres;"
+
       - name: Integration tests
         env:
           ACCESSNEXUS_TEST_DB_URL: postgres://postgres:postgres@127.0.0.1:55439/postgres
-        run: npx vitest run push.integration
+        run: npx vitest run push.integration realtime.integration

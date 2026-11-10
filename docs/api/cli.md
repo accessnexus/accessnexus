@@ -282,7 +282,7 @@ interface ErrorResult {
   version: string;
   error: { code: string; message: string; hint?: string; stack?: string /* --verbose */ };
   // SCHEMA_VALIDATION_FAILED adds: schemaPath, issues (errors and warnings), summary { errors, warnings }
-  //   (validate also adds mode, tables, rpcs)
+  //   (validate also adds mode, tables, rpcs, channels)
   [partial: string]: unknown;
 }
 
@@ -304,8 +304,10 @@ interface ValidateResult {
     rls: boolean;
     policies: string[];                                   // operations with a rule
     triggers: Array<{ kind: string; name: string | null }>;
+    realtime: boolean | null;                             // null: the table leaves the publication unmanaged
   }>;
   rpcs: string[];
+  channels: string[];                                     // defineSchema(..., { channels })
   issues: SchemaIssue[];                                  // warnings only
   summary: { errors: number; warnings: number };
 }

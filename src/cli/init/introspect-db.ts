@@ -50,6 +50,11 @@ export function parseProconfig(raw: unknown): Record<string, string> {
 
 export interface DbIntrospectionResult extends IntrospectionResult {
   functions: IntrospectedFunction[];
+  /**
+   * Policies on realtime.messages (Broadcast / Presence authorization). They are
+   * not imported: push leaves them alone (it only manages `<prefix>_rt_` ones).
+   */
+  realtimePolicies: string[];
 }
 
 // PostGIS / system tables that live in public but should not become schema.
@@ -131,10 +136,21 @@ WHERE schemaname = 'public'
 ORDER BY tablename, policyname;`;
 
 const RLS_SQL = `
-SELECT c.relname AS table_name, c.relrowsecurity AS rls_enabled
+SELECT c.relname AS table_name, c.relrowsecurity AS rls_enabled, c.relreplident::text AS replident
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p');`;
+
+// Realtime: published tables, and the Broadcast/Presence policies (both empty
+// on a database without the publication / the Realtime service).
+const REALTIME_TABLES_SQL = `
+SELECT tablename AS table_name FROM pg_publication_tables
+WHERE pubname = 'supabase_realtime' AND schemaname = 'public';`;
+
+const REALTIME_POLICIES_SQL = `
+SELECT policyname FROM pg_policies
+WHERE schemaname = 'realtime' AND tablename = 'messages'
+ORDER BY policyname;`;
 
 // User functions only — exclude anything owned by an extension (PostGIS, etc).
 const FUNCTIONS_SQL = `
@@ -185,6 +201,8 @@ export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionRes
     const fns = await client.query(FUNCTIONS_SQL);
     const rls = await client.query(RLS_SQL);
     const trgs = await client.query(TRIGGERS_SQL);
+    const rtTables = await client.query(REALTIME_TABLES_SQL);
+    const rtPolicies = await client.query(REALTIME_POLICIES_SQL);
 
     const tableMap = new Map<string, IntrospectedTable>();
     const ensure = (name: string): IntrospectedTable => {
@@ -278,9 +296,16 @@ export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionRes
       } satisfies IntrospectedPolicy);
     }
 
-    for (const row of rls.rows as Array<{ table_name: string; rls_enabled: boolean }>) {
+    for (const row of rls.rows as Array<{ table_name: string; rls_enabled: boolean; replident?: string }>) {
       const t = tableMap.get(row.table_name);
-      if (t) t.rlsEnabled = Boolean(row.rls_enabled);
+      if (!t) continue;
+      t.rlsEnabled = Boolean(row.rls_enabled);
+      if (row.replident === 'f') t.replicaIdentityFull = true;
+    }
+
+    for (const row of rtTables.rows as Array<{ table_name: string }>) {
+      const t = tableMap.get(row.table_name);
+      if (t) t.realtime = true;
     }
 
     const functions: IntrospectedFunction[] = (fns.rows as any[]).map((r) => ({
@@ -297,7 +322,8 @@ export async function introspectViaDb(dbUrl: string): Promise<DbIntrospectionRes
     }));
 
     const tables = Array.from(tableMap.values()).sort((a, b) => a.name.localeCompare(b.name));
-    return { tables, functions };
+    const realtimePolicies = (rtPolicies.rows as Array<{ policyname: string }>).map((r) => r.policyname);
+    return { tables, functions, realtimePolicies };
   } finally {
     await client.end().catch(() => {});
   }

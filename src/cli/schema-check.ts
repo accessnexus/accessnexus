@@ -14,7 +14,15 @@ const POLICY_OPERATIONS = ['select', 'insert', 'update', 'delete'] as const;
 /** Options accepted by table() / Database-mode table configs. */
 const TABLE_KEYS = [
   'columns', 'primaryKey', 'compositePrimaryKey', 'references', 'onDelete', 'policies', 'triggers', 'enableRLS', 'indexes', 'softDelete',
+  'realtime',
 ] as const;
+
+/** Rule kinds that make sense on realtime.messages (no row of a user table there). */
+const CHANNEL_RULE_KINDS = new Set(['authenticated', 'public', 'none', 'role', 'custom', 'any', 'all']);
+const CHANNEL_KEYS = ['topic', 'table', 'broadcast', 'presence'];
+const CHANNEL_ACCESS_KEYS = ['receive', 'send'];
+/** Fixed topic, or a prefix plus one trailing {param}. */
+const CHANNEL_TOPIC = /^[A-Za-z0-9:_.-]+$|^[A-Za-z0-9:_.-]*\{[a-z][a-z0-9_]*\}$/;
 
 const SCALAR_TYPES = new Set([
   'uuid', 'text', 'varchar', 'int', 'smallint', 'bigint', 'serial', 'float', 'decimal', 'numeric',
@@ -91,8 +99,12 @@ export interface SchemaSummary {
     policies: string[];
     /** `name` is the trigger's explicit name, or null when the generator derives it. */
     triggers: Array<{ kind: string; name: string | null }>;
+    /** Realtime publication: true/false as declared, null when the table leaves it unmanaged. */
+    realtime: boolean | null;
   }>;
   rpcs: string[];
+  /** Channel names declared in defineSchema(..., { channels }). */
+  channels: string[];
 }
 
 interface Ctx {
@@ -149,8 +161,10 @@ export function summarizeSchema(schema: Record<string, any>): SchemaSummary {
       triggers: Array.isArray(def?.triggers)
         ? def.triggers.map((t: any) => ({ kind: String(t?.kind ?? 'unknown'), name: typeof t?.name === 'string' ? t.name : null }))
         : [],
+      realtime: def?.realtime === undefined ? null : !!def.realtime,
     })),
     rpcs: Object.keys(((schema as any).__rpcs as Record<string, unknown> | undefined) ?? {}),
+    channels: Object.keys(((schema as any).__channels as Record<string, unknown> | undefined) ?? {}),
   };
 }
 
@@ -180,6 +194,8 @@ export function checkSchema(schema: unknown): SchemaIssue[] {
   ) as Record<string, any>;
   const rawRpcs = (schema as any).__rpcs;
   if (rawRpcs) Object.defineProperty(record, '__rpcs', { value: rawRpcs, enumerable: false });
+  const rawChannels = (schema as any).__channels;
+  if (rawChannels) Object.defineProperty(record, '__channels', { value: rawChannels, enumerable: false });
   const entries = Object.entries(record);
   if (entries.length === 0) {
     issues.push({
@@ -206,6 +222,21 @@ export function checkSchema(schema: unknown): SchemaIssue[] {
   const rpcs = (record as any).__rpcs as Record<string, any> | undefined;
   for (const [name, def] of Object.entries(rpcs ?? {})) {
     checkRpc(ctx, name, def);
+  }
+
+  const channels = (record as any).__channels as Record<string, any> | undefined;
+  if (channels !== undefined && (typeof channels !== 'object' || channels === null || Array.isArray(channels))) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_CHANNEL',
+      path: 'channels',
+      message: 'channels must be an object of channel() definitions',
+      hint: "defineSchema(tables, { channels: { room: channel({ topic: 'room:{id}', table: 'rooms', broadcast: { receive: true } }) } })",
+    });
+  } else {
+    for (const [name, def] of Object.entries(channels ?? {})) {
+      checkChannel(ctx, name, def);
+    }
   }
 
   return issues.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'error' ? -1 : 1));
@@ -524,6 +555,8 @@ function checkTable(ctx: Ctx, tableName: string, def: any): void {
     checkUserRowInsert(ctx, tableName, def);
     checkTenantParents(ctx, tableName, def);
   }
+
+  if (def.realtime !== undefined) checkTableRealtime(ctx, tableName, def);
 
   // Soft delete
   if (def.softDelete !== undefined && tableHasColumns && !(def.softDelete in columns)) {
@@ -1431,5 +1464,253 @@ function checkRpc(ctx: Ctx, name: string, def: any): void {
         hint: `Use one of: ${[...SCALAR_TYPES].join(', ')}.`,
       });
     }
+  }
+}
+
+// ---- Realtime ----
+
+function isReadable(def: any): boolean {
+  const select = def?.policies?.select;
+  return !!select && !(typeof select === 'object' && select.kind === 'none');
+}
+
+function checkTableRealtime(ctx: Ctx, tableName: string, def: any): void {
+  const path = `${tableName}.realtime`;
+  const value = def.realtime;
+  const validObject = !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).every((k) => k === 'replicaIdentity')
+    && (value.replicaIdentity === undefined || value.replicaIdentity === 'default' || value.replicaIdentity === 'full');
+  if (typeof value !== 'boolean' && !validObject) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_REALTIME',
+      path,
+      message: `realtime must be true, false or { replicaIdentity: 'default' | 'full' }, got ${JSON.stringify(value)}`,
+      hint: 'realtime: true publishes row changes to subscribers; false unpublishes the table.',
+    });
+    return;
+  }
+  if (!value) return;
+
+  if (def.enableRLS === false) {
+    push(ctx, {
+      severity: 'warning',
+      code: 'REALTIME_RLS_DISABLED',
+      path,
+      message: `Table "${tableName}" is published to Realtime with RLS disabled: every subscriber, anon included, receives every row change`,
+      hint: 'Remove enableRLS: false and add a select policy, so subscribers only receive rows they may read.',
+    });
+    return;
+  }
+  if (!isReadable(def)) {
+    push(ctx, {
+      severity: 'warning',
+      code: 'REALTIME_NOT_READABLE',
+      path,
+      message: `Table "${tableName}" is published to Realtime but has no select policy: no subscriber will receive its changes`,
+      hint: 'Add policies.select (Realtime delivers a change only to users whose SELECT policy shows the row).',
+    });
+  }
+  if (typeof value === 'object' && value.replicaIdentity === 'full') {
+    push(ctx, {
+      severity: 'warning',
+      code: 'REALTIME_REPLICA_FULL_WITH_RLS',
+      path: `${path}.replicaIdentity`,
+      message: `replicaIdentity: 'full' on "${tableName}" has no effect for subscribers: with RLS on, Supabase sends only the primary key in old`,
+      hint: "Drop replicaIdentity (it only grows the WAL); refetch the row by its key if you need the old values.",
+    });
+  }
+}
+
+function checkChannel(ctx: Ctx, name: string, def: any): void {
+  const path = `channels.${name}`;
+  if (!IDENTIFIER.test(name) || name.length > 40) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_IDENTIFIER',
+      path,
+      message: `Channel name "${name}" must be lowercase snake_case, at most 40 characters (it is part of policy names)`,
+    });
+  }
+  if (!def || typeof def !== 'object' || Array.isArray(def)) {
+    push(ctx, { severity: 'error', code: 'INVALID_CHANNEL', path, message: 'Channels are built with channel({ topic, ... })' });
+    return;
+  }
+  for (const key of Object.keys(def)) {
+    if (CHANNEL_KEYS.includes(key)) continue;
+    const suggestion = closest(key, CHANNEL_KEYS);
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_CHANNEL',
+      path: `${path}.${key}`,
+      message: `Unknown channel option "${key}"; it would be ignored`,
+      hint: suggestion ? `Did you mean "${suggestion}"? Options: ${CHANNEL_KEYS.join(', ')}.` : `Options: ${CHANNEL_KEYS.join(', ')}.`,
+    });
+  }
+
+  const topic = def.topic;
+  const param = typeof topic === 'string' ? /\{([a-z][a-z0-9_]*)\}$/.exec(topic)?.[1] : undefined;
+  if (typeof topic !== 'string' || !CHANNEL_TOPIC.test(topic)) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_CHANNEL',
+      path: `${path}.topic`,
+      message: `Invalid topic ${JSON.stringify(topic)}`,
+      hint: "Use a fixed topic ('lobby') or a prefix plus one trailing parameter ('project:{id}'); letters, digits and :_.- only.",
+    });
+  } else if (param && topic === `{${param}}`) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_CHANNEL',
+      path: `${path}.topic`,
+      message: `Topic "${topic}" has no prefix: it would match every channel`,
+      hint: `Add a prefix, e.g. '${name}:{${param}}'.`,
+    });
+  }
+
+  if (def.table !== undefined) {
+    const target = ctx.schema[def.table];
+    if (typeof def.table !== 'string' || !target) {
+      push(ctx, {
+        severity: 'error',
+        code: 'UNKNOWN_TABLE',
+        path: `${path}.table`,
+        message: `Channel table "${String(def.table)}" is not defined in the schema`,
+        hint: `Tables: ${Object.keys(ctx.schema).join(', ')}.`,
+      });
+    } else {
+      if (!param) {
+        push(ctx, {
+          severity: 'error',
+          code: 'INVALID_CHANNEL',
+          path: `${path}.topic`,
+          message: `Channel "${name}" names a table but its topic has no {parameter} for the row's key`,
+          hint: `Use topic: '${name}:{id}' — the parameter is ${def.table}'s primary key.`,
+        });
+      }
+      if (typeof target.primaryKey !== 'string' && Array.isArray(target.compositePrimaryKey)) {
+        push(ctx, {
+          severity: 'error',
+          code: 'INVALID_CHANNEL',
+          path: `${path}.table`,
+          message: `Table "${def.table}" has a composite primary key; a channel topic can carry only one key`,
+          hint: 'Point the channel at a table with a single primaryKey, or drop table and write the check with policy.custom().',
+        });
+      }
+      if (!isReadable(target)) {
+        push(ctx, {
+          severity: 'warning',
+          code: 'CHANNEL_TABLE_NOT_READABLE',
+          path: `${path}.table`,
+          message: `Table "${def.table}" has no select policy, so nobody can join channel "${name}"`,
+          hint: `Add ${def.table}.policies.select: the channel is open to users who can read the row its topic names.`,
+        });
+      }
+    }
+  }
+
+  let anyRule = false;
+  for (const extension of ['broadcast', 'presence']) {
+    const access = def[extension];
+    if (access === undefined) continue;
+    const accessPath = `${path}.${extension}`;
+    if (!access || typeof access !== 'object' || Array.isArray(access)) {
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_CHANNEL',
+        path: accessPath,
+        message: `${extension} must be { receive?, send? }`,
+      });
+      continue;
+    }
+    for (const [key, rule] of Object.entries(access)) {
+      const rulePath = `${accessPath}.${key}`;
+      if (!CHANNEL_ACCESS_KEYS.includes(key)) {
+        push(ctx, {
+          severity: 'error',
+          code: 'INVALID_CHANNEL',
+          path: rulePath,
+          message: `Unknown ${extension} option "${key}"`,
+          hint: 'Use receive (SELECT on realtime.messages) and send (INSERT).',
+        });
+        continue;
+      }
+      if (rule === undefined || rule === false) continue;
+      anyRule = true;
+      if (rule === true) continue;
+      checkChannelRule(ctx, rulePath, rule, param);
+      if (key === 'send' && anonCanWrite(rule)) {
+        push(ctx, {
+          severity: 'warning',
+          code: 'CHANNEL_PUBLIC_SEND',
+          path: rulePath,
+          message: `Anyone with your anon key can send on channel "${name}" (${extension})`,
+          hint: 'Use true (signed-in users) or a narrower rule unless anonymous senders are intended.',
+        });
+      }
+    }
+  }
+  if (!anyRule) {
+    push(ctx, {
+      severity: 'warning',
+      code: 'CHANNEL_CLOSED',
+      path,
+      message: `Channel "${name}" grants nothing: no broadcast/presence receive or send rule`,
+      hint: 'Add e.g. broadcast: { receive: true, send: true }, or remove the channel.',
+    });
+  }
+}
+
+function checkChannelRule(ctx: Ctx, path: string, rule: any, param: string | undefined): void {
+  if (!rule || typeof rule !== 'object' || typeof rule.kind !== 'string') {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_POLICY_RULE',
+      path,
+      message: `Channel rule must be true, false or a policy.*() rule, got ${JSON.stringify(rule)}`,
+    });
+    return;
+  }
+  if (!CHANNEL_RULE_KINDS.has(rule.kind)) {
+    push(ctx, {
+      severity: 'error',
+      code: 'CHANNEL_RULE_NOT_SUPPORTED',
+      path,
+      message: `policy rule "${rule.kind}" reads columns of a table row; channel policies run on realtime.messages`,
+      hint: 'Use true / isAuthenticated / public / none / hasRole / custom (with {param} for the topic parameter), any / all; '
+        + 'set the channel table to require that the user can read the row.',
+    });
+    return;
+  }
+  switch (rule.kind) {
+    case 'role':
+      if (typeof rule.role !== 'string' || rule.role.length === 0) {
+        push(ctx, { severity: 'error', code: 'INVALID_POLICY_RULE', path, message: 'policy.hasRole() needs a role name' });
+      }
+      break;
+    case 'custom': {
+      checkCustomExpression(ctx, path, rule.expression);
+      if (typeof rule.expression !== 'string') break;
+      for (const match of rule.expression.matchAll(/\{([a-z][a-z0-9_]*)\}/g)) {
+        if (match[1] === param) continue;
+        push(ctx, {
+          severity: 'error',
+          code: 'INVALID_CHANNEL',
+          path,
+          message: `policy.custom() uses {${match[1]}}, but the topic ${param ? `parameter is {${param}}` : 'has no parameter'}`,
+        });
+      }
+      break;
+    }
+    case 'any':
+    case 'all':
+      if (!Array.isArray(rule.rules) || rule.rules.length === 0) {
+        push(ctx, { severity: 'error', code: 'EMPTY_COMBINATOR', path, message: `policy.${rule.kind}([]) needs at least one rule` });
+        break;
+      }
+      rule.rules.forEach((sub: unknown, i: number) => checkChannelRule(ctx, `${path}.${rule.kind}[${i}]`, sub, param));
+      break;
+    default:
+      break;
   }
 }

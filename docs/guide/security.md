@@ -173,6 +173,10 @@ The complete list, with fixes, is in [Troubleshooting](/guide/troubleshooting#sc
 
 `validate` cannot prove that a policy expresses what you meant. It checks structure, not intent: an `isOwner` on the wrong column, or a definer RPC that forgets to check the caller, passes.
 
+### Realtime follows the same policies
+
+A table with `realtime: true` delivers a change only to subscribers whose SELECT policy shows the row. Channel rules become RLS policies on `realtime.messages`; with `table`, joining also requires that the user can SELECT the row the topic names, checked as that user. A malformed topic is denied, never an error. `push` only drops channel policies with its own `<prefix>_rt_` names. See [Realtime](/guide/realtime).
+
 ## What AccessNexus does not protect
 
 ::: warning Outside the generator's reach
@@ -184,12 +188,15 @@ The complete list, with fixes, is in [Troubleshooting](/guide/troubleshooting#sc
 - **Rules removed from the schema.** In v0.2.1, `push` re-creates the policies the schema declares but does not drop a generated policy whose operation you removed (for example deleting `delete:` from a table's `policies`), and does not drop removed triggers or RPCs. To revoke access, set the operation to `policy.none()` instead of deleting the key, or drop the old object by hand.
 - **Supabase's default grants.** Tables and invoker RPCs keep Supabase's default grants (`anon` and `authenticated` can call them); RLS is what protects the rows inside.
 - **Soft-deleted rows.** They stay visible through RLS; only the SDK filters them. Add `deleted_at IS NULL` to `select` if raw API reads must not see them.
+- **Realtime deletes.** Supabase does not apply RLS to DELETE events: every subscriber of a published table receives them, with the primary key only. Do not encode secrets in primary keys of published tables.
+- **Public Realtime channels.** Policies on `realtime.messages` only apply to private channels (the SDK's `channels.*` are private). Turn off public access in the project's Realtime settings so clients cannot join a topic as public.
 :::
 
 ## Related
 
 - [Policies](/guide/policies) and [Permissions](/guide/permissions)
 - [RPCs](/guide/rpcs): checking the caller in definer code
+- [Realtime](/guide/realtime): publication and channel authorization
 - [Examples](/guide/cookbook): the rules above, applied
 - [Existing projects](/guide/existing-project): how imported policies are kept fail-closed
 - [Troubleshooting](/guide/troubleshooting)

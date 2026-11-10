@@ -64,7 +64,8 @@ empty folder `init --yes` first creates a minimal `package.json` (`"type": "modu
 - `accessnexus.config.ts` — optional `export default defineConfig({...})` (paths, prefix).
 - `accessnexus.seed.ts` — optional `export default defineSeed(schema, {...})`.
 - `generated/migrations/` — `<timestamp>__init.sql`, `<timestamp>__changes.sql`, `.snapshot.json`.
-- `generated/policies/<table>_rls.sql`, `generated/triggers/<table>_triggers.sql`, `generated/rpcs/rpcs.sql`.
+- `generated/policies/<table>_rls.sql` (+ `generated/policies/realtime.sql` when the schema uses
+  Realtime), `generated/triggers/<table>_triggers.sql`, `generated/rpcs/rpcs.sql`.
 - `generated/sdk/` (or `output.sdk`) — `types.ts` + `client.ts` (derived, never edit).
 - The client wrapper `init` writes next to them (`index.ts`, or `server.ts` + `browser.ts`
   on Next.js) is YOUR file: `generate` never touches it; edit env var names freely.
@@ -469,6 +470,71 @@ export default defineSchema({
 });
 ```
 
+## Realtime (Postgres Changes, Broadcast, Presence)
+
+- Table option `realtime: true` adds the table to the `supabase_realtime` publication (push
+  applies `generated/policies/realtime.sql`); `realtime: false` removes it; leaving the key out
+  leaves the publication alone (dashboard settings survive). Realtime delivers a row change
+  only to users whose SELECT policy shows the row. `{ replicaIdentity: 'full' }` only helps on
+  `enableRLS: false` tables: with RLS, `old` holds just the primary key anyway.
+- Supabase does NOT apply RLS to DELETE events: every subscriber of a published table gets
+  them, with the primary key only. Filters do not apply to DELETE either.
+- `defineSchema(tables, { channels: { <name>: channel({...}) } })` declares PRIVATE
+  Broadcast/Presence channels; each rule becomes an RLS policy on `realtime.messages`
+  (`receive` = SELECT, `send` = INSERT), named `<prefix>_rt_<channel>_<broadcast|presence>_<receive|send>`.
+  Push drops `<prefix>_rt_*` policies the schema no longer declares and never touches others;
+  `channels: {}` removes all of them.
+- `topic`: fixed (`'lobby'`) or prefix + one trailing parameter (`'project:{id}'`). With
+  `table: 'projects'` the parameter is that table's primary key and EVERY rule also requires
+  that the user can SELECT that row (checked as the user, so the table's RLS decides; a
+  malformed key is denied, not an error).
+- Rules: `true` (any signed-in user), `false`/omitted/`policy.none()` (nobody),
+  `policy.isAuthenticated()`, `policy.public()` (anon too), `policy.hasRole(role)`,
+  `policy.custom(sql)` (`{param}` = topic parameter as text, `realtime.topic()` = whole topic),
+  `policy.any`/`policy.all`. Row rules (`isOwner`, `belongsTo`, `matchesField`, `withCheck`)
+  are rejected (`CHANNEL_RULE_NOT_SUPPORTED`).
+
+```ts
+import { channel, defineSchema, policy, table } from 'accessnexus';
+
+export default defineSchema({
+  projects: table({
+    columns: { id: 'uuid', owner_id: 'uuid', name: 'text' },
+    primaryKey: 'id',
+    policies: { select: policy.isOwner('owner_id'), insert: policy.isOwner('owner_id') },
+    realtime: true, // client.projects.subscribe(...)
+  }),
+}, {
+  channels: {
+    project_room: channel({            // client.channels.project_room(projectId)
+      topic: 'project:{id}',
+      table: 'projects',               // only users who can read that project row
+      broadcast: { receive: true, send: true },
+      presence: { receive: true, send: true },
+    }),
+    announcements: channel({           // client.channels.announcements()
+      topic: 'announcements',
+      broadcast: { receive: policy.public(), send: policy.hasRole('admin') },
+    }),
+    inbox: channel({                   // client.channels.inbox(userId)
+      topic: 'inbox:{user_id}',
+      broadcast: { receive: policy.custom('{user_id} = (SELECT auth.uid())::text') },
+    }),
+  },
+});
+```
+
+SDK: `client.<table>.subscribe(listener, { event?, filter?, onStatus? })` (realtime tables only)
+returns an unsubscribe function; `change` is typed from the row (`eventType`, `new`, `old`
+= primary key). `event: 'INSERT'|'UPDATE'|'DELETE'|'*'` narrows `change`. `filter` names
+exactly ONE column (Realtime limit): `{ project_id: id }` (eq), `{ status: ['a','b'] }` (in),
+`{ views: { gt: 10 } }` (`eq|neq|lt|lte|gt|gte|in`); two columns or `null` throw.
+`client.channels.<name>(param)` returns the supabase-js `RealtimeChannel` created with
+`{ config: { private: true } }` — use `.on('broadcast'|'presence', ...)`, `.subscribe()`,
+`.send()`, `.track()`, `supabase.removeChannel(ch)`. A provider without `channel` throws.
+`init --db-url` imports published tables as `realtime: true` and lists (does not import)
+existing `realtime.messages` policies.
+
 ## defineSeed
 
 ```ts
@@ -550,7 +616,8 @@ export const files = [...policies, ...triggers, ...migration, ...rpcs, ...sdk].m
 real DELETE; on soft-delete tables the trigger sets the column instead, so the DELETE policy
 decides), `updateOne(filter, patch, { columns? })`, `updateMany(filter, patch, { columns? })`,
 `deleteOne(filter, { columns? })`, `deleteMany(filter, { columns? })`, plus
-`rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js.
+`rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js. Realtime tables
+also get `subscribe(...)` and declared channels `channels.<name>(param)` (see Realtime above).
 - `updateOne` = `.update(patch).match(filter).select(columns).maybeSingle()`: one round trip,
   `Row | null` (null when no visible row matches; more than one match is PGRST116 and nothing
   is written) — update by any unique column (`{ slug }`). `updateMany` returns `Row[]`.
@@ -620,6 +687,8 @@ import { accessnexus } from './generated/sdk/index.js';
 const q = createAccessNexusQueries(accessnexus, { queryClient: new QueryClient() });
 const tasks = useQuery(q.tasks.findMany({ project_id: projectId }, { include: { project: true } }));
 const create = useMutation(q.tasks.create());
+// realtime tables: refresh queries on every change (returns the unsubscribe)
+useEffect(() => q.tasks.invalidateOnChange({ filter: { project_id: projectId } }), [projectId]);
 ```
 
 ## CLI reference
@@ -758,8 +827,9 @@ export interface ValidateResult {
   ok: true; command: 'validate'; version: string;
   schemaPath: string;
   mode: 'manual' | 'database';
-  tables: Array<{ name: string; columns: number; primaryKey: string | null; rls: boolean; policies: string[]; triggers: Array<{ kind: string; name: string | null }> }>;
+  tables: Array<{ name: string; columns: number; primaryKey: string | null; rls: boolean; policies: string[]; triggers: Array<{ kind: string; name: string | null }>; realtime: boolean | null }>;
   rpcs: string[];
+  channels: string[];
   issues: SchemaIssue[]; // warnings only (errors make ok=false)
   summary: { errors: number; warnings: number };
 }
@@ -1327,6 +1397,13 @@ export default defineSchema({
   custom policy or an RPC body), `PUBLIC_WRITE` (insert/update/delete open to anonymous
   visitors through `policy.public()`), `USER_ROW_INSERT_OPEN` (use `policy.isOwner('id')`),
   `AUDIT_INSERT_OPEN`, `GLOBAL_ROLE_IN_TENANT_TABLE`, `SCHEMA_EMPTY`.
+  Realtime: errors `INVALID_REALTIME` (`realtime` must be true/false/{ replicaIdentity }),
+  `INVALID_CHANNEL` (bad topic, unknown option, `table` without `{param}` or with a composite
+  key, a `{placeholder}` that is not the topic parameter), `CHANNEL_RULE_NOT_SUPPORTED` (row
+  rule in a channel: use `table` or `policy.custom`); warnings `REALTIME_NOT_READABLE` (published
+  table without select policy: nobody receives), `REALTIME_RLS_DISABLED` (everyone receives
+  every row), `REALTIME_REPLICA_FULL_WITH_RLS`, `CHANNEL_TABLE_NOT_READABLE` (nobody can
+  join), `CHANNEL_PUBLIC_SEND`, `CHANNEL_CLOSED` (no rule).
 - `SCHEMA_LOAD_FAILED` / `CONFIG_LOAD_FAILED` / `SEED_LOAD_FAILED` — the file threw while
   running or imports a package that is not installed; fix the named file/import.
 - `MODULE_SYNTAX_ERROR` — TypeScript/syntax error at the location shown. `TS_LOADER_MISSING`
@@ -1383,6 +1460,10 @@ export default defineSchema({
 ## Limits (v0.2.1)
 
 - Only the Supabase adapter exists. Database mode does not generate DDL migrations.
+- Realtime: Postgres Changes filters take one column; DELETE events are not RLS-filtered
+  and `old` is the primary key only; channel topics have at most one trailing parameter;
+  Broadcast payloads are untyped; channel policies apply to private channels only (turn off
+  public Realtime access in the project settings).
 - Migrations are generated from snapshot diffs; renames are detected heuristically — read
   `diff` output before pushing destructive changes (`-- Destructive:` comments).
 - The live plan (`diff --against-db`) covers the managed tables and the functions the
