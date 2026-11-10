@@ -16,7 +16,7 @@ npx accessnexus test-db up --push   # start the container and push your schema
 npx accessnexus test-db down        # remove it
 ```
 
-`up` starts `ghcr.io/supabase/postgres` on port `55439` (`--port`, `--name`, `--image` change it) and prints the URL, `postgres://postgres:postgres@127.0.0.1:55439/postgres`. It prepares the database the way a Supabase project behaves for RLS: `auth.uid()` and `auth.jwt()` read the request's JWT claims (as GoTrue's do), `auth.users` has `email_confirmed_at`, the `authenticator` role can log in and `realtime.messages` exists. `--push` also runs [`push`](/api/cli#push) against it, so the tables, policies, triggers and RPCs are the ones your schema generates. Docker must be installed (`DOCKER_NOT_FOUND`), and the port and container name must be free (`TEST_DB_START_FAILED`).
+`up` starts `ghcr.io/supabase/postgres` on port `55433` (`--port`, `--name`, `--image` change it) and prints the URL, `postgres://postgres:postgres@127.0.0.1:55433/postgres`. It prepares the database the way a Supabase project behaves for RLS: `auth.uid()` and `auth.jwt()` read the request's JWT claims (as GoTrue's do), `auth.users` has `email_confirmed_at`, the `authenticator` role can log in and `realtime.messages` exists. `--push` also runs [`push`](/api/cli#push) against it, so the tables, policies, triggers and RPCs are the ones your schema generates. It waits until connections stay up (the image restarts Postgres after its init). Docker must be installed (`DOCKER_NOT_FOUND`), the port must be free (`TEST_DB_PORT_IN_USE`: pick another `--port`) and so must the container name (`TEST_DB_START_FAILED`).
 
 ## Write the tests
 
@@ -26,7 +26,7 @@ Install the `pg` driver (`npm install -D pg`) and your test runner. Create fixtu
 import pg from 'pg';
 import { asAnon, asUser, affectedRows, expectDenied, sqlState } from 'accessnexus/testing';
 
-const pool = new pg.Pool({ connectionString: 'postgres://postgres:postgres@127.0.0.1:55439/postgres' });
+const pool = new pg.Pool({ connectionString: 'postgres://postgres:postgres@127.0.0.1:55433/postgres' });
 const ALICE = { id: '00000000-0000-4000-8000-000000000001', email: 'alice@test.dev' };
 
 export async function checks() {

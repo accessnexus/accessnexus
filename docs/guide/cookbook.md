@@ -535,7 +535,7 @@ To return whole rows of a table use `{ setof: 'bookings' }` (SDK `Bookings[]`). 
 3. Make the column required (`org_id: 'uuid'`) and run `generate` again: a `SET NOT NULL` migration. Against a database that already has the column, `riskyChanges` shows `column_nullability_tightened`.
 4. `npx accessnexus diff --against-db`, then `push`. The nullable column, the backfill and the `NOT NULL` apply in timestamp order, inside one transaction.
 
-Already generated the `NOT NULL` migration and not pushed it? `npx accessnexus migration discard` drops it (after checking that the database never applied it), restores the snapshot and regenerates; change the schema and run `generate` again. See [`migration`](/api/cli#migration).
+Already generated the `NOT NULL` migration and not pushed it? `npx accessnexus migration discard` drops it (after checking that the database never applied it) and restores the snapshot; change the schema and run `generate` again. Or change the schema first and run `migration amend` (discard + generate). See [`migration`](/api/cli#migration).
 
 ## Workspace list for a user
 

@@ -6,8 +6,27 @@
     "declaration": false,
     "declarationMap": false,
     "sourceMap": false,
-    "types": ["node"]
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "accessnexus": [
+        "./src/index.ts"
+      ],
+      "accessnexus/testing": [
+        "./src/testing/index.ts"
+      ],
+      "accessnexus/adapters/supabase": [
+        "./src/adapters/supabase/index.ts"
+      ]
+    }
   },
-  "include": ["examples/**/*.ts", "accessnexus.config.ts"],
-  "exclude": ["node_modules", "dist"]
+  "include": [
+    "examples/**/*.ts",
+    "accessnexus.config.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

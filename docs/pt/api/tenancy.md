@@ -84,6 +84,7 @@ tenantInvitations(options: TenantInvitationsOptions): {
 | `tenant` | `{ table, userColumn, tenantColumn, roleColumn }` | obrigatório | A tabela de membership, como no [`definePermissions`](/pt/api/permissions#tenantconfig); aqui o `roleColumn` é obrigatório. |
 | `tenantTable` | `string` | obrigatório | A tabela de tenant a que os convites pertencem: o alvo da foreign key (primary key `id`). |
 | `tenantNameColumn` | `string` | `undefined` | Coluna de `tenantTable` que o `my_invitations` mostra como `tenant_name`, por exemplo `'name'`. Sem ela o resultado não tem `tenant_name`. |
+| `tenantNameAlias` | `string` | `'tenant_name'` | Nome dessa coluna no resultado do `my_invitations`, por exemplo `'org_name'` para manter o formato de uma RPC que o app já lê (um resultado alterado é o risco `function_result_changed` do plano). |
 | `roles` | `EnumDef` ou `readonly string[]` | obrigatório | Papéis que um convite pode carregar: um [`defineEnum`](#defineenum) compartilhado (também o tipo da coluna de papel do membership) ou uma lista de valores. |
 | `inviterRoles` | `Record<string, readonly string[]>` | obrigatório | Quais papéis podem convidar, e quais papéis cada um pode conceder: `{ owner: ['admin', 'member', 'viewer'], admin: ['member', 'viewer'] }`. |
 | `roleType` | `string` | o enum compartilhado, ou `<tenant.table>_<roleColumn>_enum` | Tipo SQL da coluna de papel do membership, usado no cast do papel ao entrar. |

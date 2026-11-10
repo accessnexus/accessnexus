@@ -4,6 +4,41 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.2-next] - 2026-11-10
+
+Second round of the field report: what validating 0.4.1-next in the multi-tenant app found.
+
+### Changed
+
+- `migration discard` only discards: it drops the newest migration that no database applied,
+  restores the snapshot, and returns `regenerated: null`. The new `migration amend` does
+  discard + `generate` and returns the file it wrote in `regenerated`, or `null` when the
+  schema matches the restored state. `--no-generate` is gone.
+- `test-db` defaults to port 55433, so it no longer collides with the repository's test
+  container on 55439. A port already in use fails with `TEST_DB_PORT_IN_USE`.
+- The examples import `'accessnexus'` like a real project. In this repository vitest and the
+  examples typecheck alias it to `src/`, and the CLI resolves it from where the bundled schema
+  runs.
+
+### Added
+
+- Live plan:
+  - An index renamed in place (`ALTER INDEX ... RENAME`) shows as one `renamed` change with
+    `before.name` / `after.name`, not as removed + added. `summary` gains `renamed`.
+  - New risky change `function_result_changed`: an RPC's result type changes, so callers break.
+- `tenantInvitations({ tenantNameAlias })`: the column name of the tenant name in
+  `my_invitations`, e.g. `'org_name'` to keep the shape of a hand-written RPC.
+
+### Fixed
+
+- `test-db up` on a cold container could fail with `Connection terminated unexpectedly`,
+  because the image restarts Postgres after its init. It now waits for 3 consecutive host
+  connections (up to 90 s) before preparing the database.
+- Warnings and plans named a not-yet-generated migration with a timestamp computed on each run.
+  It is now `<pending>__changes.sql`.
+- Releases: pre-releases are published with the `next` dist-tag, and `latest` follows them only
+  while no stable version exists.
+
 ## [0.4.1-next] - 2026-11-10
 
 Fixes and features from a field report (a multi-tenant SaaS built on 0.4.0). Its schema and

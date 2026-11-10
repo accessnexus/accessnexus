@@ -81,6 +81,7 @@ interface SchemaIssue {
 | `MIGRATION_DISCARD_NEEDS_DB` | `migration discard` | Sem URL de banco, o comando não consegue checar que a migration nunca foi aplicada. | Passe `--url` / `--target` (ou defina a variável de ambiente configurada), ou `--force` quando nenhum ambiente a aplicou. |
 | `MIGRATION_HISTORY_MISSING` | `migration discard` | O snapshot foi gravado antes da 0.4.1 e não tem registro do estado anterior à migration. Nada foi apagado. | Reconstrua o snapshot anterior à mão, ou gere uma nova migration `__changes` que desfaça a mudança. |
 | `DOCKER_NOT_FOUND` | `test-db` | O comando `docker` não foi encontrado. | Instale o Docker (ou abra o Docker Desktop) e rode de novo. |
+| `TEST_DB_PORT_IN_USE` | `test-db up` | Algo já escuta na `--port` (padrão 55433). | Passe outra `--port`, ou pare o que a usa. |
 | `TEST_DB_START_FAILED` | `test-db up` | O `docker run` falhou (porta ou nome de container em uso), o banco não ficou pronto em 2 minutos, ou a preparação para os testes de RLS falhou. | Libere a porta (`--port`) ou escolha outro `--name`; veja `docker logs <name>`. |
 
 ### Adapter e target {#adapter-and-target}

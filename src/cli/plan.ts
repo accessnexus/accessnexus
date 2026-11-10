@@ -25,7 +25,8 @@ export type CatalogSnapshot = Record<string, SnapshotEntry>;
 export interface PlanChange {
   kind: PlanKind;
   object: string;
-  change: 'added' | 'removed' | 'modified';
+  /** `renamed`: indexes only — same definition under a new name (`before.name` → `after.name`). */
+  change: 'added' | 'removed' | 'modified' | 'renamed';
   before?: Record<string, unknown>;
   after?: Record<string, unknown>;
   /** For `modified`: the properties that differ. */
@@ -51,6 +52,7 @@ export type RiskCode =
   | 'trigger_dropped'
   | 'function_dropped'
   | 'function_volatility_changed'
+  | 'function_result_changed'
   | 'function_config_changed'
   | 'function_security_changed'
   | 'grant_widened'
@@ -339,8 +341,42 @@ export function diffSnapshots(before: CatalogSnapshot, after: CatalogSnapshot): 
       }
     }
   }
-  return changes.sort((x, y) =>
+  return pairIndexRenames(changes).sort((x, y) =>
     KIND_ORDER.indexOf(x.kind) - KIND_ORDER.indexOf(y.kind) || x.object.localeCompare(y.object));
+}
+
+/**
+ * A removed and an added index with the same definition (name aside) are one
+ * `ALTER INDEX ... RENAME`: report `renamed`, not a drop and a create.
+ */
+function pairIndexRenames(changes: PlanChange[]): PlanChange[] {
+  const shape = (c: PlanChange): string => {
+    const props = (c.after ?? c.before) as { table?: unknown; definition?: unknown };
+    return `${String(props.table)}|${String(props.definition).replace(/\bINDEX\s+("[^"]+"|\S+)\s+ON\b/i, 'INDEX ON')}`;
+  };
+  const added = changes.filter((c) => c.kind === 'index' && c.change === 'added');
+  const used = new Set<PlanChange>();
+  const result: PlanChange[] = [];
+  for (const c of changes) {
+    if (used.has(c)) continue;
+    if (c.kind === 'index' && c.change === 'removed') {
+      const match = added.find((a) => !used.has(a) && shape(a) === shape(c));
+      if (match) {
+        used.add(match);
+        const name = (object: string) => object.slice(object.lastIndexOf('.') + 1);
+        result.push({
+          kind: 'index',
+          object: match.object,
+          change: 'renamed',
+          before: { ...c.before, name: name(c.object) },
+          after: { ...match.after, name: name(match.object) },
+        });
+        continue;
+      }
+    }
+    result.push(c);
+  }
+  return result;
 }
 
 const KIND_LABEL: Record<PlanKind, string> = {
@@ -467,6 +503,8 @@ export function findRiskyChanges(changes: PlanChange[]): RiskyChange[] {
     }
     if (c.kind === 'function') {
       if (changed('volatility')) add('function_volatility_changed', c, `function ${c.object} ${fmt(before.volatility)} → ${fmt(after.volatility)}`);
+      // Callers read the result by shape (column names, types): a change breaks them.
+      if (changed('returns')) add('function_result_changed', c, `function ${c.object} returns ${fmt(before.returns)} → ${fmt(after.returns)}`);
       if (changed('config')) add('function_config_changed', c, `function ${c.object} config [${fmt(before.config)}] → [${fmt(after.config)}]`);
       if (changed('securityDefiner')) {
         add('function_security_changed', c, `function ${c.object} ${before.securityDefiner ? 'SECURITY DEFINER' : 'SECURITY INVOKER'} → ${after.securityDefiner ? 'SECURITY DEFINER' : 'SECURITY INVOKER'}`);
@@ -476,8 +514,8 @@ export function findRiskyChanges(changes: PlanChange[]): RiskyChange[] {
   return risky;
 }
 
-export function summarizeChanges(changes: PlanChange[]): { added: number; modified: number; removed: number } {
-  const summary = { added: 0, modified: 0, removed: 0 };
+export function summarizeChanges(changes: PlanChange[]): { added: number; modified: number; removed: number; renamed: number } {
+  const summary = { added: 0, modified: 0, removed: 0, renamed: 0 };
   for (const c of changes) summary[c.change] += 1;
   return summary;
 }
@@ -516,7 +554,9 @@ export function renderPlan(changes: PlanChange[], risky: RiskyChange[]): string[
     for (const c of group) {
       const mark = c.change === 'added' ? paint.green('+') : c.change === 'removed' ? paint.red('-') : paint.yellow('~');
       const flag = riskyKeys.has(`${c.kind}:${c.object}`) ? ` ${paint.red('(risky)')}` : '';
-      const detail = c.change === 'modified' ? '' : describeProps(c.kind, (c.after ?? c.before)!);
+      const detail = c.change === 'modified' ? ''
+        : c.change === 'renamed' ? `renamed from ${String(c.before?.name)}`
+        : describeProps(c.kind, (c.after ?? c.before)!);
       lines.push(`    ${mark} ${c.object}${detail ? paint.gray(` (${detail})`) : ''}${flag}`);
       if (c.change === 'modified') {
         for (const note of c.notes ?? []) lines.push(`        ${note}`);

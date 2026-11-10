@@ -535,7 +535,7 @@ Para retornar linhas inteiras de uma tabela, use `{ setof: 'bookings' }` (SDK `B
 3. Torne a coluna obrigatória (`org_id: 'uuid'`) e rode `generate` de novo: uma migration `SET NOT NULL`. Contra um banco que já tem a coluna, o `riskyChanges` mostra `column_nullability_tightened`.
 4. `npx accessnexus diff --against-db`, depois `push`. A coluna nullable, o backfill e o `NOT NULL` são aplicados em ordem de timestamp, dentro de uma transação.
 
-Já gerou a migration `NOT NULL` e ainda não fez o push? `npx accessnexus migration discard` a descarta (depois de conferir que o banco nunca a aplicou), restaura o snapshot e regenera; mude o schema e rode `generate` de novo. Veja [`migration`](/pt/api/cli#migration).
+Já gerou a migration `NOT NULL` e ainda não fez o push? `npx accessnexus migration discard` a descarta (depois de conferir que o banco nunca a aplicou) e restaura o snapshot; mude o schema e rode `generate` de novo. Ou mude o schema antes e rode `migration amend` (descarta + generate). Veja [`migration`](/pt/api/cli#migration).
 
 ## Lista de workspaces de um usuário {#workspace-list-for-a-user}
 

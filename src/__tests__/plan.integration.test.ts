@@ -297,6 +297,10 @@ describe.skipIf(!DB_URL)('live change plan against a real Supabase Postgres', ()
     writeSchema(notesSchema().replace("body: 'text' }", "body: 'text', org_id: 'uuid' }"));
     const diff = await cli('diff');
     expect(diff.json.warnings.map((w: any) => `${w.code} ${w.path}`)).toContain('NOT_NULL_COLUMN_ADDED notes.columns.org_id');
+    // Not generated yet: a stable placeholder name, not a timestamp computed on each run.
+    expect(diff.json.warnings.find((w: any) => w.code === 'NOT_NULL_COLUMN_ADDED').message).toContain('<pending>__changes.sql');
+    const pendingPlan = await cli('diff', '--against-db');
+    expect(pendingPlan.json.failed.file).toMatch(/<pending>__changes\.sql$/);
     const gen = await cli('generate');
     expect(gen.json.warnings.map((w: any) => w.code)).toContain('NOT_NULL_COLUMN_ADDED');
 

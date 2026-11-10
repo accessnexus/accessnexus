@@ -69,19 +69,21 @@ describe('migration discard (no database)', () => {
     expect(refused.json.error.code).toBe('MIGRATION_DISCARD_NEEDS_DB');
     expect(migrations()).toEqual([init, second]);
 
-    const discarded = await cli('migration', 'discard', '--force', '--no-generate');
+    // discard only discards: nothing is regenerated, even though the schema still differs.
+    const discarded = await cli('migration', 'discard', '--force');
     expect(discarded.code).toBe(0);
-    expect(discarded.json).toMatchObject({ discarded: `generated/migrations/${second}`, restoredTo: `generated/migrations/${init}`, checkedDatabase: null, generate: null });
+    expect(discarded.json).toMatchObject({ discarded: `generated/migrations/${second}`, restoredTo: `generated/migrations/${init}`, checkedDatabase: null, regenerated: null });
     expect(migrations()).toEqual([init]);
     expect(snapshot().lastMigrationFile).toBe(init);
     expect(snapshot().history).toBeUndefined();
 
-    // Regenerating from the restored state writes the same change again.
+    // amend = discard + generate, and says which file it wrote.
     await tick();
-    const regenerated = await cli('migration', 'discard', '--force');
+    const regenerated = await cli('migration', 'amend', '--force');
     expect(regenerated.code).toBe(0);
     expect(regenerated.json.discarded).toBe(`generated/migrations/${init}`);
     expect(regenerated.json.restoredTo).toBeNull();
+    expect(regenerated.json.regenerated).toMatch(/^generated\/migrations\/\d{14}__init\.sql$/);
     // The init itself was discarded: generate wrote a fresh __init with the title column.
     const [fresh] = migrations();
     expect(fresh).toMatch(/__init\.sql$/);
@@ -135,10 +137,11 @@ describe.skipIf(!DB_URL)('migration discard against a real database', () => {
     // Pending: discarded after checking the database, then regenerated (nullable now).
     writeSchema(", org_id: 'uuid?'");
     await tick();
-    const res = await cli('migration', 'discard', '--url', DB_URL!, '--sql-only');
+    const res = await cli('migration', 'amend', '--url', DB_URL!, '--sql-only');
     expect(res.code).toBe(0);
     expect(res.json.discarded).toBe(`generated/migrations/${pending}`);
     expect(res.json.checkedDatabase).toContain('127.0.0.1');
+    expect(res.json.regenerated).toMatch(/__changes\.sql$/);
     const [, replacement] = migrations();
     expect(replacement).not.toBe(pending);
     expect(readFileSync(join(cwd, 'generated', 'migrations', replacement), 'utf-8')).toMatch(/org_id UUID;/);
@@ -206,5 +209,21 @@ describe('test-db (without Docker)', () => {
       process.env.PATH = path;
     }
     expect((await cli('test-db', 'up', '--port', 'abc')).json.error.code).toBe('INVALID_FLAG_VALUE');
+  });
+});
+
+describe('test-db port check', () => {
+  it('refuses a port something already listens on (TEST_DB_PORT_IN_USE)', async () => {
+    const { createServer } = await import('node:net');
+    const server = createServer().listen(0, '127.0.0.1');
+    await new Promise((r) => server.once('listening', r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const res = await cli('test-db', 'up', '--port', String(port), '--name', 'accessnexus-port-check');
+      expect(res.code).toBe(1);
+      expect(['TEST_DB_PORT_IN_USE', 'DOCKER_NOT_FOUND']).toContain(res.json.error.code);
+    } finally {
+      server.close();
+    }
   });
 });

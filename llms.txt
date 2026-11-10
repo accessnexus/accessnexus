@@ -454,7 +454,8 @@ requireConfirmedEmail? = true, table? = 'invitations', rpcNames? })` returns `{ 
 - `accept_invitation(p_invitation uuid) → uuid` (definer): signed-in, e-mail confirmed
   (`auth.users.email_confirmed_at`), matching e-mail → joins with the invited role, consumes
   the invite, returns the tenant id. Errors: 42501 (anon / unconfirmed), P0002 (not found).
-- `my_invitations()` (definer, stable): the caller's invites with `tenant_name` (they cannot
+- `my_invitations()` (definer, stable): the caller's invites with `tenant_name` (rename it with
+  `tenantNameAlias: 'org_name'` to keep an existing RPC's result shape; they cannot
   read the tenant yet).
 
 ```ts
@@ -484,7 +485,7 @@ export default defineSchema({
 ```
 
 A complete multi-tenant schema built from these pieces (and its RLS test suite) ships in the
-repository as `examples/saas-teams/`.
+repository as `examples/saas-teams/` (it imports `'accessnexus'`: copy it as is).
 
 ## rpc (Postgres functions)
 
@@ -962,18 +963,22 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   `--schema`, `--prefix`, `--adapter`, `--target`.
 - `migration discard` — drop the NEWEST migration when the database never applied it
   (checks `public.accessnexus_migrations` through `--url`/`--target`/env; without a database
-  only with `--force`), restore the snapshot to the state before it (the snapshot keeps a
-  history), and regenerate from the schema (`--no-generate` to skip). Refuses with
+  only with `--force`) and restore the snapshot to the state before it (the snapshot keeps a
+  history). It does NOT regenerate (`regenerated: null`): change the schema, then `generate`.
+  `migration amend` = discard + generate, and reports the file it wrote in `regenerated`
+  (`null` when the schema matches the restored state). Refuses with
   `MIGRATION_ALREADY_APPLIED`; `MIGRATION_HISTORY_MISSING` for snapshots from < 0.4.1.
-  Use it to replace a pending migration (e.g. NOT NULL → nullable) instead of editing it.
+  Use them to replace a pending migration (e.g. NOT NULL → nullable) instead of editing it.
 - `migration data <name>` — create `<migrations>/data/<timestamp>__<name>.sql`: a data
   migration YOU write (e.g. a backfill UPDATE). Push applies it once, in timestamp order with
   the schema migrations (so between the migration generated before it and the one after),
   inside the push transaction, recorded in `accessnexus_migrations` (immutable afterwards).
-- `test-db up | down` — a disposable local `supabase/postgres` in Docker (`--port` 55439,
+  Messages and plans name a migration `generate` has not written yet `<pending>__changes.sql`.
+- `test-db up | down` — a disposable local `supabase/postgres` in Docker (`--port` 55433,
   `--name`, `--image`), prepared for RLS tests (GoTrue-like `auth.uid()`/`auth.jwt()`,
   `auth.users.email_confirmed_at`, `realtime.messages`); `up --push` also pushes the schema.
-  Prints the URL. `DOCKER_NOT_FOUND`, `TEST_DB_START_FAILED`.
+  Waits until connections are stable (the image restarts Postgres after its init). Prints the
+  URL. `DOCKER_NOT_FOUND`, `TEST_DB_PORT_IN_USE` (pick another `--port`), `TEST_DB_START_FAILED`.
 - `seed` — upsert seed rows. Flags: `--seed <path>`, `--url` (alias `--db-url`), `--dry-run` (prints the SQL),
   `--allow-remote-seed`, `--schema`, `--prefix`, `--adapter`, `--target`.
 - `help [command]`, `version` (also `--version`). With `--json` both print one object.
@@ -1043,7 +1048,7 @@ export interface DiffResult {
   schemaPath: string;
   changed: boolean;
   destructive: DestructiveStatement[]; // in migrations generate would write
-  summary: { added: number; modified: number; removed: number };
+  summary: { added: number; modified: number; removed: number; renamed: number };
   changes: Array<{ path: string; status: 'added' | 'modified' | 'removed'; diff: string }>;
   warnings: SchemaIssue[];
   hint?: string; // set when a database URL is configured: use `diff --against-db` for the live plan
@@ -1056,7 +1061,7 @@ export interface PlanChange {
   // 'public.notes' (table, rls) | 'public.notes.body' (column) | 'public.notes.<policy|trigger|constraint>'
   // | 'public.<index>' | 'public.fn(uuid, text)' (function) | 'table public.notes' / 'function public.fn()' (grant)
   object: string;
-  change: 'added' | 'removed' | 'modified';
+  change: 'added' | 'removed' | 'modified' | 'renamed'; // renamed: an index under a new name (before.name → after.name), same definition
   before?: Record<string, unknown>; // normalized catalog properties (absent when added)
   after?: Record<string, unknown>;  // (absent when removed)
   fields?: string[];                // modified: the properties that differ
@@ -1079,6 +1084,7 @@ export interface RiskyChange {
     | 'rls_disabled' | 'policy_dropped' | 'policy_roles_widened'
     | 'policy_permissive_changed' | 'trigger_dropped' | 'function_dropped'
     | 'function_volatility_changed' | 'function_config_changed' | 'function_security_changed'
+    | 'function_result_changed' // an RPC's result type/columns change: callers reading the old shape break
     | 'grant_widened'   // PUBLIC/anon/authenticated gains EFFECTIVE access on an existing object
     | 'grant_narrowed'; // ... loses it (PUBLIC losing what anon and authenticated both keep is not flagged)
   kind: PlanKind; object: string;
@@ -1102,7 +1108,7 @@ export interface LivePlan {
     line: number | null; statement: string | null; // the statement Postgres rejected (1-based line in file)
   }; // push would fail; `changes` then hold the partial plan up to it
   changed: boolean;
-  summary: { added: number; modified: number; removed: number };
+  summary: { added: number; modified: number; removed: number; renamed: number };
   changes: PlanChange[];
   riskyChanges: RiskyChange[];
   persisted: false;              // always: the rehearsal is rolled back
@@ -1216,7 +1222,8 @@ count). Do it in steps, in ONE push:
    `riskyChanges` shows `column_nullability_tightened` against a database that has the column).
 4. `diff --against-db`, then `push`: nullable → backfill → NOT NULL apply in timestamp order.
 Already generated the NOT NULL migration and not pushed it? `npx accessnexus migration discard`
-(checks the database never applied it), change the schema, `generate` again.
+(checks the database never applied it), change the schema, `generate` again — or change the
+schema first and run `migration amend` (discard + generate in one step).
 
 ### Workspace list for a user (orgs they belong to)
 
@@ -1529,14 +1536,14 @@ export default defineSchema({
 ## Testing RLS (accessnexus/testing)
 
 `npx accessnexus test-db up --push` starts a disposable `supabase/postgres` (Docker, port
-55439) prepared for RLS tests and pushes the schema; `test-db down` removes it. Never point
+55433) prepared for RLS tests and pushes the schema; `test-db down` removes it. Never point
 tests at a hosted project. Then, with `pg`:
 
 ```ts
 import pg from 'pg';
 import { asAnon, asUser, affectedRows, expectDenied, sqlState } from 'accessnexus/testing';
 
-const pool = new pg.Pool({ connectionString: 'postgres://postgres:postgres@127.0.0.1:55439/postgres' });
+const pool = new pg.Pool({ connectionString: 'postgres://postgres:postgres@127.0.0.1:55433/postgres' });
 const ALICE = { id: '00000000-0000-4000-8000-000000000001', email: 'alice@test.dev' };
 
 export async function checks() {
@@ -1714,8 +1721,8 @@ Test with `expectDenied` (both forms). In the app, the SDK turns the 0-row cases
   a new `__changes` migration instead. `MIGRATION_DISCARD_NEEDS_DB` — pass `--url`/`--target`
   (or `--force` if no environment ever applied it). `MIGRATION_HISTORY_MISSING` — the snapshot
   predates the history (< 0.4.1). `NO_MIGRATION_TO_DISCARD` — run `generate` first.
-- `DOCKER_NOT_FOUND` / `TEST_DB_START_FAILED` — `test-db` needs Docker, a free `--port` and
-  container `--name`; see `docker logs <name>`.
+- `DOCKER_NOT_FOUND` / `TEST_DB_PORT_IN_USE` / `TEST_DB_START_FAILED` — `test-db` needs Docker,
+  a free `--port` (default 55433) and container `--name`; see `docker logs <name>`.
 - `SQL_REJECTED` (validate --against-db issue) — Postgres rejected the SQL generated for
   `path`; fix that policy.custom / trigger.custom / rpc body / check.
 - `UNKNOWN_ENUM` — `'enum:<name>'` without `defineSchema(..., { enums: [defineEnum(...)] })`.

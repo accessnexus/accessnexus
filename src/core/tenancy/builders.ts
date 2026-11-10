@@ -20,6 +20,11 @@ export interface TenantInvitationsOptions {
   /** Column of `tenantTable` shown to invitees by `my_invitations` (e.g. `'name'`). */
   tenantNameColumn?: string;
   /**
+   * Name of that column in `my_invitations`' result (default `'tenant_name'`), e.g.
+   * `'org_name'` to keep the shape of a hand-written RPC the app already reads.
+   */
+  tenantNameAlias?: string;
+  /**
    * Roles an invitation may carry: a shared enum (`defineEnum`, the membership
    * column's type too) or the list of values.
    */
@@ -119,6 +124,7 @@ export function tenantInvitations(options: TenantInvitationsOptions): {
   const mine = options.rpcNames?.mine ?? 'my_invitations';
   const confirmed = options.requireConfirmedEmail !== false;
   const nameColumn = options.tenantNameColumn;
+  const nameAlias = options.tenantNameAlias ?? 'tenant_name';
 
   const rpcs: Record<string, RpcDef> = {
     [accept]: rpc({
@@ -159,7 +165,7 @@ END;`,
         table: {
           id: 'uuid',
           [tc]: 'uuid',
-          ...(nameColumn ? { tenant_name: 'text?' } : {}),
+          ...(nameColumn ? { [nameAlias]: 'text?' } : {}),
           role: `${tableName}.role`,
           created_at: 'timestamptz',
         },

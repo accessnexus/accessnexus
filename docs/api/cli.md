@@ -156,7 +156,7 @@ Without `--against-db`, `diff` compares the schema with the generated **files**,
 4. Run the push code path in the transaction: the same foreign policy/trigger drops (only with the `--replace-*` flags), the same skip/re-apply rules, the same files in the same order.
 5. Snapshot again, `ROLLBACK`, release the lock. Nothing persists: no objects, no `accessnexus_migrations` rows.
 
-The result lists `changes` (`kind`, `object`, `change`, `before`, `after`, `fields`) and `riskyChanges`: function volatility/config/security changes, policy roles widened (for example `authenticated` → `public`), policies, triggers, functions, tables or columns dropped, a column default removed, a type change, `NOT NULL` relaxed, RLS disabled or unforced, and grants. Grants are judged on **effective** access (`has_function_privilege` / `has_table_privilege` for `anon` and `authenticated`, plus the ACL's `PUBLIC` entry), not on the ACL's literal shape: `grant_widened` when one of them gains a privilege on an existing object, `grant_narrowed` when one loses it (`PUBLIC` losing a privilege that `anon` and `authenticated` both keep, as in a definer RPC's `REVOKE ... FROM PUBLIC` plus direct grants, is not flagged). A grant change carries `notes` with the access path per role, e.g. `anon EXECUTE: via PUBLIC → direct grant (no change in access)`; `before`/`after` keep the literal ACL (`privileges`) next to `effective`. With `--replace-foreign-triggers`, `keptTriggerFunctions` lists the functions of the dropped triggers (never dropped) and what still depends on them. Refusals the real push would stop at (`FOREIGN_POLICIES`, `FOREIGN_TRIGGERS`, `DESTRUCTIVE_MIGRATION`, `PUSH_ROLE_NO_BYPASSRLS`, `NOT_NULL_ON_NON_EMPTY_TABLE`) are in `blockers`, each with optional `details`. A pending migration that adds a `NOT NULL` column without a default to a table with rows is reported before Postgres fails: blocker `NOT_NULL_ON_NON_EMPTY_TABLE` with `details: { table, column, rows }`. Making an existing column `NOT NULL` shows as the risky change `column_nullability_tightened`. When Postgres would reject a file, the command exits `1` with `PUSH_WOULD_FAIL` and `failed` (`file`, `message`, `sqlState`, `line`, `statement`: the statement Postgres rejected, with its 1-based line in the file; when Postgres reports no position, the rehearsal replays the file statement by statement to find it). The result then carries the **partial** plan: `wouldApply` lists the files applied before the failure and `changes` the catalog changes up to it. Nothing was persisted.
+The result lists `changes` (`kind`, `object`, `change`, `before`, `after`, `fields`) and `riskyChanges`: function volatility/config/security changes, policy roles widened (for example `authenticated` → `public`), policies, triggers, functions, tables or columns dropped, a column default removed, a type change, `NOT NULL` relaxed, RLS disabled or unforced, and grants. Grants are judged on **effective** access (`has_function_privilege` / `has_table_privilege` for `anon` and `authenticated`, plus the ACL's `PUBLIC` entry), not on the ACL's literal shape: `grant_widened` when one of them gains a privilege on an existing object, `grant_narrowed` when one loses it (`PUBLIC` losing a privilege that `anon` and `authenticated` both keep, as in a definer RPC's `REVOKE ... FROM PUBLIC` plus direct grants, is not flagged). A grant change carries `notes` with the access path per role, e.g. `anon EXECUTE: via PUBLIC → direct grant (no change in access)`; `before`/`after` keep the literal ACL (`privileges`) next to `effective`. With `--replace-foreign-triggers`, `keptTriggerFunctions` lists the functions of the dropped triggers (never dropped) and what still depends on them. Refusals the real push would stop at (`FOREIGN_POLICIES`, `FOREIGN_TRIGGERS`, `DESTRUCTIVE_MIGRATION`, `PUSH_ROLE_NO_BYPASSRLS`, `NOT_NULL_ON_NON_EMPTY_TABLE`) are in `blockers`, each with optional `details`. A pending migration that adds a `NOT NULL` column without a default to a table with rows is reported before Postgres fails: blocker `NOT_NULL_ON_NON_EMPTY_TABLE` with `details: { table, column, rows }`. Making an existing column `NOT NULL` shows as the risky change `column_nullability_tightened`; a function whose result type changes shows as `function_result_changed` (callers reading the old shape break). An index renamed in place (same definition, new name: what a migration's `ALTER INDEX ... RENAME` does) is one change `renamed` with `before.name` / `after.name`, not a removal plus an addition; `summary` counts it under `renamed`. A migration `generate` has not written yet is named `<pending>__changes.sql`. When Postgres would reject a file, the command exits `1` with `PUSH_WOULD_FAIL` and `failed` (`file`, `message`, `sqlState`, `line`, `statement`: the statement Postgres rejected, with its 1-based line in the file; when Postgres reports no position, the rehearsal replays the file statement by statement to find it). The result then carries the **partial** plan: `wouldApply` lists the files applied before the failure and `changes` the catalog changes up to it. Nothing was persisted.
 
 ```bash
 npx accessnexus diff --against-db --json
@@ -233,15 +233,14 @@ Two subcommands for migration files. A subcommand is required (`UNKNOWN_COMMAND`
 
 ### migration discard {#migration-discard}
 
-Drop the **newest** migration when the database never applied it, restore the snapshot to the state before it and regenerate from the schema. Use it to replace a pending migration (for example a `NOT NULL` column that should have been nullable) instead of editing it: applied and pending migrations are immutable, and editing one is `MIGRATION_DRIFT`.
+Drop the **newest** migration when the database never applied it and restore the snapshot to the state before it. It does not regenerate: change the schema, then run `generate`. `migration amend` does both (discard, then `generate`). Use them to replace a pending migration (for example a `NOT NULL` column that should have been nullable) instead of editing it: applied and pending migrations are immutable, and editing one is `MIGRATION_DRIFT`.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--url <db-url>` / `--adapter <name>` / `--target <name>` | string | see [Database URL](#database-url) | Database used to check that the migration was never applied (`accessnexus_migrations`). Alias of `--url`: `--db-url`. |
 | `--force` | boolean | `false` | Discard without checking a database (no URL configured): you vouch that no environment ever applied it. |
-| `--no-generate` | boolean | `false` | Only discard; do not regenerate from the schema. |
 | `--last` | boolean | `false` | Discard the newest migration (the default and only mode). |
-| `--schema <path>` / `--output <dir>` / `--prefix <name>` | string | as in `generate` | Used by the regeneration. |
+| `--schema <path>` / `--output <dir>` / `--prefix <name>` / `--sql-only` / `--sdk-only` | | as in `generate` | Used by `migration amend` to regenerate. |
 
 The snapshot (`.snapshot.json`) keeps a `history` of earlier states, which is how the previous state is restored. Errors:
 
@@ -253,9 +252,10 @@ The snapshot (`.snapshot.json`) keeps a `history` of earlier states, which is ho
 ```bash
 npx accessnexus migration discard --json
 npx accessnexus migration discard --target staging
+npx accessnexus migration amend --target staging --json   # discard + generate
 ```
 
-The JSON result has `discarded` (the migration file), `restoredTo` (the previous migration, or `null` when the snapshot was removed and the next `generate` writes a new `__init`), `checkedDatabase` (redacted URL, or `null` with `--force`) and `generate` (the `generate` result, or `null` with `--no-generate`).
+The JSON result has `discarded` (the migration file), `restoredTo` (the previous migration, or `null` when the snapshot was removed and the next `generate` writes a new `__init`), `checkedDatabase` (redacted URL, or `null` with `--force`) and `regenerated`: `null` for `discard`; for `amend`, the migration `generate` wrote (`null` when the schema matches the restored state). `amend` also returns `generate` (the full `generate` result).
 
 ### migration data {#migration-data}
 
@@ -278,7 +278,7 @@ npx accessnexus test-db down
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--port <port>` | string | `55439` | Host port. |
+| `--port <port>` | string | `55433` | Host port. |
 | `--name <name>` | string | `accessnexus-test-db` | Container name. |
 | `--image <image>` | string | `ghcr.io/supabase/postgres:15.19.0.007` | Docker image. |
 | `--push` | boolean | `false` | With `up`: also run `push` against the new database. |
@@ -406,7 +406,7 @@ interface DiffResult {
   schemaPath: string;
   changed: boolean;
   destructive: DestructiveStatement[];                    // in migrations generate would write
-  summary: { added: number; modified: number; removed: number };
+  summary: { added: number; modified: number; removed: number; renamed: number };
   changes: Array<{ path: string; status: 'added' | 'modified' | 'removed'; diff: string }>;
   warnings: SchemaIssue[];                                // includes NOT_NULL_COLUMN_ADDED
   hint?: string;        // set when a database URL is configured: points to diff --against-db
@@ -437,16 +437,16 @@ interface LivePlan {
     line: number | null; statement: string | null;        // the statement Postgres rejected (1-based line in the file)
   };
   changed: boolean;
-  summary: { added: number; modified: number; removed: number };
+  summary: { added: number; modified: number; removed: number; renamed: number };
   changes: Array<{
     kind: 'table' | 'column' | 'constraint' | 'index' | 'rls' | 'policy' | 'trigger' | 'function' | 'grant';
     object: string;                                       // e.g. 'public.notes.accessnexus_notes_select', 'public.fn(uuid)'
-    change: 'added' | 'removed' | 'modified';
+    change: 'added' | 'removed' | 'modified' | 'renamed'; // renamed: an index under a new name (before.name → after.name)
     before?: Record<string, unknown>; after?: Record<string, unknown>;
     fields?: string[];                                    // modified: properties that differ
     notes?: string[];                                     // grants: access path per role, e.g. 'anon EXECUTE: via PUBLIC → direct grant (no change in access)'
   }>;
-  riskyChanges: Array<{ code: string; kind: string; object: string; message: string }>; // code includes column_nullability_tightened (existing nulls fail)
+  riskyChanges: Array<{ code: string; kind: string; object: string; message: string }>; // code includes column_nullability_tightened (existing nulls fail), function_result_changed
   persisted: false;
 }
 

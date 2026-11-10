@@ -69,7 +69,7 @@ describe('diffSnapshots', () => {
       ['policy', 'public.notes.p_select', 'modified'],
     ]);
     expect(changes[2].fields).toEqual(['using']);
-    expect(summarizeChanges(changes)).toEqual({ added: 1, modified: 1, removed: 1 });
+    expect(summarizeChanges(changes)).toEqual({ added: 1, modified: 1, removed: 1, renamed: 0 });
   });
 
   it('identical snapshots (role order aside — roles are sorted at capture) give no changes', () => {
@@ -92,6 +92,14 @@ describe('findRiskyChanges', () => {
     expect(findRiskyChanges(changes).map((r) => r.code)).toEqual([
       'function_volatility_changed', 'function_config_changed', 'function_security_changed',
     ]);
+  });
+
+  it('flags a function whose result type changes', () => {
+    const changes = diffSnapshots(
+      snap(['function', 'public.my_invitations()', fn({ returns: 'TABLE(id uuid, org_name text)' })]),
+      snap(['function', 'public.my_invitations()', fn({ returns: 'TABLE(id uuid, tenant_name text)' })]),
+    );
+    expect(findRiskyChanges(changes).map((r) => r.code)).toEqual(['function_result_changed']);
   });
 
   it('flags widened policy roles, dropped policies and permissive flips — not narrowed roles', () => {
@@ -136,6 +144,17 @@ describe('findRiskyChanges', () => {
       'column_nullability_relaxed public.a.id',
       'column_type_changed public.a.n',
     ]);
+  });
+
+  it('reports an index renamed in place as renamed, not removed + added', () => {
+    const before = snap(['index', 'public.idx_t_a_1', { table: 'public.t', definition: 'CREATE INDEX idx_t_a_1 ON public.t USING btree (a)' }],
+      ['index', 'public.idx_t_b_1', { table: 'public.t', definition: 'CREATE INDEX idx_t_b_1 ON public.t USING btree (b)' }]);
+    const after = snap(['index', 'public.idx_t_a', { table: 'public.t', definition: 'CREATE INDEX idx_t_a ON public.t USING btree (a)' }]);
+    const changes = diffSnapshots(before, after);
+    expect(changes.map((c) => `${c.change} ${c.object}`)).toEqual(['renamed public.idx_t_a', 'removed public.idx_t_b_1']);
+    expect(changes[0].before?.name).toBe('idx_t_a_1');
+    expect(changes[0].after?.name).toBe('idx_t_a');
+    expect(summarizeChanges(changes)).toEqual({ added: 0, modified: 0, removed: 1, renamed: 1 });
   });
 
   it('flags a column becoming NOT NULL', () => {

@@ -3,7 +3,8 @@
 // A task manager where everything lives inside an org, built from the
 // multi-tenant builders: no hand-written SQL for the usual tenant rules.
 //
-// In your project, import from 'accessnexus' instead of '../../src/index.js'.
+// Imports 'accessnexus' like a real project: copy it as is. (In this repository the
+// tests and the examples typecheck resolve it to src/.)
 // ============================================
 //
 //   orgs ─┬─ org_members   who belongs, with a role: owner > admin > member > viewer
@@ -30,7 +31,7 @@ import {
   table,
   tenantInvitations,
   trigger,
-} from '../../src/index.js';
+} from 'accessnexus';
 
 /** One role type for memberships, invitations and RPC results (no casts). */
 export const memberRole = defineEnum('member_role', ['owner', 'admin', 'member', 'viewer']);

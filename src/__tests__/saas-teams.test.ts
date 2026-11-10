@@ -111,6 +111,15 @@ describe('builders: validate checks', () => {
     ]));
   });
 
+  it('tenantInvitations: tenantNameAlias names the column of my_invitations', () => {
+    const inv = tenantInvitations({
+      tenant: { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id', roleColumn: 'role' },
+      tenantTable: 'orgs', tenantNameColumn: 'name', tenantNameAlias: 'org_name',
+      roles: ['member'], inviterRoles: { owner: ['member'] },
+    });
+    expect(Object.keys((inv.rpcs.my_invitations as any).returns.table)).toEqual(['id', 'org_id', 'org_name', 'role', 'created_at']);
+  });
+
   it('tenantInvitations: hand-out rules per inviter role', () => {
     const inv = tenantInvitations({
       tenant: { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id', roleColumn: 'role' },

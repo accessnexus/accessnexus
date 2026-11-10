@@ -81,6 +81,7 @@ interface SchemaIssue {
 | `MIGRATION_DISCARD_NEEDS_DB` | `migration discard` | No database URL, so the command cannot check that the migration was never applied. | Pass `--url` / `--target` (or set the configured env var), or `--force` when no environment ever applied it. |
 | `MIGRATION_HISTORY_MISSING` | `migration discard` | The snapshot was written before 0.4.1 and has no record of the state before the migration. Nothing was deleted. | Rebuild the previous snapshot by hand, or `generate` a new `__changes` migration that undoes the change. |
 | `DOCKER_NOT_FOUND` | `test-db` | The `docker` command was not found. | Install Docker (or start Docker Desktop) and run it again. |
+| `TEST_DB_PORT_IN_USE` | `test-db up` | Something already listens on `--port` (default 55433). | Pass another `--port`, or stop what uses it. |
 | `TEST_DB_START_FAILED` | `test-db up` | `docker run` failed (port or container name in use), the database was not ready within 2 minutes, or preparing it for RLS tests failed. | Free the port (`--port`) or pick another `--name`; check `docker logs <name>`. |
 
 ### Adapter and target

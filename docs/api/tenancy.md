@@ -84,6 +84,7 @@ tenantInvitations(options: TenantInvitationsOptions): {
 | `tenant` | `{ table, userColumn, tenantColumn, roleColumn }` | required | The membership table, as in [`definePermissions`](/api/permissions#tenantconfig); `roleColumn` is required here. |
 | `tenantTable` | `string` | required | The tenant table the invitations belong to: the foreign key target (primary key `id`). |
 | `tenantNameColumn` | `string` | `undefined` | Column of `tenantTable` that `my_invitations` shows as `tenant_name`, e.g. `'name'`. Without it the result has no `tenant_name`. |
+| `tenantNameAlias` | `string` | `'tenant_name'` | Name of that column in `my_invitations`' result, e.g. `'org_name'` to keep the shape of an RPC the app already reads (a changed result is the plan's `function_result_changed` risk). |
 | `roles` | `EnumDef` or `readonly string[]` | required | Roles an invitation may carry: a shared [`defineEnum`](#defineenum) (also the membership column's type) or a list of values. |
 | `inviterRoles` | `Record<string, readonly string[]>` | required | Which roles may invite, and which roles each may hand out: `{ owner: ['admin', 'member', 'viewer'], admin: ['member', 'viewer'] }`. |
 | `roleType` | `string` | the shared enum, or `<tenant.table>_<roleColumn>_enum` | SQL type of the membership role column, used to cast the role when joining. |

@@ -9,6 +9,7 @@
 // ============================================
 
 import { spawnSync } from 'node:child_process';
+import { connect as netConnect } from 'node:net';
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, relative, resolve } from 'node:path';
@@ -162,7 +163,7 @@ export const COMMANDS: Readonly<Record<CommandName, { summary: string; flags: Fl
     examples: ['npx accessnexus seed --dry-run', 'npx accessnexus seed --json'],
   },
   migration: {
-    summary: 'migration discard: drop the newest migration if no database applied it (restores the snapshot, regenerates); migration data <name>: create a data migration (backfill)',
+    summary: 'migration discard: drop the newest migration if no database applied it and restore the snapshot; migration amend: discard + generate; migration data <name>: create a data migration (backfill)',
     flags: {
       url: DB_FLAGS.url,
       'db-url': DB_FLAGS['db-url'],
@@ -172,14 +173,13 @@ export const COMMANDS: Readonly<Record<CommandName, { summary: string; flags: Fl
       ...OUTPUT_FLAGS,
       last: { kind: 'boolean', description: 'Discard the newest migration (the default and only mode)' },
       force: { kind: 'boolean', description: 'Discard without checking a database (no URL configured): you vouch it was never applied anywhere' },
-      'no-generate': { kind: 'boolean', description: 'Only discard; do not regenerate from the schema' },
     },
-    examples: ['npx accessnexus migration discard --json', 'npx accessnexus migration discard --target staging', 'npx accessnexus migration data backfill_task_org --json'],
+    examples: ['npx accessnexus migration discard --json', 'npx accessnexus migration amend --target staging --json', 'npx accessnexus migration data backfill_task_org --json'],
   },
   'test-db': {
     summary: 'test-db up | down: a disposable local Supabase Postgres (Docker) ready for RLS tests',
     flags: {
-      port: { kind: 'string', value: '<port>', description: 'Host port (default 55439)' },
+      port: { kind: 'string', value: '<port>', description: 'Host port (default 55433)' },
       name: { kind: 'string', value: '<name>', description: 'Container name (default accessnexus-test-db)' },
       image: { kind: 'string', value: '<image>', description: 'Image (default ghcr.io/supabase/postgres:15.19.0.007)' },
       push: { kind: 'boolean', description: 'With up: also run `push` against it' },
@@ -242,15 +242,16 @@ export async function runCli(argv: readonly string[]): Promise<number> {
         rest = rest.slice(1);
       }
     }
-    let migrationSub: { sub: 'discard' | 'data'; name?: string } | null = null;
+    let migrationSub: { sub: 'discard' | 'amend' | 'data'; name?: string } | null = null;
     if (name === 'migration') {
       const sub = rest[0];
-      if (sub !== 'discard' && sub !== 'data' && !rest.includes('--help') && !rest.includes('-h')) {
+      if (sub !== 'discard' && sub !== 'amend' && sub !== 'data' && !rest.includes('--help') && !rest.includes('-h')) {
         throw new CliError('UNKNOWN_COMMAND', `Unknown migration subcommand ${sub === undefined ? '(none)' : `"${sub}"`}`, {
-          hint: 'Use `npx accessnexus migration discard` (drop the newest, never-applied migration) or `npx accessnexus migration data <name>` (new data migration).',
+          hint: 'Use `npx accessnexus migration discard` (drop the newest, never-applied migration), `migration amend` '
+            + '(discard + generate) or `migration data <name>` (new data migration).',
         });
       }
-      if (sub === 'discard') {
+      if (sub === 'discard' || sub === 'amend') {
         migrationSub = { sub };
         rest = rest.slice(1);
       } else if (sub === 'data') {
@@ -313,15 +314,16 @@ async function dispatch(name: CommandName, flags: ParsedFlags): Promise<CommandR
       return runSeed(flags);
     case 'test-db':
       return runTestDb(flags);
-    case 'migration':
-      return (flags._migration as unknown as { sub: string } | undefined)?.sub === 'data'
-        ? runMigrationData(flags)
-        : runMigrationDiscard(flags);
+    case 'migration': {
+      const sub = (flags._migration as unknown as { sub: string } | undefined)?.sub;
+      if (sub === 'data') return runMigrationData(flags);
+      return runMigrationDiscard(flags, sub === 'amend');
+    }
   }
 }
 
-async function runMigrationDiscard(opts: ParsedFlags): Promise<CommandResult> {
-  log(`\n${brand()} migration discard...\n`);
+async function runMigrationDiscard(opts: ParsedFlags, regenerate: boolean): Promise<CommandResult> {
+  log(`\n${brand()} migration ${regenerate ? 'amend' : 'discard'}...\n`);
   const { config, fileConfig } = await loadConfigWithSource(opts);
   const outputBase = config.output.migrations;
   const last = lastSnapshotMigration(outputBase);
@@ -386,9 +388,17 @@ async function runMigrationDiscard(opts: ParsedFlags): Promise<CommandResult> {
     restoredTo: restoredTo ? relativePathFromCwd(resolve(outputBase, restoredTo)) : null,
     checkedDatabase: dbUrl ? redactUrl(dbUrl) : null,
   };
-  if (opts['no-generate'] === true) return { ...result, generate: null };
+  if (!regenerate) {
+    log(`  ${paint.gray('Nothing regenerated: change the schema, then run `npx accessnexus generate` (or use `migration amend`).')}\n`);
+    return { ...result, regenerated: null };
+  }
   const generate = await runGenerate(opts);
-  return { ...result, generate };
+  const files = (generate.files as Array<{ path: string; category: string; status: string }> | undefined) ?? [];
+  const regenerated = files.find((f) => f.category === 'migrations' && f.status === 'created' && f.path.endsWith('.sql'))?.path ?? null;
+  log(regenerated
+    ? `  ${paint.yellow('!')} Regenerated ${regenerated}: the schema still differs from the restored snapshot, so a new pending migration exists.\n`
+    : `  ${paint.green('✓')} The schema matches the restored snapshot: no new migration.\n`);
+  return { ...result, regenerated, generate };
 }
 
 let cachedVersion: string | undefined;
@@ -581,7 +591,8 @@ async function importFile(absolute: string, label: string): Promise<Record<strin
       packages: 'external',
       logLevel: 'silent',
     });
-    code = linkOwnPackage(result.outputFiles[0].text, dirname(absolute));
+    // Resolve imports from where the bundle will run (the temp folder below).
+    code = linkOwnPackage(result.outputFiles[0].text, bundleTempDir(dirname(absolute)));
   } catch (buildError: any) {
     const first = buildError?.errors?.[0];
     const where = first?.location ? ` (${first.location.file}:${first.location.line}:${first.location.column})` : '';
@@ -1024,7 +1035,7 @@ async function runDiffAgainstDb(
     }
     const files = [...byPath.keys()]
       .sort(bySqlFileOrder)
-      .map((absolute) => ({ path: relativePathFromCwd(absolute), sql: byPath.get(absolute)! }));
+      .map((absolute) => ({ path: pendingMigrationName(relativePathFromCwd(absolute), absolute), sql: byPath.get(absolute)! }));
     return { key, title: group?.title ?? key, files };
   });
   const migrationDestructive = groups[0].files.flatMap((file) => findDestructiveStatements(file.path, file.sql));
@@ -2141,7 +2152,7 @@ export interface LivePlan {
     line: number | null; statement: string | null;
   } | null;
   changed: boolean;
-  summary: { added: number; modified: number; removed: number };
+  summary: { added: number; modified: number; removed: number; renamed: number };
   changes: PlanChange[];
   riskyChanges: RiskyChange[];
   persisted: false;
@@ -2640,7 +2651,7 @@ function notNullColumnWarnings(groups: GeneratedGroup[], changedPaths: Set<strin
   if (!migrations) return [];
   return migrations.files
     .filter((file) => file.absolutePath.endsWith('.sql') && changedPaths.has(file.displayPath))
-    .flatMap((file) => findNotNullColumnAdds(file.displayPath, file.content))
+    .flatMap((file) => findNotNullColumnAdds(pendingMigrationName(file.displayPath, file.absolutePath), file.content))
     .map((add) => ({
       severity: 'warning' as const,
       code: 'NOT_NULL_COLUMN_ADDED',
@@ -2813,7 +2824,7 @@ function docker(args: string[], input?: string): { status: number; stdout: strin
 async function runTestDb(opts: ParsedFlags): Promise<CommandResult> {
   const action = opts._action as unknown as 'up' | 'down';
   const name = (opts.name as string | undefined) ?? 'accessnexus-test-db';
-  const port = Number((opts.port as string | undefined) ?? '55439');
+  const port = Number((opts.port as string | undefined) ?? '55433');
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new CliError('INVALID_FLAG_VALUE', `--port must be a TCP port, got "${String(opts.port)}"`);
   }
@@ -2827,6 +2838,11 @@ async function runTestDb(opts: ParsedFlags): Promise<CommandResult> {
   const url = `postgres://postgres:postgres@127.0.0.1:${port}/postgres`;
   log(`\n${brand()} test-db up (${image})...\n`);
   const running = docker(['ps', '-q', '--filter', `name=^${name}$`]).stdout.trim() !== '';
+  if (!running && await portInUse(port)) {
+    throw new CliError('TEST_DB_PORT_IN_USE', `Port ${port} is already in use`, {
+      hint: `Pick another one with --port (e.g. --port ${port + 1}), or stop what listens on ${port}.`,
+    });
+  }
   if (!running) {
     const run = docker(['run', '-d', '--rm', '--name', name, '-e', 'POSTGRES_PASSWORD=postgres', '-p', `${port}:5432`, image]);
     if (run.status !== 0) {
@@ -2850,6 +2866,9 @@ async function runTestDb(opts: ParsedFlags): Promise<CommandResult> {
       hint: `Check \`docker logs ${name}\`.`,
     });
   }
+  // The image restarts Postgres at the end of its init: wait until connections
+  // from the host succeed several times in a row before touching it.
+  await waitForStableConnection(url, name);
   const standins = docker(['exec', '-i', name, 'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'supabase_admin', '-d', 'postgres'], TEST_DB_STANDINS_SQL);
   if (standins.status !== 0) {
     throw new CliError('TEST_DB_START_FAILED', `Preparing ${name} failed: ${standins.stderr.trim()}`);
@@ -2911,4 +2930,59 @@ export function linkOwnPackage(code: string, sourceDir: string): string {
       return target ? `${lead}${quote}${target}${quote}` : match;
     }
   });
+}
+
+/** Is something listening on 127.0.0.1:<port>? */
+function portInUse(port: number): Promise<boolean> {
+  return new Promise((resolvePort) => {
+    const socket = netConnect({ host: '127.0.0.1', port });
+    socket.setTimeout(1000);
+    socket.once('connect', () => { socket.destroy(); resolvePort(true); });
+    socket.once('timeout', () => { socket.destroy(); resolvePort(false); });
+    socket.once('error', () => resolvePort(false));
+  });
+}
+
+/**
+ * Connect from the host until 3 consecutive attempts succeed (up to 90 s): the
+ * supabase/postgres image restarts the server after its init scripts, so a first
+ * success can be followed by "Connection terminated unexpectedly" / ECONNREFUSED.
+ */
+async function waitForStableConnection(url: string, name: string): Promise<void> {
+  let pgModule: any;
+  try {
+    const moduleName = 'pg';
+    pgModule = await import(moduleName);
+  } catch {
+    return; // no pg driver: the docker probe above is all we can do
+  }
+  const Client = pgModule.Client ?? pgModule.default?.Client;
+  const deadline = Date.now() + 90_000;
+  let streak = 0;
+  while (Date.now() < deadline) {
+    const client = new Client({ connectionString: url, connectionTimeoutMillis: 3000 });
+    try {
+      await client.connect();
+      await client.query('SELECT 1');
+      streak += 1;
+    } catch {
+      streak = 0;
+    } finally {
+      await client.end().catch(() => {});
+    }
+    if (streak >= 3) return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  throw new CliError('TEST_DB_START_FAILED', `${name} did not accept stable connections within 90 seconds`, {
+    hint: `Check \`docker logs ${name}\`, then run \`npx accessnexus test-db up\` again.`,
+  });
+}
+
+/**
+ * A migration `generate` has not written yet gets a new timestamp on every run:
+ * name it `<pending>__<suffix>.sql` in messages and plans until it exists.
+ */
+function pendingMigrationName(display: string, absolute: string): string {
+  if (existsSync(absolute)) return display;
+  return display.replace(/(^|\/)\d{14}__([^/]+\.sql)$/, '$1<pending>__$2');
 }
