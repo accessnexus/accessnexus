@@ -75,7 +75,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "esbuild": "^0.27.3"
+    "esbuild": "^0.28.2"
   },
   "peerDependencies": {
     "@supabase/supabase-js": ">=2.0.0",
