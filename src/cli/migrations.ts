@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { SupabaseAdapter } from '../adapters/supabase/adapter.js';
 import { baseType, isNullable, normalizeColumn } from '../core/types/columns.js';
@@ -32,6 +32,8 @@ interface TableState {
 
 interface SchemaState {
   readonly tables: Record<string, TableState>;
+  /** Shared enums (defineEnum): name → values. Absent when the schema has none. */
+  readonly enums?: Record<string, readonly string[]>;
 }
 
 interface MigrationSnapshotV1 {
@@ -55,6 +57,20 @@ interface MigrationSnapshotV3 {
   readonly schemaHash: string;
   readonly schemaState: SchemaState;
   readonly lastMigrationFile: string;
+  /**
+   * The states before the current one, oldest first (one per earlier migration),
+   * so `migration discard` can restore the previous state. Absent in snapshots
+   * written before 0.4.1.
+   */
+  readonly history?: readonly SnapshotState[];
+}
+
+/** The schema state right after one migration. */
+interface SnapshotState {
+  readonly lastMigrationFile: string;
+  readonly definitionHash: string;
+  readonly schemaHash: string;
+  readonly schemaState: SchemaState;
 }
 
 type MigrationSnapshot = MigrationSnapshotV1 | MigrationSnapshotV2 | MigrationSnapshotV3;
@@ -116,6 +132,14 @@ export function resolveVersionedMigrations(
     : fallbackSql;
 
   const content = incrementalSql.trim().length > 0 ? incrementalSql : '-- No DDL changes detected.\n';
+  const history: SnapshotState[] = snapshot.version === 3
+    ? [...(snapshot.history ?? []), {
+        lastMigrationFile: snapshot.lastMigrationFile,
+        definitionHash: snapshot.definitionHash,
+        schemaHash: snapshot.schemaHash,
+        schemaState: snapshot.schemaState,
+      }]
+    : [];
 
   return [
     { path: filename, content },
@@ -127,6 +151,7 @@ export function resolveVersionedMigrations(
         schemaHash,
         schemaState,
         lastMigrationFile: filename,
+        ...(history.length > 0 ? { history } : {}),
       }),
     },
   ];
@@ -152,6 +177,7 @@ function generateIncrementalMigration(previous: SchemaState, current: SchemaStat
 
   const normalizedPrevious = applyTableRenames(previous, tableRenames);
 
+  emitNamedEnumChanges(lines, normalizedPrevious, current);
   emitEnumChanges(lines, normalizedPrevious, current);
   emitRemovedTables(lines, normalizedPrevious, current);
   emitAddedTables(lines, current, normalizedPrevious, uuid);
@@ -201,6 +227,30 @@ function emitEnumChanges(lines: string[], previous: SchemaState, current: Schema
         lines.push('');
       }
     }
+  }
+}
+
+/** Shared enums: new types, added values (removed values / types need a manual step). */
+function emitNamedEnumChanges(lines: string[], previous: SchemaState, current: SchemaState): void {
+  const before = previous.enums ?? {};
+  const after = current.enums ?? {};
+  for (const [name, values] of Object.entries(after)) {
+    const old = before[name];
+    if (!old) {
+      lines.push(createEnumSQL(name, `enum(${values.map((v) => `'${escapeSqlString(v)}'`).join(',')})`));
+      lines.push('');
+      continue;
+    }
+    const added = values.filter((v) => !old.includes(v));
+    const removed = old.filter((v) => !values.includes(v));
+    for (const v of added) lines.push(`ALTER TYPE ${name} ADD VALUE IF NOT EXISTS '${escapeSqlString(v)}';`);
+    if (removed.length > 0) lines.push(`-- Manual action required: enum ${name} removed values (${removed.join(', ')}).`);
+    if (added.length > 0 || removed.length > 0) lines.push('');
+  }
+  for (const name of Object.keys(before)) {
+    if (after[name]) continue;
+    lines.push(`-- Manual action required: enum ${name} is no longer declared; DROP TYPE ${name}; once no column uses it.`);
+    lines.push('');
   }
 }
 
@@ -383,7 +433,12 @@ function emitIndexChanges(lines: string[], tableName: string, before: TableState
   const afterMap = new Map(after.indexes.map((index) => [indexSignature(index), index]));
 
   for (const [signature, index] of beforeMap) {
-    if (afterMap.has(signature)) continue;
+    const kept = afterMap.get(signature);
+    if (kept) {
+      // Same index, new name (e.g. the old position-based idx_<t>_<cols>_<n>): rename, never rebuild.
+      if (kept.name !== index.name) lines.push(`ALTER INDEX IF EXISTS ${index.name} RENAME TO ${kept.name};`);
+      continue;
+    }
     lines.push(`DROP INDEX IF EXISTS ${index.name};`);
   }
 
@@ -465,6 +520,7 @@ function columnTypeToPG(type: string, tableName: string, columnName: string): st
   if (isEnum(type)) {
     return enumTypeName(tableName, columnName);
   }
+  if (type.startsWith('enum:')) return type.slice(5);
 
   return map[type] ?? type.toUpperCase();
 }
@@ -503,7 +559,8 @@ function buildSchemaState(schema: SchemaDef): SchemaState {
     };
   }
 
-  return { tables };
+  const enums = (schema as any).__enums as Record<string, readonly string[]> | undefined;
+  return enums && Object.keys(enums).length > 0 ? { tables, enums: { ...enums } } : { tables };
 }
 
 function normalizeIndexes(
@@ -514,11 +571,14 @@ function normalizeIndexes(
   softDelete: string | undefined,
 ): readonly IndexState[] {
   const explicit = indexes ?? [];
-  const result: IndexState[] = explicit.map((index, idx) => ({
-    name: index.name ?? `idx_${tableName}_${index.columns.join('_')}_${idx + 1}`,
-    unique: index.unique ?? false,
-    columns: [...index.columns],
-  }));
+  const result: IndexState[] = [];
+  for (const index of explicit) {
+    result.push({
+      name: index.name ?? uniqueIndexName(defaultIndexName(tableName, index.columns, index.unique ?? false), result),
+      unique: index.unique ?? false,
+      columns: [...index.columns],
+    });
+  }
 
   const explicitSignatures = new Set(result.map((idx) => `${idx.unique ? 'u' : 'n'}|${idx.columns.join(',')}`));
   for (const [columnName, column] of Object.entries(columns)) {
@@ -527,6 +587,8 @@ function normalizeIndexes(
     if (columnName === primaryKey || column.unique) continue;
     const signature = `n|${columnName}`;
     if (explicitSignatures.has(signature)) continue;
+    // A declared index that starts with the column already serves the foreign key.
+    if (explicit.some((index) => index.columns[0] === columnName)) continue;
     result.push({
       name: `idx_${tableName}_${columnName}_fk`,
       unique: false,
@@ -547,7 +609,8 @@ function normalizeIndexes(
     }
   }
 
-  return result;
+  // Order-independent: reordering `indexes` in the schema is not a change.
+  return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function orderTablesByDependencies(state: SchemaState): string[] {
@@ -613,8 +676,20 @@ function onDeleteClause(action: string | undefined): string {
   return action ? ` ON DELETE ${action.toUpperCase()}` : '';
 }
 
+/** What an index does (its name aside): renaming is not a change. */
 function indexSignature(index: IndexState): string {
-  return `${index.unique ? 'u' : 'n'}|${index.name}|${index.columns.join(',')}|${index.predicate ?? ''}`;
+  return `${index.unique ? 'u' : 'n'}|${index.columns.join(',')}|${index.predicate ?? ''}`;
+}
+
+/** `idx_<table>_<columns>[_uniq]`: from the content only, so reordering `indexes` changes nothing. */
+export function defaultIndexName(tableName: string, columns: readonly string[], unique: boolean): string {
+  return `idx_${tableName}_${columns.join('_')}${unique ? '_uniq' : ''}`;
+}
+
+function uniqueIndexName(name: string, taken: readonly { name: string }[]): string {
+  let candidate = name;
+  for (let n = 2; taken.some((index) => index.name === candidate); n++) candidate = `${name}_${n}`;
+  return candidate;
 }
 
 function isEnum(type: string): boolean {
@@ -928,4 +1003,42 @@ function removeUndefined<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(
     Object.entries(value).filter(([, v]) => v !== undefined),
   ) as T;
+}
+
+/** The newest migration file the snapshot recorded (null without a v3 snapshot). */
+export function lastSnapshotMigration(outputBase: string): string | null {
+  const snapshot = readMigrationSnapshot(resolve(outputBase, '.snapshot.json'));
+  return snapshot?.version === 3 ? snapshot.lastMigrationFile : null;
+}
+
+/**
+ * Delete the newest migration and restore the snapshot to the state before it,
+ * so the next generate diffs from there. The caller checks it was never applied.
+ * Throws when the snapshot cannot be restored (written before history existed).
+ */
+export function discardLastMigration(outputBase: string): { discarded: string; restoredTo: string | null } {
+  const snapshotPath = resolve(outputBase, '.snapshot.json');
+  const snapshot = readMigrationSnapshot(snapshotPath);
+  if (!snapshot || snapshot.version !== 3) {
+    throw new Error('NO_SNAPSHOT');
+  }
+  const discarded = snapshot.lastMigrationFile;
+  const history = [...(snapshot.history ?? [])];
+  const previous = history.pop();
+  const isInit = /__init\.sql$/.test(discarded);
+  if (!previous && !isInit) {
+    throw new Error('HISTORY_MISSING');
+  }
+  const migrationPath = resolve(outputBase, discarded);
+  if (existsSync(migrationPath)) unlinkSync(migrationPath);
+  if (!previous) {
+    unlinkSync(snapshotPath);
+    return { discarded, restoredTo: null };
+  }
+  writeFileSync(snapshotPath, stringifySnapshot({
+    version: 3,
+    ...previous,
+    ...(history.length > 0 ? { history } : {}),
+  }));
+  return { discarded, restoredTo: previous.lastMigrationFile };
 }

@@ -7,6 +7,7 @@ import { withExpandedPolicies } from '../policy/expand.js';
 import type { ColumnInput } from '../types/columns.js';
 import type { ChannelDef } from '../types/realtime.js';
 import type { EdgeFunctionDef } from '../types/edge-function.js';
+import type { EnumDef } from '../types/enum.js';
 import type { RpcDef } from '../types/rpc.js';
 import type { SchemaDef, TableDef } from '../types/schema.js';
 import type { SupabaseDatabase, SupabaseSchemaInput } from '../types/supabase.js';
@@ -29,6 +30,11 @@ export interface SchemaOptions {
    * `client.functions.<camelName>(input)`.
    */
   functions?: Record<string, EdgeFunctionDef>;
+  /**
+   * Shared enum types from `defineEnum()` (or `{ name: values }`): one
+   * `CREATE TYPE <name>`, referenced as `'enum:<name>'` by columns and RPCs.
+   */
+  enums?: EnumDef[] | Record<string, readonly string[]>;
 }
 
 /**
@@ -137,6 +143,15 @@ export function defineSchema(tables: Record<string, any>, options?: SchemaOption
       writable: false,
       configurable: false,
     });
+  }
+
+  if (options?.enums) {
+    const enums: Record<string, readonly string[]> = Array.isArray(options.enums)
+      ? Object.fromEntries(options.enums.map((e) => [e.name, e.values]))
+      : options.enums;
+    if (Object.keys(enums).length > 0) {
+      Object.defineProperty(result, '__enums', { value: enums, enumerable: false, writable: false, configurable: false });
+    }
   }
 
   if (options?.functions) {

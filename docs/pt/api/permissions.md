@@ -107,10 +107,11 @@ Uma ação que fica de fora não gera policy, então é negada assim que a tabel
 ## PermissionLevel
 
 ```ts
-type PermissionLevel = '*' | 'public' | 'none' | 'own' | string[] | TenantScope | AnyPermission;
+type PermissionLevel = '*' | 'public' | 'none' | 'own' | string[] | TenantScope | AnyPermission | AllPermission;
 
 interface TenantScope { scope: 'tenant'; roles?: string[] }
 interface AnyPermission { any: PermissionLevel[] }
+interface AllPermission { all: PermissionLevel[] }
 ```
 
 | Nível | Significado | Compila para |
@@ -125,6 +126,28 @@ interface AnyPermission { any: PermissionLevel[] }
 | `{ scope: 'tenant' }` | membro do tenant da linha | `policy.belongsTo(tenantColumn, { table, foreignKey: tenant.tenantColumn, localKey: tenant.userColumn })` |
 | `{ scope: 'tenant', roles: ['admin'] }` | membro com uma dessas roles no tenant | o mesmo, com `where: { [tenant.roleColumn]: ['admin'] }` |
 | `{ any: [...] }` | OR dos níveis | `policy.any([...])` (uma entrada única não é envolvida) |
+| `{ all: [...] }` | AND dos níveis | `policy.all([...])` (uma entrada única não é envolvida) |
+
+`any` e `all` se aninham, então um nível pode dizer "admins, ou o dono enquanto ainda for membro comum":
+
+```ts
+import { definePermissions } from 'accessnexus';
+
+export const permissions = definePermissions({
+  roles: ['owner', 'admin', 'member', 'viewer'],
+  tenant: { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id', roleColumn: 'role' },
+  resources: {
+    comments: {
+      ownerColumn: 'author_id',
+      tenantColumn: 'org_id',
+      read: { scope: 'tenant' },
+      // org owners and admins delete any comment; members delete only their own,
+      // and a member demoted to viewer loses even that
+      delete: { any: [{ scope: 'tenant', roles: ['owner', 'admin'] }, { all: ['own', { scope: 'tenant', roles: ['member'] }] }] },
+    },
+  },
+});
+```
 
 ::: warning
 Um array de roles (`['admin']`) é uma role global da aplicação, lida de `app_metadata.role`, e não uma role dentro de uma org ou equipe. Para "admins da org", use `{ scope: 'tenant', roles: ['admin'] }`. O `validate` avisa `GLOBAL_ROLE_IN_TENANT_TABLE` quando uma tabela mistura os dois.
@@ -156,7 +179,7 @@ Em `definePermissions(...)`:
 
 | Condição | Mensagem |
 | --- | --- |
-| Um recurso usa `{ scope: 'tenant' }` (diretamente ou dentro de `{ any }`) e falta `tenant` | `Some resources use { scope: 'tenant' } but no tenant config was provided` |
+| Um recurso usa `{ scope: 'tenant' }` (diretamente ou dentro de `{ any }` / `{ all }`) e falta `tenant` | `Some resources use { scope: 'tenant' } but no tenant config was provided` |
 | Uma role num array de roles ou em `roles` de tenant não está em `roles` | `Unknown role "<role>" in <resource>.<action>. Available roles: ...` |
 
 Em `policiesFor(...)` / `can(...)`:
@@ -212,4 +235,4 @@ export const policies = {
 
 ## Tipos {#types}
 
-Todos exportados de `accessnexus`: `PermissionsInput`, `PermissionsDef`, `ResourcePermissions`, `TenantConfig`, `PermissionLevel`, `TenantScope`, `AnyPermission`.
+Todos exportados de `accessnexus`: `PermissionsInput`, `PermissionsDef`, `ResourcePermissions`, `TenantConfig`, `PermissionLevel`, `TenantScope`, `AnyPermission`, `AllPermission`.

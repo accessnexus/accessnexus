@@ -138,6 +138,13 @@ describe('findRiskyChanges', () => {
     ]);
   });
 
+  it('flags a column becoming NOT NULL', () => {
+    const col = (notNull: boolean) => ({ type: 'uuid', notNull, default: null, identity: null, generated: null });
+    const risky = findRiskyChanges(diffSnapshots(snap(['column', 'public.t.org_id', col(false)]), snap(['column', 'public.t.org_id', col(true)])));
+    expect(risky.map((r) => `${r.code} ${r.object}`)).toEqual(['column_nullability_tightened public.t.org_id']);
+    expect(risky[0].message).toContain('NOT NULL');
+  });
+
   it('flags RLS being disabled or unforced, and grants widened to anon/PUBLIC on existing objects', () => {
     const before = snap(
       ['rls', 'public.a', { enabled: true, forced: true }],

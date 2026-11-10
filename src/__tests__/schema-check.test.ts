@@ -275,7 +275,9 @@ describe('checkSchema', () => {
 
     expect(codes(build([]))).toEqual(['warning:TENANT_PARENT_UNCHECKED:tasks.references.project_id']);
     const [issue] = checkSchema(build([]));
-    expect(issue.hint).toContain('p.org_id = NEW.org_id');
+    expect(issue.hint).toContain("trigger.sameTenant({ column: 'project_id', references: 'projects', tenantColumn: 'org_id' })");
+    // The builder the hint suggests clears the warning.
+    expect(codes(build([trigger.sameTenant({ column: 'project_id', references: 'projects', tenantColumn: 'org_id' })]))).toEqual([]);
 
     expect(codes(build([trigger.custom({
       name: 'same_org_project',

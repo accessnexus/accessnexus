@@ -138,11 +138,39 @@ function baseOf(type: string): string {
 
 function isValidType(type: string): boolean {
   const base = baseOf(type);
-  return SCALAR_TYPES.has(base) || /^enum\(.+\)$/.test(base) || /^numeric\(\d+(,\d+)?\)$/.test(base);
+  return SCALAR_TYPES.has(base) || /^enum\(.+\)$/.test(base) || /^numeric\(\d+(,\d+)?\)$/.test(base)
+    || /^enum:[a-z_][a-z0-9_]*$/.test(base);
+}
+
+/** Shared enums declared with defineSchema(..., { enums }). */
+let declaredEnums: Record<string, readonly string[]> = {};
+
+/** `enum:<name>` must name an enum of `defineSchema(..., { enums })`. */
+function checkNamedEnum(ctx: Ctx, path: string, type: unknown): void {
+  if (typeof type !== 'string') return;
+  const m = /^enum:([a-z_][a-z0-9_]*)$/.exec(baseOf(type));
+  if (!m || m[1] in declaredEnums) return;
+  push(ctx, {
+    severity: 'error',
+    code: 'UNKNOWN_ENUM',
+    path,
+    message: `"${type}" names enum "${m[1]}", which is not declared`,
+    hint: `Declare it: const ${m[1]} = defineEnum('${m[1]}', [...]) and defineSchema(tables, { enums: [${m[1]}] }).`
+      + (Object.keys(declaredEnums).length > 0 ? ` Declared: ${Object.keys(declaredEnums).join(', ')}.` : ''),
+  });
+}
+
+/** An RPC type may also be `'table.column'` (that column's type, enums included). */
+function isRpcType(ctx: Ctx, type: string): boolean {
+  if (isValidType(type)) return true;
+  const m = /^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)$/.exec(baseOf(type));
+  return !!m && hasColumns(ctx.schema[m[1]]) && m[2] in columnsOf(ctx.schema[m[1]]);
 }
 
 /** Values of an `enum('a','b')` column type, or undefined for other types. */
 function enumValuesOf(type: string | undefined): string[] | undefined {
+  const named = type === undefined ? undefined : /^enum:([a-z_][a-z0-9_]*)$/.exec(baseOf(type))?.[1];
+  if (named) return declaredEnums[named] ? [...declaredEnums[named]] : undefined;
   return type === undefined ? undefined : /^enum\((.*)\)$/.exec(baseOf(type))?.[1]
     .split(',')
     .map((v) => v.trim().replace(/^['"]|['"]$/g, ''));
@@ -199,6 +227,7 @@ export function checkSchema(schema: unknown): SchemaIssue[] {
   if (rawRpcs) Object.defineProperty(record, '__rpcs', { value: rawRpcs, enumerable: false });
   const rawChannels = (schema as any).__channels;
   if (rawChannels) Object.defineProperty(record, '__channels', { value: rawChannels, enumerable: false });
+  declaredEnums = ((schema as any).__enums as Record<string, readonly string[]> | undefined) ?? {};
   const rawFunctions = (schema as any).__functions;
   if (rawFunctions) Object.defineProperty(record, '__functions', { value: rawFunctions, enumerable: false });
   const entries = Object.entries(record);
@@ -407,6 +436,7 @@ function checkTable(ctx: Ctx, tableName: string, def: any): void {
       checkColumnDefault(ctx, colPath, columnName, type, (input as any).default);
       checkColumnOnDelete(ctx, colPath, type, (input as any).onDelete, Boolean((input as any).references ?? def.references?.[columnName]));
     }
+    checkNamedEnum(ctx, colPath, type);
     if (!isValidType(type)) {
       const suggestion = TYPE_SUGGESTIONS[baseOf(type).toLowerCase()];
       push(ctx, {
@@ -694,7 +724,7 @@ function checkColumnOnDelete(ctx: Ctx, path: string, type: string, action: unkno
 
 const RULE_KINDS = new Set([
   'authenticated', 'public', 'none', 'owner', 'role', 'belongs_to', 'matches_field',
-  'custom', 'any', 'all', 'with_check',
+  'custom', 'any', 'all', 'with_check', 'shares_tenant',
 ]);
 
 function checkRule(ctx: Ctx, tableName: string, path: string, rule: any): void {
@@ -762,6 +792,24 @@ function checkRule(ctx: Ctx, tableName: string, path: string, rule: any): void {
     case 'custom':
       checkCustomExpression(ctx, path, rule.expression);
       break;
+    case 'shares_tenant': {
+      if (tableHasColumns && !(rule.column in columns)) unknownColumn(ctx, path, tableName, String(rule.column), 'policy.sharesTenant column');
+      const m = rule.membership;
+      const membership = m && ctx.schema[m.table];
+      if (!m || typeof m.table !== 'string' || !membership) {
+        push(ctx, {
+          severity: ctx.manual ? 'error' : 'warning',
+          code: 'UNKNOWN_TABLE',
+          path,
+          message: `policy.sharesTenant membership table "${String(m?.table)}" is not in the schema`,
+        });
+      } else if (hasColumns(membership)) {
+        for (const c of [m.userColumn, m.tenantColumn]) {
+          if (!(c in columnsOf(membership))) unknownColumn(ctx, path, m.table, String(c), 'policy.sharesTenant membership column');
+        }
+      }
+      break;
+    }
     case 'any':
     case 'all':
       if (!Array.isArray(rule.rules) || rule.rules.length === 0) {
@@ -942,8 +990,9 @@ function checkTenantParents(ctx: Ctx, tableName: string, def: any): void {
     const parentTenant = [...tenantColumnsOf(ctx.schema[parentName])].filter((c) => c !== 'id');
     if (parentTenant.length === 0) continue;
     const mentions = new RegExp(`\\b${parentName}\\b`, 'i');
-    const guarded = triggers.some((t: any) => t?.kind === 'custom'
-      && mentions.test(`${t.functionBody ?? ''} ${t.when ?? ''}`));
+    const guarded = triggers.some((t: any) => (t?.kind === 'custom'
+      && mentions.test(`${t.functionBody ?? ''} ${t.when ?? ''}`))
+      || (t?.kind === 'same_tenant' && t.column === column));
     if (guarded) continue;
     const own = [...ownTenant][0];
     const theirs = parentTenant[0];
@@ -954,10 +1003,9 @@ function checkTenantParents(ctx: Ctx, tableName: string, def: any): void {
       message: `"${tableName}.${column}" points to "${parentName}", which is tenant-scoped (${theirs}), but nothing checks that `
         + `the ${parentName} row is in the same tenant as the ${tableName} row (${own}) — foreign keys ignore RLS, so a member of one `
         + `tenant can attach ${tableName} rows to another tenant's ${parentName}`,
-      hint: `Add trigger.custom({ name: 'same_tenant_${parentName}', events: ['before_insert', 'before_update'], functionBody: `
-        + `"IF NOT EXISTS (SELECT 1 FROM public.${parentName} p WHERE p.id = NEW.${column} AND p.${theirs} = NEW.${own}) THEN `
-        + `RAISE EXCEPTION 'not found' USING ERRCODE = '23503'; END IF; RETURN NEW;" }) and `
-        + `trigger.lockColumns({ columns: ['${own}', '${column}'] }) (see the "Child of a tenant resource" recipe in llms.txt).`,
+      hint: `Add trigger.sameTenant({ column: '${column}', references: '${parentName}', tenantColumn: '${own}'`
+        + `${theirs !== own ? `, referencesTenantColumn: '${theirs}'` : ''} }) and `
+        + `trigger.lockColumns({ columns: ['${own}'] }) (see the "Child of a tenant resource" recipe in llms.txt).`,
     });
   }
 }
@@ -1254,15 +1302,111 @@ function checkTrigger(ctx: Ctx, tableName: string, path: string, t: any): void {
         });
       }
       checkFunctionSet(ctx, `${path}.set`, t.set, `trigger.custom ${String(t.name)}`);
+      if (t.writes !== undefined) {
+        if (!Array.isArray(t.writes)) {
+          push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path: `${path}.writes`, message: "writes must be an array of table names, e.g. ['org_members']" });
+        } else {
+          for (const w of t.writes) {
+            if (!ctx.schema[w]) {
+              push(ctx, { severity: ctx.manual ? 'error' : 'warning', code: 'UNKNOWN_TABLE', path: `${path}.writes`, message: `trigger.custom writes "${String(w)}", which is not in the schema` });
+            }
+          }
+        }
+      }
       break;
+    case 'keep_at_least_one': {
+      for (const [key, label] of [['column', 'column'], ['scope', 'scope']] as const) {
+        if (typeof t[key] !== 'string') {
+          push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: `trigger.keepAtLeastOne needs ${label}` });
+        } else if (tableHasColumns && !(t[key] in columns)) {
+          unknownColumn(ctx, path, tableName, t[key], `trigger.keepAtLeastOne ${label}`);
+        }
+      }
+      if (typeof t.value !== 'string' || t.value === '') {
+        push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: 'trigger.keepAtLeastOne needs a value (e.g. \'owner\')' });
+      }
+      if (typeof def.primaryKey !== 'string' && Array.isArray(def.compositePrimaryKey)) {
+        push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: 'trigger.keepAtLeastOne needs a single primaryKey on the table' });
+      }
+      if (t.parent !== undefined) checkTableColumnRef(ctx, path, String(t.parent), 'trigger.keepAtLeastOne parent');
+      break;
+    }
+    case 'same_tenant': {
+      for (const key of ['column', 'tenantColumn'] as const) {
+        if (typeof t[key] !== 'string') {
+          push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: `trigger.sameTenant needs ${key}` });
+        } else if (tableHasColumns && !(t[key] in columns)) {
+          unknownColumn(ctx, path, tableName, t[key], `trigger.sameTenant ${key}`);
+        }
+      }
+      const ref = ctx.schema[t.references];
+      if (typeof t.references !== 'string' || !ref) {
+        push(ctx, { severity: ctx.manual ? 'error' : 'warning', code: 'UNKNOWN_TABLE', path, message: `trigger.sameTenant references "${String(t.references)}", which is not in the schema` });
+      } else {
+        const theirs = t.referencesTenantColumn ?? t.tenantColumn;
+        if (hasColumns(ref) && !(theirs in columnsOf(ref))) unknownColumn(ctx, path, t.references, theirs, 'trigger.sameTenant tenant column');
+      }
+      break;
+    }
+    case 'member_of_tenant': {
+      if (typeof t.column !== 'string') {
+        push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: 'trigger.memberOfTenant needs column' });
+      } else if (tableHasColumns && !(t.column in columns)) {
+        unknownColumn(ctx, path, tableName, t.column, 'trigger.memberOfTenant column');
+      }
+      const tenant = t.tenant;
+      if (!tenant || typeof tenant !== 'object' || typeof tenant.table !== 'string') {
+        push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: "trigger.memberOfTenant needs tenant: { table, userColumn, tenantColumn }" });
+        break;
+      }
+      const membership = ctx.schema[tenant.table];
+      if (!membership) {
+        push(ctx, { severity: ctx.manual ? 'error' : 'warning', code: 'UNKNOWN_TABLE', path, message: `trigger.memberOfTenant tenant table "${tenant.table}" is not in the schema` });
+      } else if (hasColumns(membership)) {
+        for (const c of [tenant.userColumn, tenant.tenantColumn]) {
+          if (!(c in columnsOf(membership))) unknownColumn(ctx, path, tenant.table, String(c), 'trigger.memberOfTenant tenant column');
+        }
+      }
+      const own = t.tenantColumn ?? tenant.tenantColumn;
+      if (tableHasColumns && !(own in columns)) unknownColumn(ctx, path, tableName, String(own), 'trigger.memberOfTenant tenantColumn');
+      break;
+    }
+    case 'on_auth_user_created': {
+      if (!t.columns || typeof t.columns !== 'object' || Object.keys(t.columns).length === 0) {
+        push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: "trigger.onAuthUserCreated needs columns, e.g. { id: 'NEW.id' }" });
+        break;
+      }
+      for (const [c, expr] of Object.entries(t.columns)) {
+        if (tableHasColumns && !(c in columns)) unknownColumn(ctx, path, tableName, c, 'trigger.onAuthUserCreated column');
+        if (typeof expr !== 'string' || expr.trim() === '') {
+          push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: `trigger.onAuthUserCreated: the expression for ${c} must be non-empty SQL (e.g. 'NEW.id')` });
+        }
+      }
+      break;
+    }
     default:
       push(ctx, {
         severity: 'error',
         code: 'INVALID_TRIGGER',
         path,
         message: `Unknown trigger kind "${t.kind}"`,
-        hint: 'Use trigger.updatedAt, trigger.softDelete, trigger.auditLog, trigger.lockColumns or trigger.custom.',
+        hint: 'Use trigger.updatedAt, softDelete, auditLog, lockColumns, custom, keepAtLeastOne, sameTenant, memberOfTenant or onAuthUserCreated.',
       });
+  }
+}
+
+/** `'table.column'` names a table of the schema and one of its columns. */
+function checkTableColumnRef(ctx: Ctx, path: string, ref: string, what: string): void {
+  const [table, column] = ref.split('.');
+  if (!table || !column || ref.split('.').length !== 2) {
+    push(ctx, { severity: 'error', code: 'INVALID_TRIGGER', path, message: `${what} must be 'table.column', got "${ref}"` });
+    return;
+  }
+  const def = ctx.schema[table];
+  if (!def) {
+    push(ctx, { severity: ctx.manual ? 'error' : 'warning', code: 'UNKNOWN_TABLE', path, message: `${what} table "${table}" is not in the schema` });
+  } else if (hasColumns(def) && !(column in columnsOf(def))) {
+    unknownColumn(ctx, path, table, column, what);
   }
 }
 
@@ -1373,9 +1517,10 @@ function checkRpcReturns(ctx: Ctx, name: string, returns: unknown): void {
   const path = `rpcs.${name}.returns`;
   const bad = (message: string, hint?: string) => push(ctx, { severity: 'error', code: 'INVALID_RPC_RETURNS', path, message: `rpc ${name}: ${message}`, ...(hint ? { hint } : {}) });
   if (typeof returns === 'string') {
-    if (returns !== 'void' && !isValidType(returns)) {
+    if (returns !== 'void' && !isRpcType(ctx, returns)) {
       bad(`unknown return type "${returns}"`, `Use ${RETURNS_SHAPES}.`);
     }
+    checkNamedEnum(ctx, path, returns);
     return;
   }
   if (!returns || typeof returns !== 'object') {
@@ -1393,9 +1538,10 @@ function checkRpcReturns(ctx: Ctx, name: string, returns: unknown): void {
       if (!IDENTIFIER.test(col)) {
         push(ctx, { severity: 'error', code: 'INVALID_IDENTIFIER', path: `${path}.table.${col}`, message: `RPC result column "${col}" is not lowercase snake_case` });
       }
-      if (typeof type !== 'string' || !isValidType(type)) {
-        push(ctx, { severity: 'error', code: 'UNKNOWN_COLUMN_TYPE', path: `${path}.table.${col}`, message: `Unknown result column type "${String(type)}"`, hint: `Use one of: ${[...SCALAR_TYPES].join(', ')}.` });
+      if (typeof type !== 'string' || !isRpcType(ctx, type)) {
+        push(ctx, { severity: 'error', code: 'UNKNOWN_COLUMN_TYPE', path: `${path}.table.${col}`, message: `Unknown result column type "${String(type)}"`, hint: `Use one of: ${[...SCALAR_TYPES].join(', ')}, 'enum:<name>', or 'table.column'.` });
       }
+      checkNamedEnum(ctx, `${path}.table.${col}`, type);
     }
     return;
   }
@@ -1486,15 +1632,16 @@ function checkRpc(ctx: Ctx, name: string, def: any): void {
         hint: 'Give it a default, or move the arguments with defaults to the end.',
       });
     }
-    if (typeof type !== 'string' || !isValidType(type)) {
+    if (typeof type !== 'string' || !isRpcType(ctx, type)) {
       push(ctx, {
         severity: 'error',
         code: 'UNKNOWN_COLUMN_TYPE',
         path: `${path}.args.${arg}`,
         message: `Unknown argument type "${String(type)}"`,
-        hint: `Use one of: ${[...SCALAR_TYPES].join(', ')}.`,
+        hint: `Use one of: ${[...SCALAR_TYPES].join(', ')}, 'enum:<name>', or 'table.column'.`,
       });
     }
+    checkNamedEnum(ctx, `${path}.args.${arg}`, type);
   }
 }
 
@@ -1843,6 +1990,7 @@ function checkEdgeFields(ctx: Ctx, path: string, fields: unknown, isOutput: bool
     if (!IDENTIFIER.test(field)) {
       push(ctx, { severity: 'error', code: 'INVALID_IDENTIFIER', path: `${path}.${field}`, message: `Field "${field}" is not lowercase snake_case` });
     }
+    checkNamedEnum(ctx, `${path}.${field}`, type);
     if (typeof type !== 'string' || !(isValidType(type) || /^varchar\(\d+\)$/.test(baseOf(type)))) {
       push(ctx, {
         severity: 'error',

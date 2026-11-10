@@ -11,6 +11,10 @@ import type {
   TriggerEvent,
   TriggerForEach,
   UpdatedAtTrigger,
+  KeepAtLeastOneTrigger,
+  MemberOfTenantTrigger,
+  OnAuthUserCreatedTrigger,
+  SameTenantTrigger,
 } from '../types/triggers.js';
 
 /**
@@ -155,6 +159,8 @@ export const trigger = {
     forEach?: TriggerForEach;
     security?: 'invoker' | 'definer';
     set?: Record<string, string>;
+    /** Tables the function writes (e.g. ['org_members']): React Query invalidates them after writes here. */
+    writes?: string[];
   }): CustomTrigger {
     return {
       kind: 'custom',
@@ -165,6 +171,59 @@ export const trigger = {
       forEach: options.forEach,
       ...(options.security !== undefined ? { security: options.security } : {}),
       ...(options.set !== undefined ? { set: options.set } : {}),
+      ...(options.writes !== undefined ? { writes: options.writes } : {}),
     } as const;
+  },
+
+  /**
+   * Keep at least one row with `column = value` per `scope` (e.g. an org always
+   * has an owner): the last one cannot be deleted or changed to another value.
+   * With `parent` (`'orgs.id'`), deleting the parent still cascades. SECURITY
+   * DEFINER (it must see every row of the scope); rows of the scope are locked
+   * during the check, so two concurrent demotions cannot both pass. SQLSTATE 23514.
+   *
+   * @example trigger.keepAtLeastOne({ column: 'role', value: 'owner', scope: 'org_id', parent: 'orgs.id' })
+   */
+  keepAtLeastOne(options: { column: string; value: string; scope: string; parent?: string; name?: string }): KeepAtLeastOneTrigger {
+    return { kind: 'keep_at_least_one', ...options };
+  },
+
+  /**
+   * `column` must reference a row of the same tenant: foreign keys ignore RLS,
+   * so without it a member could point a row at another tenant's row. Checked
+   * BEFORE INSERT/UPDATE as the writer (a row they cannot see counts as missing);
+   * NULL is allowed. SQLSTATE 23503.
+   *
+   * @example trigger.sameTenant({ column: 'project_id', references: 'projects', tenantColumn: 'org_id' })
+   */
+  sameTenant(options: { column: string; references: string; tenantColumn: string; referencesTenantColumn?: string; name?: string }): SameTenantTrigger {
+    return { kind: 'same_tenant', ...options };
+  },
+
+  /**
+   * `column` (a user id) must be a member of the row's tenant, e.g. an assignee.
+   * Checked BEFORE INSERT/UPDATE as the writer; NULL is allowed. SQLSTATE 23503.
+   *
+   * @example trigger.memberOfTenant({ column: 'assignee_id', tenant: { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id' } })
+   */
+  memberOfTenant(options: {
+    column: string;
+    tenant: { table: string; userColumn: string; tenantColumn: string };
+    /** The row's tenant column (default: tenant.tenantColumn). */
+    tenantColumn?: string;
+    name?: string;
+  }): MemberOfTenantTrigger {
+    return { kind: 'member_of_tenant', ...options };
+  },
+
+  /**
+   * Insert a row of this table when a user signs up (AFTER INSERT ON auth.users,
+   * SECURITY DEFINER, ON CONFLICT DO NOTHING): no client-side "ensure profile".
+   * `columns` maps each column to an SQL expression over NEW (the auth.users row).
+   *
+   * @example trigger.onAuthUserCreated({ columns: { id: 'NEW.id', display_name: "split_part(NEW.email, '@', 1)" } })
+   */
+  onAuthUserCreated(options: { columns: Record<string, string>; name?: string }): OnAuthUserCreatedTrigger {
+    return { kind: 'on_auth_user_created', ...options };
   },
 } as const;

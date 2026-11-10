@@ -37,3 +37,30 @@ export function findDestructiveStatements(file: string, sql: string): Destructiv
   });
   return found;
 }
+
+/** A column added as NOT NULL without a default (fails on a table that has rows). */
+export interface NotNullColumnAdd {
+  file: string;
+  line: number;
+  table: string;
+  column: string;
+  sql: string;
+}
+
+/**
+ * `ALTER TABLE t ADD COLUMN ... NOT NULL` statements without `DEFAULT` (or
+ * identity) in incremental migrations: Postgres rejects them on a table with
+ * rows (23502). New tables are created with CREATE TABLE, so never match.
+ */
+export function findNotNullColumnAdds(file: string, sql: string): NotNullColumnAdd[] {
+  const found: NotNullColumnAdd[] = [];
+  sql.split('\n').forEach((raw, index) => {
+    const text = raw.trim();
+    const m = /^ALTER\s+TABLE\s+(\S+)\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s+(.*);$/i.exec(text);
+    if (!m) return;
+    const rest = m[3];
+    if (!/\bNOT\s+NULL\b/i.test(rest) || /\bDEFAULT\b/i.test(rest) || /\bGENERATED\b/i.test(rest)) return;
+    found.push({ file, line: index + 1, table: m[1].replace(/^public\./, ''), column: m[2], sql: text });
+  });
+  return found;
+}

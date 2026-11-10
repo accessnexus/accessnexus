@@ -32,7 +32,8 @@ export type ScalarType =
   | 'text[]'
   | 'int[]'
   | 'uuid[]'
-  | `enum(${string})`;
+  | `enum(${string})`
+  | `enum:${string}`;
 
 /** Nullable version of any scalar type */
 export type NullableType = `${ScalarType}?`;
@@ -63,6 +64,8 @@ export type ColumnTSType<T extends ColumnType> =
   T extends 'uuid[]?' ? string[] | null :
   T extends `enum(${string})` ? string :
   T extends `enum(${string})?` ? string | null :
+  T extends `enum:${string}` ? string :
+  T extends `enum:${string}?` ? string | null :
   never;
 
 /**

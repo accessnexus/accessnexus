@@ -9,6 +9,9 @@ export { policy } from './core/policy/index.js';
 export { rpc } from './core/rpc/index.js';
 export { channel } from './core/realtime/index.js';
 export { edgeFunction } from './core/functions/index.js';
+export { defineEnum } from './core/enum/index.js';
+export { tenantInvitations } from './core/tenancy/index.js';
+export type { TenantInvitationsOptions } from './core/tenancy/index.js';
 export { defineConfig, defineSchema, table } from './core/schema/index.js';
 export type { DefineConfigOptions, AccessNexusTarget, ResolvedConfig } from './core/schema/builders.js';
 export { defineSeed } from './core/seed/builders.js';
@@ -19,12 +22,13 @@ export type {
   Adapter, AuditLogTrigger, ColumnDef, ColumnInput, ColumnType, CustomTrigger, ForeignKeyAction, FunctionNamesOf, FunctionsOf, GeneratedOutput, GenericSchema,
   GenericTable, InsertOf, AccessNexusConfig, NullableType,
   // Permissions types
-  AnyPermission, PermissionLevel, PermissionsDef, PermissionsInput, ResourcePermissions, TenantConfig, TenantScope,
+  AllPermission, AnyPermission, PermissionLevel, PermissionsDef, PermissionsInput, ResourcePermissions, TenantConfig, TenantScope,
   PolicyOperation, PolicyRule, PublicSchema, RowOf,
   // Realtime types
   ChannelAccess, ChannelDef, ChannelRule, TableRealtime,
   // Edge Function types
   EdgeFunctionAuth, EdgeFunctionDef, EdgeFunctionFields,
+  EnumDef,
   // RPC types
   RpcDef,
   RpcLanguage, RpcReturnType, RpcTableReturn, RpcSetofReturn, RpcSecurity, RpcVolatility, ScalarType, SchemaDef, SeedSqlOptions, SoftDeleteTrigger, LockColumnsTrigger,
@@ -34,7 +38,8 @@ export type {
   SupabaseTableDef, TableDef, TableNamesOf, TablePolicies, TableTriggers, TablesOf, TriggerEvent,
   TriggerForEach,
   // Trigger types
-  TriggerRule, UpdateOf, UpdatedAtTrigger, WithCheckMode
+  TriggerRule, UpdateOf, UpdatedAtTrigger, WithCheckMode,
+  KeepAtLeastOneTrigger, MemberOfTenantTrigger, OnAuthUserCreatedTrigger, SameTenantTrigger
 } from './core/types/index.js';
 
 // Adapters

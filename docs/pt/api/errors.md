@@ -29,6 +29,7 @@ interface SchemaIssue {
 | `MISSING_FLAG_VALUE` | qualquer | Uma flag de string está sem valor (fim da entrada, ou o próximo token começa com `--`). | `--flag value` ou `--flag=value`. |
 | `INVALID_FLAG_VALUE` | qualquer | Uma flag booleana recebeu um valor (`--json=true`). | Passe a flag sozinha. |
 | `INVALID_FLAGS` | `generate`, `diff`, `push`, `seed` | `--sql-only` junto com `--sdk-only`, ou `--target` cujo adapter difere de `--adapter`. | Passe no máximo uma do par; passe só `--target`. |
+| `MISSING_ARGUMENT` | `migration data` | A migration de dados não tem nome. | `npx accessnexus migration data <name>`, por exemplo `backfill_task_org`. |
 
 ### Config e carregamento de arquivos {#config-and-file-loading}
 
@@ -66,6 +67,21 @@ interface SchemaIssue {
 | `FOREIGN_TRIGGERS` | `push` | Uma tabela que o schema gerencia tem triggers cujo nome não é `<prefix>_<table>_...` (não foram gerados pelo AccessNexus). Eles disparariam junto com os gerados — depois do `init --db-url`, o original e a cópia importada rodariam os dois. Nada é aplicado; `foreignTriggers` lista quais são. | Leve para o schema o que ainda for necessário (`trigger.custom`), revise e rode `push --replace-foreign-triggers`. |
 | `MIGRATION_DRIFT` | `push` | Um arquivo de migration já aplicado foi editado. O push sofreu rollback. | Restaure o arquivo, altere o schema e rode `generate` para gerar uma nova migration `__changes`. |
 | `PUSH_FAILED` | `push` | O Postgres rejeitou um arquivo (a mensagem traz o erro SQL; `failed` indica qual). O push roda numa única transação, então tudo sofreu rollback: `applied` é `[]` e `rolledBack` lista os arquivos que tinham rodado. | Corrija a causa no schema (ou no estado do banco), rode `generate` e `push` de novo. |
+| `PUSH_WOULD_FAIL` | `diff --against-db`, `push --dry-run` | O ensaio do push foi rejeitado pelo Postgres. `failed` traz `file`, `message`, `sqlState`, `line` e `statement`; `changes` e `wouldApply` trazem o plano parcial até a falha. Nada foi persistido. | Corrija o schema (ou o estado do banco) e gere o plano de novo. |
+| `NOT_NULL_ON_NON_EMPTY_TABLE` | `diff --against-db`, `push` | Uma migration pendente adiciona uma coluna `NOT NULL` sem default a uma tabela que tem linhas (`details: { table, column, rows }`). Reportado antes de o Postgres falhar com 23502; nada aplicado. | Adicione a coluna como nullable, faça o backfill com `migration data` e depois torne-a obrigatória. `migration discard` substitui uma migration ainda não enviada. Veja [Coluna obrigatória numa tabela com dados](/pt/guide/cookbook#required-column-on-a-table-with-data). |
+| `LIVE_DB_CHANGES` | `diff --against-db --check` | O push mudaria o banco. O plano (`changes`, `riskyChanges`) está no resultado. | Revise e faça o `push`; tire o `--check` para só ler o plano. |
+| `PUSH_LOCKED` | `diff --against-db` | Um push segura o advisory lock; o plano ao vivo não espera. | Tente de novo quando o push terminar. |
+
+### Migrations e banco de teste {#migrations-and-test-database}
+
+| Código | Comandos | Significado | Correção |
+| --- | --- | --- | --- |
+| `NO_MIGRATION_TO_DISCARD` | `migration discard` | Não há snapshot de migration na pasta de migrations. | Rode `generate` antes. |
+| `MIGRATION_ALREADY_APPLIED` | `migration discard` | O banco aplicou a migration mais nova; migrations aplicadas são imutáveis. | Mude o schema e gere uma nova migration `__changes`. |
+| `MIGRATION_DISCARD_NEEDS_DB` | `migration discard` | Sem URL de banco, o comando não consegue checar que a migration nunca foi aplicada. | Passe `--url` / `--target` (ou defina a variável de ambiente configurada), ou `--force` quando nenhum ambiente a aplicou. |
+| `MIGRATION_HISTORY_MISSING` | `migration discard` | O snapshot foi gravado antes da 0.4.1 e não tem registro do estado anterior à migration. Nada foi apagado. | Reconstrua o snapshot anterior à mão, ou gere uma nova migration `__changes` que desfaça a mudança. |
+| `DOCKER_NOT_FOUND` | `test-db` | O comando `docker` não foi encontrado. | Instale o Docker (ou abra o Docker Desktop) e rode de novo. |
+| `TEST_DB_START_FAILED` | `test-db up` | O `docker run` falhou (porta ou nome de container em uso), o banco não ficou pronto em 2 minutos, ou a preparação para os testes de RLS falhou. | Libere a porta (`--port`) ou escolha outro `--name`; veja `docker logs <name>`. |
 
 ### Adapter e target {#adapter-and-target}
 
@@ -131,6 +147,7 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 | --- | --- | --- | --- | --- |
 | `INVALID_COLUMN` | error | `<table>.columns.<col>` | Uma coluna não é nem uma string de tipo nem `{ type, ... }`. | `email: 'text'` ou `email: { type: 'text', unique: true }`. |
 | `UNKNOWN_COLUMN_TYPE` | error | `<table>.columns.<col>`, `rpcs.<name>.args.<arg>` | Tipo de coluna ou de argumento de RPC desconhecido. | Use um [tipo suportado](/pt/api/schema#column-types); o hint sugere um para aliases comuns. |
+| `UNKNOWN_ENUM` | error | `<table>.columns.<col>`, `rpcs.<name>...` | Um tipo `'enum:<name>'` nomeia um enum que não foi declarado. | `const <name> = defineEnum('<name>', [...])` e `defineSchema(tables, { enums: [<name>] })`. Veja [defineEnum](/pt/api/tenancy#defineenum). |
 | `INVALID_DEFAULT` | error | `<table>.columns.<col>.default` | O `default` é uma palavra solta que o Postgres leria como nome de coluna, ou um default de enum que não é um dos valores. | Coloque aspas nos literais dentro da string: `default: "'todo'"`; funções como estão: `'now()'`. |
 | `NO_PRIMARY_KEY` | warning | `<table>.primaryKey` | A tabela não tem `primaryKey`. | `primaryKey: 'id'` (necessário para `findById`, update/delete por id, soft delete, upserts do seed). |
 | `UNKNOWN_COLUMN` | error | onde a coluna é usada | Uma coluna citada em `primaryKey`, `references`, `onDelete`, `softDelete`, `indexes`, numa regra de policy (`isOwner`, `belongsTo` e suas chaves `through` e `where`, `matchesField`) ou num trigger (`updatedAt`, `softDelete`, `auditLog.columns`, `lockColumns`) não existe. | Use uma coluna listada ou adicione-a em `columns`. |
@@ -166,16 +183,23 @@ Verificações estáticas rodadas por `validate`, `generate`, `diff` e `push`. N
 | `PUBLIC_WRITE` | warning | `<table>.policies.<insert\|update\|delete>` | `policy.public()` deixa visitantes anônimos gravarem. | `isAuthenticated()`, `isOwner(col)`, uma regra de tenant ou `policy.none()`. Mantenha `public()` só para um formulário anônimo intencional, combinado com uma verificação. |
 | `USER_ROW_INSERT_OPEN` | warning | `<table>.policies.insert` | A primary key referencia `auth.users.id`, mas o `insert` é `isAuthenticated()` ou `public()`: qualquer um consegue criar a linha de outro usuário. | `insert: policy.isOwner('<pk>')`. |
 | `GLOBAL_ROLE_IN_TENANT_TABLE` | warning | `<table>.policies.<op>` | A tabela verifica membership do tenant, mas também usa uma role global da aplicação (`hasRole` ou um array de roles). | Para roles de org/time, use `{ scope: 'tenant', roles }` ou `belongsTo(..., { where: { role } })`. |
-| `TENANT_PARENT_UNCHECKED` | warning | `<table>.references.<col>` | Uma linha com escopo de tenant referencia outra tabela com escopo de tenant e nenhum trigger custom verifica se as duas estão no mesmo tenant (foreign keys ignoram o RLS). | Adicione o `trigger.custom` de guarda de mesmo tenant indicado no hint, e `trigger.lockColumns` nas duas colunas. |
+| `TENANT_PARENT_UNCHECKED` | warning | `<table>.references.<col>` | Uma linha com escopo de tenant referencia outra tabela com escopo de tenant e nada verifica se as duas estão no mesmo tenant (foreign keys ignoram o RLS). | Adicione `trigger.sameTenant({ column, references, tenantColumn })` (o hint o escreve por inteiro), e `trigger.lockColumns` na coluna de tenant. Veja [`sameTenant`](/pt/api/trigger#sametenant). |
 | `BELONGS_TO_PROFILE_WRITABLE` | error | `<table>.policies.<op>` | `belongsTo(col)` sem `through` confia em `profiles.<col>`, mas os usuários conseguem inserir profiles ou atualizar essa coluna (ou profiles está com RLS desligado). | Use `through` (tabela de membership), ou faça `profiles.<col>` ser gravada só pelo servidor: `insert: policy.none()` e `trigger.lockColumns({ columns: ['<col>'] })`. |
 | `UNWRAPPED_AUTH_CALL` | warning | policy, trigger `lockColumns` ou `rpcs.<name>.body` | Um `auth.uid()`, `auth.jwt()` ou `auth.role()` sem wrapper em `policy.custom`, num `unless` de `lockColumns` ou no body de uma RPC é reavaliado a cada linha. | Escreva `(SELECT auth.uid())`. |
+
+### SQL de migration {#migration-sql}
+
+| Código | Severidade | Path | Significado | Correção |
+| --- | --- | --- | --- | --- |
+| `NOT_NULL_COLUMN_ADDED` | warning | `<table>.columns.<col>` | Reportado pelo `generate` e pelo `diff` (em `warnings`), não pelo `validate`: uma migration nova adiciona uma coluna `NOT NULL` sem default a uma tabela existente, então o `push` falha quando a tabela tem linhas. | Dê um default, ou adicione como nullable, faça o backfill com `migration data` e depois torne-a obrigatória. Veja [Coluna obrigatória numa tabela com dados](/pt/guide/cookbook#required-column-on-a-table-with-data). |
+| `SQL_REJECTED` | error | `rpcs.<name>`, `<table>.triggers[<i>]`, `<table>.policies.<op>` (ou o arquivo) | Reportado pelo `validate --against-db`: o Postgres rejeitou o SQL gerado para aquele item do schema (um `policy.custom`, corpo de `trigger.custom`, corpo de RPC, `check` ou `default`). O comando falha com `SCHEMA_VALIDATION_FAILED`. | Corrija o SQL naquela parte do schema e rode `validate --against-db` de novo. Nada foi persistido. |
 
 ### Triggers
 
 | Código | Severidade | Path | Significado | Correção |
 | --- | --- | --- | --- | --- |
 | `INVALID_TRIGGERS` | error | `<table>.triggers` | `triggers` não é um array. | `triggers: [trigger.updatedAt('updated_at')]`. |
-| `INVALID_TRIGGER` | error | `<table>.triggers[<i>]` | Não foi construído com `trigger.*`; kind desconhecido; `lockColumns` sem exatamente um de `columns` / `except`; `custom` sem eventos, com evento desconhecido, `functionBody` vazio ou `security` diferente de `'invoker'`/`'definer'`. | Corrija a opção indicada na mensagem. |
+| `INVALID_TRIGGER` | error | `<table>.triggers[<i>]` | Não foi construído com `trigger.*`; kind desconhecido; `lockColumns` sem exatamente um de `columns` / `except`; `custom` sem eventos, com evento desconhecido, `functionBody` vazio ou `security` diferente de `'invoker'`/`'definer'`; opção ausente ou errada em `keepAtLeastOne` (`column`, `value`, `scope`, um único `primaryKey` na tabela), `sameTenant` (`column`, `references`, `tenantColumn`), `memberOfTenant` (`column`, `tenant: { table, userColumn, tenantColumn }`) ou `onAuthUserCreated` (`columns` com uma expressão SQL não vazia por coluna). | Corrija a opção indicada na mensagem. |
 | `DUPLICATE_TRIGGER` | error | `<table>.triggers[<i>]` | Dois triggers geram o mesmo nome na mesma tabela e substituiriam um ao outro. | Dê a cada `lockColumns` / `custom` um `name` distinto; não adicione `trigger.softDelete` quando a tabela define `softDelete`. |
 | `AUDIT_TABLE_MISMATCH` | error | `<table>.triggers[<i>]` | A tabela de auditoria não tem `table_name`, `operation`, `old_data`, `new_data`, `changed_at`, ou tem colunas obrigatórias que o trigger nunca preenche. | Adicione essas colunas; torne as outras nullable ou dê um default a elas. |
 | `AUDIT_INSERT_OPEN` | warning | `<audit>.policies.insert` | A tabela de auditoria deixa usuários da API inserirem (entradas forjadas). O trigger não precisa disso. | `insert: policy.none()`. |

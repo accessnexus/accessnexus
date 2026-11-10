@@ -6,6 +6,20 @@
 > client SDK — with Supabase RLS best practices built in. This file is the complete
 > reference for AI coding agents. Package version: 0.4.0. Requires Node.js >= 20.
 
+## How to read this file (index)
+
+Read "Mental model" and "Standard agent workflow" first; then only what the task needs:
+- Owner / public tables: §defineSchema + table, §policy.* builders, §Recipes (owner-only, public read).
+- Multi-tenant (orgs, teams, roles, invites): §definePermissions, §Multi-tenant building blocks,
+  §trigger.* builders, §Recipes (multi-tenant, child of a tenant resource, required tenant column),
+  §RLS rules agents must not break.
+- Changing a schema that already has data: §CLI reference (diff --against-db, migration),
+  §Recipes (required column on a table with data).
+- Using the SDK in the app: §Generated SDK (errors: NOT_FOUND_OR_DENIED), §TanStack Query helpers.
+- Realtime / Edge Functions: §Realtime, §Edge Functions.
+- Testing RLS: §Testing RLS (accessnexus/testing, test-db), §How a denial shows.
+- An error code: §Troubleshooting by error code.
+
 ## Mental model (read first)
 
 - `accessnexus.schema.ts` is the single source of truth for the database. To add a table,
@@ -284,6 +298,13 @@ With `through`, the membership lookup is a generated
 `SECURITY DEFINER` function with `SET search_path = pg_catalog, public` (no RLS recursion,
 safe on the membership table itself).
 
+`policy.sharesTenant(column, { table, userColumn, tenantColumn })` — the row's user (`column`,
+a user id) shares at least one tenant with the current user; e.g. profiles visible to
+co-members: `select: policy.any([policy.isOwner('id'), policy.sharesTenant('id',
+{ table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id' })])`. Generates a
+SECURITY DEFINER STABLE helper (like `belongsTo`): never write a membership subquery in
+`policy.custom` for this.
+
 Global vs tenant roles — pick the right one:
 - Role INSIDE an org/team/workspace ("org admins can delete"): store it in the membership
   table and use `{ scope: 'tenant', roles: ['admin'] }` in `definePermissions`, or
@@ -301,7 +322,10 @@ Actions map `read→select`, `create→insert`, `update→update`, `delete→del
 `'public'`, `'*'` (any signed-in user), `'none'`, `'own'` (needs `ownerColumn`), a role array
 (GLOBAL app roles from `app_metadata.role`, see above), `{ scope: 'tenant' }` (member of the
 row's tenant, needs `tenant` and `tenantColumn`), `{ scope: 'tenant', roles: [...] }` (member
-with one of those roles, needs `tenant.roleColumn`), `{ any: [...] }` (OR). Unknown roles throw
+with one of those roles, needs `tenant.roleColumn`), `{ any: [...] }` (OR), `{ all: [...] }`
+(AND, e.g. `delete: { any: [{ scope: 'tenant', roles: ['owner', 'admin'] }, { all: ['own',
+{ scope: 'tenant', roles: ['member'] }] }] }`: members delete only their own rows, and a member
+demoted to viewer loses even that). Unknown roles throw
 at definition time. `all: <level>` fills every action without its own level
 (`{ ownerColumn: 'user_id', all: 'own', read: '*' }`); the write pins below apply to the
 expanded `create`/`update` as if written out.
@@ -373,8 +397,27 @@ export const addCreator = trigger.custom({
   events: ['after_insert'],
   security: 'definer',
   functionBody: "INSERT INTO public.team_members (team_id, user_id, role) VALUES (NEW.id, NEW.created_by, 'owner'); RETURN NEW;",
+  writes: ['team_members'], // React Query: teams.create() also refreshes team_members
+});
+// The last owner of a team cannot leave or be demoted; deleting the team still cascades.
+// SECURITY DEFINER, rows of the scope locked during the check; SQLSTATE 23514.
+export const keepOwner = trigger.keepAtLeastOne({ column: 'role', value: 'owner', scope: 'team_id', parent: 'teams.id' });
+// Foreign keys ignore RLS: project_id must be a project of the SAME team (NULL allowed); 23503.
+export const sameTeam = trigger.sameTenant({ column: 'project_id', references: 'projects', tenantColumn: 'team_id' });
+// assignee_id must be a member of the row's team (NULL allowed); 23503.
+export const assigneeIsMember = trigger.memberOfTenant({
+  column: 'assignee_id',
+  tenant: { table: 'team_members', userColumn: 'user_id', tenantColumn: 'team_id' },
+});
+// On the profiles table: a row per new auth user (AFTER INSERT ON auth.users, definer, ON CONFLICT DO NOTHING).
+export const profileOnSignUp = trigger.onAuthUserCreated({
+  columns: { id: 'NEW.id', display_name: "split_part(NEW.email, '@', 1)" },
 });
 ```
+
+`sameTenant` / `memberOfTenant` run as the writer (INVOKER): a row they cannot see counts as
+missing, so they never reveal other tenants' ids. `validate` warns `TENANT_PARENT_UNCHECKED`
+for a tenant row pointing at another tenant-scoped table without `sameTenant` on that column.
 
 `trigger.auditLog` and `trigger.softDelete` functions are `SECURITY DEFINER` with
 `SET search_path = pg_catalog, public` and schema-qualified targets: the audit table keeps
@@ -382,7 +425,9 @@ export const addCreator = trigger.custom({
 DELETE policy: the generated guard rejects any plain UPDATE by an API user that sets or
 clears the soft-delete column (so the UPDATE policy cannot be used to soft-delete or restore);
 restore rows with the service role or a `security: 'definer'` RPC. `trigger.lockColumns`
-raises SQLSTATE 42501 when a locked column changes; it never blocks the service role,
+raises SQLSTATE 42501 when a locked column changes (message `<table>.<column> cannot be
+changed`, HINT `accessnexus:locked_column:<table>.<column>`, so the SDK's `isLockedColumn(error)`
+tells it from an RLS denial); it never blocks the service role,
 SECURITY DEFINER code or columns kept by `trigger.updatedAt`. `updatedAt`, `lockColumns` and
 `trigger.custom` run as the writing user (INVOKER, RLS applies to what they read/write)
 unless `security: 'definer'`. In a definer body schema-qualify tables (`public.team_members`).
@@ -390,6 +435,56 @@ unless `security: 'definer'`. In a definer body schema-qualify tables (`public.t
 Soft-deleted rows stay visible through RLS (only the SDK filters them). To hide them from raw
 API reads too, add the condition to `select`, e.g.
 `policy.all([policy.isOwner('author_id'), policy.custom('deleted_at IS NULL')])`.
+
+## Multi-tenant building blocks (defineEnum, tenantInvitations)
+
+`defineEnum(name, values)` declares ONE Postgres enum shared by columns and RPCs (no casts
+between per-column `enum(...)` types). Register it in `defineSchema(tables, { enums: [e] })`;
+use `e.type` / `e.nullable` (the strings `'enum:<name>'` / `'enum:<name>?'`) as column types,
+RPC `args` and `returns.table` types. The SDK types it as a union and `Database['public']
+['Enums'][<name>]`. RPC types may also be `'table.column'` (that column's type, enum union
+included). `validate`: `UNKNOWN_ENUM` for an undeclared name.
+
+`tenantInvitations({ tenant, tenantTable, tenantNameColumn?, roles, inviterRoles,
+requireConfirmedEmail? = true, table? = 'invitations', rpcNames? })` returns `{ table, rpcs }`:
+- table `invitations(id, <tenantColumn>, email, role, invited_by, created_at)`, unique
+  (tenant, email). Policies: inviters (keys of `inviterRoles`) insert invites in their own
+  name for the roles they may hand out, read and revoke their tenant's invites; the invitee
+  (JWT e-mail) reads and declines theirs; nobody updates.
+- `accept_invitation(p_invitation uuid) → uuid` (definer): signed-in, e-mail confirmed
+  (`auth.users.email_confirmed_at`), matching e-mail → joins with the invited role, consumes
+  the invite, returns the tenant id. Errors: 42501 (anon / unconfirmed), P0002 (not found).
+- `my_invitations()` (definer, stable): the caller's invites with `tenant_name` (they cannot
+  read the tenant yet).
+
+```ts
+import { defineEnum, defineSchema, policy, table, tenantInvitations } from 'accessnexus';
+
+export const memberRole = defineEnum('member_role', ['owner', 'admin', 'member', 'viewer']);
+
+const invites = tenantInvitations({
+  tenant: { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id', roleColumn: 'role' },
+  tenantTable: 'orgs',
+  tenantNameColumn: 'name',
+  roles: memberRole,
+  inviterRoles: { owner: ['admin', 'member', 'viewer'], admin: ['member', 'viewer'] },
+});
+
+export default defineSchema({
+  orgs: table({ columns: { id: 'uuid', name: 'text' }, primaryKey: 'id', policies: { select: policy.isAuthenticated() } }),
+  org_members: table({
+    columns: { id: 'uuid', org_id: 'uuid', user_id: 'uuid', role: { type: memberRole.type, default: "'member'" } },
+    primaryKey: 'id',
+    references: { org_id: 'orgs.id', user_id: 'auth.users.id' },
+    indexes: [{ columns: ['org_id', 'user_id'], unique: true }],
+    policies: { select: policy.isOwner('user_id'), insert: policy.none() },
+  }),
+  invitations: invites.table,
+}, { enums: [memberRole], rpcs: { ...invites.rpcs } });
+```
+
+A complete multi-tenant schema built from these pieces (and its RLS test suite) ships in the
+repository as `examples/saas-teams/`.
 
 ## rpc (Postgres functions)
 
@@ -677,13 +772,20 @@ decides), `updateOne(filter, patch, { columns? })`, `updateMany(filter, patch, {
 `rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js. Realtime tables
 also get `subscribe(...)` and declared channels `channels.<name>(param)` (see Realtime above);
 declared Edge Functions are `functions.<camelName>(input)` (see Edge Functions above).
-- `updateOne` = `.update(patch).match(filter).select(columns).maybeSingle()`: one round trip,
-  `Row | null` (null when no visible row matches; more than one match is PGRST116 and nothing
-  is written) — update by any unique column (`{ slug }`). `updateMany` returns `Row[]`.
-  `deleteOne`/`deleteMany` return the deleted rows (DELETE ... RETURNING, so only rows the
-  SELECT policy shows); on a softDelete table the trigger turns the DELETE into an UPDATE and
-  they return `null` / `[]` although the rows were soft-deleted. On softDelete tables all four
-  touch live rows only. The filter is REQUIRED: keys must be columns and values their types,
+- NO SILENT DENIALS: `update(id)`, `delete(id)`, `updateOne` and `deleteOne` return
+  `error.code === 'ACCESSNEXUS_NOT_FOUND_OR_DENIED'` (`{ code, message, details: { table,
+  method, id | filter }, hint }`) when no row was changed — the row does not exist, or RLS
+  hides it / does not let this user change it. `delete(id)` counts affected rows; on a
+  softDelete table it checks the live row before and after (gone = deleted). Helpers exported
+  by client.ts: `isNotFoundOrDenied(error)`, `isAccessDenied(error)` (that, or SQLSTATE 42501:
+  INSERT/WITH CHECK rejected, definer RPC check), `isLockedColumn(error)` (trigger.lockColumns),
+  `NOT_FOUND_OR_DENIED`. `updateMany`/`deleteMany` still return `[]` when nothing matches.
+- `updateOne` = `.update(patch).match(filter).select(columns).maybeSingle()`: one round trip
+  — update by any unique column (`{ slug }`); more than one match is PGRST116 and nothing is
+  written. `updateMany` returns `Row[]`. `deleteOne`/`deleteMany` return the deleted rows
+  (DELETE ... RETURNING, so only rows the SELECT policy shows); on a softDelete table
+  `deleteOne` returns the row as it was, `deleteMany` returns `[]` (the trigger turns the
+  DELETE into an UPDATE). On softDelete tables all four touch live rows only. The filter is REQUIRED: keys must be columns and values their types,
   `{}` does not compile (`RowFilter`), and an empty filter (or all values `undefined`) throws
   `[AccessNexus] <table>.<method>: the filter must name at least one column` before any request.
 - `findOne` = `.match(filter).maybeSingle()`, `findById` = `.eq(pk, id).maybeSingle()`: a
@@ -746,6 +848,7 @@ import { accessnexus } from './generated/sdk/index.js';
 const q = createAccessNexusQueries(accessnexus, { queryClient: new QueryClient() });
 const tasks = useQuery(q.tasks.findMany({ project_id: projectId }, { include: { project: true } }));
 const create = useMutation(q.tasks.create());
+// RETURNS TABLE / SETOF rpcs: data is Row[] (never null)
 // realtime tables: refresh queries on every change (returns the unsubscribe)
 useEffect(() => q.tasks.invalidateOnChange({ filter: { project_id: projectId } }), [projectId]);
 ```
@@ -811,8 +914,14 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   the triggers only, never their functions; `keptTriggerFunctions` lists each with its `pg_depend`
   dependents (`orphaned: true` = nothing depends on it; dropping it is a manual, reviewed step). Enum columns get AccessNexus's own enum type (`<table>_<column>_enum`).
 - `validate` — load + check the schema, write nothing. Flags: `--schema <path>`.
+  `--against-db` (with `--url`/`--target`) also compiles everything push would run — raw
+  `policy.custom`, `trigger.custom` bodies, RPC bodies, checks — in a rolled-back transaction;
+  a rejection is an error `SQL_REJECTED` whose `path` is the schema item (`rpcs.<name>`,
+  `<table>.triggers[<i>]`, `<table>.policies.<op>`).
 - `generate` — write migrations, policies, triggers, RPCs and the SDK. Files that only differ
-  in the `-- Generated at:` line are left untouched. Flags: `--schema`, `--output <dir>` (every
+  in the `-- Generated at:` line are left untouched. `generate` and `diff` warn
+  `NOT_NULL_COLUMN_ADDED` (in `warnings`) when a new migration adds a NOT NULL column without
+  default to an existing table — push fails if it has rows (see the recipe). Flags: `--schema`, `--output <dir>` (every
   output folder goes under `<dir>`, overriding the paths in `accessnexus.config.ts` — handy to
   preview into a scratch folder), `--sql-only`, `--sdk-only`, `--prefix <name>`.
 - `diff` — what `generate` would change; writes nothing. Same flags + `--check` (exit 1 when
@@ -828,7 +937,10 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   `--replace-foreign-policies` / `--replace-foreign-triggers` (as in push); without them they
   are reported in `blockers`. `--allow-destructive` likewise. `--check` exits 1
   (`LIVE_DB_CHANGES`) when the database would change; a push Postgres would reject exits 1
-  (`PUSH_WOULD_FAIL`) with `failed: { file, message, sqlState }`.
+  (`PUSH_WOULD_FAIL`) with `failed: { file, message, sqlState, line, statement }` and the
+  PARTIAL plan (what applies before the failure: `wouldApply`, `changes`). A pending migration
+  adding a NOT NULL column without default to a table with rows is reported before Postgres
+  fails: blocker `NOT_NULL_ON_NON_EMPTY_TABLE` with `details: { table, column, rows }`.
 - `push` — apply generated SQL in order migrations → rpcs → policies → triggers, tracked in
   `public.accessnexus_migrations`. The whole push (bookkeeping, foreign-policy drops and every
   file) runs in ONE transaction under an advisory lock: if anything fails, nothing from that
@@ -848,6 +960,20 @@ Colors are disabled when stdout is not a TTY or `NO_COLOR` is set.
   on disk like `diff --against-db` and returns that plan as `livePlan` — nothing persists),
   `--allow-destructive`, `--replace-foreign-policies`, `--replace-foreign-triggers`, `--seed` (also run the seed), `--allow-remote-seed`, `--output`,
   `--schema`, `--prefix`, `--adapter`, `--target`.
+- `migration discard` — drop the NEWEST migration when the database never applied it
+  (checks `public.accessnexus_migrations` through `--url`/`--target`/env; without a database
+  only with `--force`), restore the snapshot to the state before it (the snapshot keeps a
+  history), and regenerate from the schema (`--no-generate` to skip). Refuses with
+  `MIGRATION_ALREADY_APPLIED`; `MIGRATION_HISTORY_MISSING` for snapshots from < 0.4.1.
+  Use it to replace a pending migration (e.g. NOT NULL → nullable) instead of editing it.
+- `migration data <name>` — create `<migrations>/data/<timestamp>__<name>.sql`: a data
+  migration YOU write (e.g. a backfill UPDATE). Push applies it once, in timestamp order with
+  the schema migrations (so between the migration generated before it and the one after),
+  inside the push transaction, recorded in `accessnexus_migrations` (immutable afterwards).
+- `test-db up | down` — a disposable local `supabase/postgres` in Docker (`--port` 55439,
+  `--name`, `--image`), prepared for RLS tests (GoTrue-like `auth.uid()`/`auth.jwt()`,
+  `auth.users.email_confirmed_at`, `realtime.messages`); `up --push` also pushes the schema.
+  Prints the URL. `DOCKER_NOT_FOUND`, `TEST_DB_START_FAILED`.
 - `seed` — upsert seed rows. Flags: `--seed <path>`, `--url` (alias `--db-url`), `--dry-run` (prints the SQL),
   `--allow-remote-seed`, `--schema`, `--prefix`, `--adapter`, `--target`.
 - `help [command]`, `version` (also `--version`). With `--json` both print one object.
@@ -890,7 +1016,7 @@ export interface ValidateResult {
   rpcs: string[];
   channels: string[];
   functions: string[];
-  issues: SchemaIssue[]; // warnings only (errors make ok=false)
+  issues: SchemaIssue[]; // warnings only (errors make ok=false); with --against-db a rejection is SQL_REJECTED
   summary: { errors: number; warnings: number };
 }
 
@@ -949,7 +1075,8 @@ export interface PlanChange {
 
 export interface RiskyChange {
   code: 'table_dropped' | 'column_dropped' | 'column_type_changed' | 'column_default_removed'
-    | 'column_nullability_relaxed' | 'rls_disabled' | 'policy_dropped' | 'policy_roles_widened'
+    | 'column_nullability_relaxed' | 'column_nullability_tightened' // existing nulls fail; old clients writing null break
+    | 'rls_disabled' | 'policy_dropped' | 'policy_roles_widened'
     | 'policy_permissive_changed' | 'trigger_dropped' | 'function_dropped'
     | 'function_volatility_changed' | 'function_config_changed' | 'function_security_changed'
     | 'grant_widened'   // PUBLIC/anon/authenticated gains EFFECTIVE access on an existing object
@@ -960,16 +1087,20 @@ export interface RiskyChange {
 
 export interface LivePlan {
   database: string;              // redacted URL
-  wouldApply: string[];          // files push would execute (others are skipped as already applied)
+  wouldApply: string[];          // files push would execute; with `failed`: those applied before the failure
   skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
   droppedPolicies: ForeignPolicy[];   // only with --replace-foreign-policies
   droppedTriggers: ForeignTrigger[];  // only with --replace-foreign-triggers
   keptTriggerFunctions: KeptTriggerFunction[]; // functions of the dropped triggers: never dropped
   foreignPolicies: ForeignPolicy[];
   foreignTriggers: ForeignTrigger[];
-  blockers: Array<{ code: string; message: string; hint?: string }>; // refusals the real push would stop at
-  // (FOREIGN_POLICIES, FOREIGN_TRIGGERS, DESTRUCTIVE_MIGRATION, PUSH_ROLE_NO_BYPASSRLS): the push would apply nothing
-  failed: null | { file: string | null; code: string; message: string; sqlState: string | null }; // push would fail
+  blockers: Array<{ code: string; message: string; hint?: string; details?: Record<string, unknown> }>; // refusals the real push would stop at
+  // (FOREIGN_POLICIES, FOREIGN_TRIGGERS, DESTRUCTIVE_MIGRATION, PUSH_ROLE_NO_BYPASSRLS,
+  //  NOT_NULL_ON_NON_EMPTY_TABLE with details { table, column, rows }): the push would apply nothing
+  failed: null | {
+    file: string | null; code: string; message: string; sqlState: string | null;
+    line: number | null; statement: string | null; // the statement Postgres rejected (1-based line in file)
+  }; // push would fail; `changes` then hold the partial plan up to it
   changed: boolean;
   summary: { added: number; modified: number; removed: number };
   changes: PlanChange[];
@@ -1070,6 +1201,35 @@ export interface VersionResult { ok: true; command: 'version'; version: string }
 ```
 
 ## Recipes
+
+### Required column on a table with data (e.g. a new tenant column)
+
+`ALTER TABLE ... ADD COLUMN x NOT NULL` fails on a table with rows (`generate`/`diff` warn
+`NOT_NULL_COLUMN_ADDED`; the live plan blocks with `NOT_NULL_ON_NON_EMPTY_TABLE` and the row
+count). Do it in steps, in ONE push:
+1. Add the column nullable (`org_id: 'uuid?'`) and run `generate`.
+2. `npx accessnexus migration data backfill_task_org` and write the backfill in the created
+   file, e.g. `UPDATE public.tasks t SET org_id = (SELECT m.org_id FROM public.org_members m
+   WHERE m.user_id = t.user_id LIMIT 1) WHERE t.org_id IS NULL;` (runs as the push user, RLS
+   bypassed).
+3. Make it required (`org_id: 'uuid'`) and run `generate` (a `SET NOT NULL` migration;
+   `riskyChanges` shows `column_nullability_tightened` against a database that has the column).
+4. `diff --against-db`, then `push`: nullable → backfill → NOT NULL apply in timestamp order.
+Already generated the NOT NULL migration and not pushed it? `npx accessnexus migration discard`
+(checks the database never applied it), change the schema, `generate` again.
+
+### Workspace list for a user (orgs they belong to)
+
+With `orgs.read: { any: ['own', { scope: 'tenant' }] }` the creator keeps reading the org row
+even after being removed (`own`). List workspaces through memberships, not `orgs` alone:
+`db.org_members.findMany({ user_id: me }, { include: { org: true } })` (org_members needs a
+select policy that shows the user's own rows: `policy.isOwner('user_id')`).
+
+### The invitee sees the org name before joining
+
+They cannot read `orgs` yet. Use `tenantInvitations({ ..., tenantNameColumn: 'name' })`:
+`db.rpc.my_invitations()` returns `{ id, org_id, tenant_name, role, created_at }[]`, and
+`db.rpc.accept_invitation({ p_invitation })` joins (see §Multi-tenant building blocks).
 
 ### Owner-only table (each user sees and edits only their rows)
 
@@ -1232,7 +1392,7 @@ RLS. So `tasks` needs its own `org_id` (denormalized, so `belongsTo` can check i
 something must keep `tasks.org_id` equal to the project's `org_id` — otherwise a member of
 org A can create a task in A that points at org B's project (probing B's ids, attaching
 rows that cascade with B's data). `validate` warns `TENANT_PARENT_UNCHECKED` when the guard
-is missing. Guard it with a BEFORE INSERT/UPDATE trigger and freeze both columns:
+is missing. Guard it with `trigger.sameTenant` (BEFORE INSERT/UPDATE) and freeze both columns:
 
 ```ts
 import { defineSchema, policy, table, trigger } from 'accessnexus';
@@ -1267,16 +1427,8 @@ export default defineSchema({
     onDelete: { project_id: 'cascade' },
     triggers: [
       // Runs as the writing user (INVOKER): a project of another org is invisible
-      // through RLS, so it is reported exactly like a project that does not exist.
-      trigger.custom({
-        name: 'same_org_project',
-        events: ['before_insert', 'before_update'],
-        functionBody: `
-          IF NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = NEW.project_id AND p.org_id = NEW.org_id) THEN
-            RAISE EXCEPTION 'project % not found in org %', NEW.project_id, NEW.org_id USING ERRCODE = '23503';
-          END IF;
-          RETURN NEW;`,
-      }),
+      // through RLS, so it is reported exactly like a project that does not exist (23503).
+      trigger.sameTenant({ column: 'project_id', references: 'projects', tenantColumn: 'org_id' }),
       trigger.lockColumns({ name: 'lock_tenant', columns: ['org_id', 'project_id'] }),
     ],
     policies: memberPolicies,
@@ -1373,6 +1525,54 @@ export default defineSchema({
   }),
 });
 ```
+
+## Testing RLS (accessnexus/testing)
+
+`npx accessnexus test-db up --push` starts a disposable `supabase/postgres` (Docker, port
+55439) prepared for RLS tests and pushes the schema; `test-db down` removes it. Never point
+tests at a hosted project. Then, with `pg`:
+
+```ts
+import pg from 'pg';
+import { asAnon, asUser, affectedRows, expectDenied, sqlState } from 'accessnexus/testing';
+
+const pool = new pg.Pool({ connectionString: 'postgres://postgres:postgres@127.0.0.1:55439/postgres' });
+const ALICE = { id: '00000000-0000-4000-8000-000000000001', email: 'alice@test.dev' };
+
+export async function checks() {
+  // Fixtures as `postgres` (bypasses RLS): pool.query('INSERT ...').
+  await asUser(pool, ALICE, async (db) => {
+    // Every check runs as the API user, in a transaction that is always rolled back.
+    const insert = await sqlState(db, 'INSERT INTO notes (owner_id, body) VALUES ($1, $2)', [ALICE.id, 'x']); // 'ok' | '42501' | ...
+    const hidden = await expectDenied(db, 'DELETE FROM notes WHERE owner_id <> $1', [ALICE.id]); // { denied: true, by: 'no_rows' }
+    const changed = await affectedRows(db, 'UPDATE notes SET body = $1 WHERE owner_id = $2', ['y', ALICE.id]);
+    return { insert, hidden, changed };
+  });
+  await asAnon(pool, async (db) => (await db.query('SELECT count(*) FROM notes')).rows);
+}
+```
+
+`asUser(pool, user, fn)` sets `ROLE authenticated` and `request.jwt.claims` (sub, email,
+`appRole` → `app_metadata.role`) like PostgREST. `sqlState` / `expectDenied` use savepoints, so
+one denied statement does not abort the test. `TEST_DB_STANDINS_SQL` is the preparation SQL
+(`auth.uid()`/`auth.jwt()` reading the claims, `auth.users.email_confirmed_at`, `authenticator`
+login, `realtime.messages`) for your own containers (run as `supabase_admin`).
+
+## How a denial shows
+
+| Statement | RLS clause that refuses | What the caller gets |
+| --- | --- | --- |
+| INSERT | WITH CHECK | error 42501 (`new row violates row-level security policy`) |
+| UPDATE, row hidden by USING | USING | no error, 0 rows |
+| UPDATE, new row fails WITH CHECK | WITH CHECK | error 42501 |
+| DELETE, row hidden / not deletable | USING | no error, 0 rows |
+| SELECT | USING | the row is simply not returned |
+| `trigger.lockColumns` | trigger | error 42501, HINT `accessnexus:locked_column:<t>.<c>` |
+| same-tenant / membership triggers | trigger | error 23503 |
+| keepAtLeastOne | trigger | error 23514 |
+
+Test with `expectDenied` (both forms). In the app, the SDK turns the 0-row cases of
+`update`/`delete`/`updateOne`/`deleteOne` into `ACCESSNEXUS_NOT_FOUND_OR_DENIED`.
 
 ## RLS rules agents must not break
 
@@ -1504,8 +1704,21 @@ export default defineSchema({
   whole push was rolled back: nothing from it is applied (`applied` is `[]`, `rolledBack` lists
   the files that had run). Fix the schema, `generate`, `push` again.
 - `PUSH_WOULD_FAIL` — `diff --against-db` rehearsed the push and Postgres rejected a file
-  (`failed.file`, `failed.message`, `failed.sqlState`). Nothing was persisted. Fix the schema
-  (or the database state) and plan again.
+  (`failed.file`, `failed.line`, `failed.statement`, `failed.message`, `failed.sqlState`; the
+  partial plan shows what applied before it). Nothing was persisted. Fix the schema (or the
+  database state) and plan again.
+- `NOT_NULL_ON_NON_EMPTY_TABLE` — a pending migration adds a NOT NULL column without default to
+  a table with rows (`details.rows`): nullable → data migration backfill → NOT NULL (recipe
+  "Required column on a table with data"); `migration discard` replaces an unpushed migration.
+- `MIGRATION_ALREADY_APPLIED` — `migration discard` refused: the database applied it; generate
+  a new `__changes` migration instead. `MIGRATION_DISCARD_NEEDS_DB` — pass `--url`/`--target`
+  (or `--force` if no environment ever applied it). `MIGRATION_HISTORY_MISSING` — the snapshot
+  predates the history (< 0.4.1). `NO_MIGRATION_TO_DISCARD` — run `generate` first.
+- `DOCKER_NOT_FOUND` / `TEST_DB_START_FAILED` — `test-db` needs Docker, a free `--port` and
+  container `--name`; see `docker logs <name>`.
+- `SQL_REJECTED` (validate --against-db issue) — Postgres rejected the SQL generated for
+  `path`; fix that policy.custom / trigger.custom / rpc body / check.
+- `UNKNOWN_ENUM` — `'enum:<name>'` without `defineSchema(..., { enums: [defineEnum(...)] })`.
 - `LIVE_DB_CHANGES` — `diff --against-db --check` found that push would change the database;
   the plan (`changes`, `riskyChanges`) is in the result.
 - `PUSH_LOCKED` — the live plan does not wait for a running push; retry when it finishes.
@@ -1524,6 +1737,12 @@ export default defineSchema({
 ## Limits (v0.4.0)
 
 - Only the Supabase adapter exists. Database mode does not generate DDL migrations.
+- Index names come from their content (`idx_<table>_<columns>[_uniq]`); schemas from before
+  0.4.1 get one migration renaming the old position-based names (`ALTER INDEX ... RENAME`) and
+  dropping foreign-key indexes a declared index already covers.
+- `tenantInvitations` grants by role lists; finer rules (seat limits, domains) need your own
+  table or a wrapper RPC. `onAuthUserCreated` triggers live on `auth.users`: removing the
+  builder does not drop them (drop the trigger by hand).
 - Edge Functions: push does not deploy them (`supabase functions deploy`); inputs are POST JSON
   only; outputs are typed, not validated at runtime; a removed function keeps its folder.
 - Realtime: Postgres Changes filters take one column; DELETE events are not RLS-filtered

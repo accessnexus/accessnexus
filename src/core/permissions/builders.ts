@@ -5,6 +5,7 @@
 
 import type { PolicyRule, PolicyRuleType, TablePolicies } from '../types/policy.js';
 import type {
+  AllPermission,
   AnyPermission,
   PermissionLevel,
   PermissionsDef,
@@ -20,6 +21,10 @@ function isTenantScope(level: PermissionLevel): level is TenantScope {
 
 function isAnyPermission(level: PermissionLevel): level is AnyPermission {
   return typeof level === 'object' && !Array.isArray(level) && 'any' in level;
+}
+
+function isAllPermission(level: PermissionLevel): level is AllPermission {
+  return typeof level === 'object' && !Array.isArray(level) && 'all' in level;
 }
 
 /**
@@ -84,6 +89,16 @@ function levelToRule(
     return { kind: 'any', rules };
   }
 
+  // All combination
+  if (isAllPermission(level)) {
+    if (!Array.isArray(level.all) || level.all.length === 0) {
+      throw new Error(`[AccessNexus] Permission level { all: [] } needs at least one level`);
+    }
+    const rules = level.all.map((sub) => levelToRule(sub, ownerColumn, tenantColumn, tenant));
+    if (rules.length === 1) return rules[0];
+    return { kind: 'all', rules };
+  }
+
   // Array of roles
   if (Array.isArray(level)) {
     if (level.length === 0) {
@@ -104,6 +119,7 @@ function levelToRule(
 function containsTenantScope(level: PermissionLevel): boolean {
   if (isTenantScope(level)) return true;
   if (isAnyPermission(level)) return level.any.some(containsTenantScope);
+  if (isAllPermission(level)) return level.all.some(containsTenantScope);
   return false;
 }
 
@@ -171,8 +187,7 @@ function usesTenantScope(resources: Record<string, ResourcePermissions>): boolea
     for (const action of ['read', 'create', 'update', 'delete'] as const) {
       const level = perms[action];
       if (level === undefined) continue;
-      if (isTenantScope(level)) return true;
-      if (isAnyPermission(level) && level.any.some(isTenantScope)) return true;
+      if (containsTenantScope(level)) return true;
     }
   }
   return false;
@@ -185,6 +200,7 @@ function collectReferencedRoles(level: PermissionLevel): string[] {
   if (Array.isArray(level)) return level;
   if (isTenantScope(level)) return level.roles ?? [];
   if (isAnyPermission(level)) return level.any.flatMap(collectReferencedRoles);
+  if (isAllPermission(level)) return level.all.flatMap(collectReferencedRoles);
   return [];
 }
 
@@ -194,7 +210,7 @@ function collectReferencedRoles(level: PermissionLevel): string[] {
  * Levels: `'public'`, `'*'` (any signed-in user), `'none'`, `'own'`
  * (`ownerColumn = auth.uid()`), `{ scope: 'tenant', roles? }` (member of the
  * row's tenant, optionally with a role from `tenant.roleColumn`), `{ any: [...] }`
- * (OR), and `string[]` — GLOBAL app roles from the JWT `app_metadata.role`
+ * (OR), `{ all: [...] }` (AND), and `string[]` — GLOBAL app roles from the JWT `app_metadata.role`
  * claim (not tenant roles: for "org admins" use `{ scope: 'tenant', roles: ['admin'] }`).
  *
  * Writes are pinned by default: `create` requires `ownerColumn = auth.uid()`

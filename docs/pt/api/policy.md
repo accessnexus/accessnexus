@@ -55,6 +55,7 @@ O AccessNexus escolhe a role; quem decide o acesso é sempre o predicado.
 | [`isOwner(column)`](#isowner) | `owner` | `(SELECT auth.uid()) = <column>` |
 | [`hasRole(role)`](#hasrole) | `role` | `((SELECT auth.jwt()) -> 'app_metadata' ->> 'role') = '<role>'` |
 | [`belongsTo(column, through?)`](#belongsto) | `belongs_to` | `(SELECT <prefix>_<table>_belongs_to_<n>_fn(<column>))` |
+| [`sharesTenant(column, membership)`](#sharestenant) | `shares_tenant` | `(SELECT <prefix>_<table>_shares_tenant_<n>_fn(<column>))` |
 | [`matchesField(a, b)`](#matchesfield) | `matches_field` | `<a> = <b>` |
 | [`custom(expression, adapter?)`](#custom) | `custom` | `<expression>` literalmente |
 | [`any(rules)`](#any) | `any` | `(<r1>) OR (<r2>) ...` |
@@ -228,6 +229,62 @@ export const policies = {
 :::
 
 O `validate` checa se as colunas de `column`, `foreignKey`, `localKey` e `where` existem, e se os valores de `where` estão entre os valores de uma coluna enum (`INVALID_ENUM_VALUE`).
+
+## sharesTenant
+
+O usuário da linha compartilha pelo menos um tenant com o usuário atual. Uso típico: profiles visíveis para co-membros de qualquer org.
+
+```ts
+sharesTenant(
+  column: string,
+  membership: { table: string; userColumn: string; tenantColumn: string },
+): SharesTenantRule; // { kind: 'shares_tenant', column, membership }
+```
+
+| Parâmetro | Tipo | Descrição |
+| --- | --- | --- |
+| `column` | `string` | Coluna desta tabela que guarda um **id de usuário**, por exemplo `'id'` em `profiles`. Precisa ser `uuid` (o helper recebe `p_value uuid`). |
+| `membership.table` | `string` | Tabela de membership, por exemplo `'org_members'`. |
+| `membership.userColumn` | `string` | Coluna do membership que guarda o id do usuário. |
+| `membership.tenantColumn` | `string` | Coluna do membership que guarda o id do tenant. |
+
+Diferente do [`belongsTo`](#belongsto), que pergunta se o usuário atual é membro do grupo da linha, o `sharesTenant` pergunta se o usuário para o qual `column` aponta está em algum tenant do qual o usuário atual também faz parte. Compila para um helper `SECURITY DEFINER` `STABLE` (numerado junto com os outros helpers de membership da tabela), então não há recursão de RLS e o Postgres pode avaliá-lo uma vez por valor:
+
+```sql
+CREATE OR REPLACE FUNCTION accessnexus_profiles_shares_tenant_1_fn(p_value uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.org_members me
+    JOIN public.org_members them ON them.org_id = me.org_id
+    WHERE me.user_id = (SELECT auth.uid()) AND them.user_id = p_value
+  );
+$$;
+REVOKE EXECUTE ON FUNCTION accessnexus_profiles_shares_tenant_1_fn(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION accessnexus_profiles_shares_tenant_1_fn(uuid) TO authenticated;
+```
+
+O predicado da policy é `(SELECT accessnexus_profiles_shares_tenant_1_fn(id))`. Como no `belongsTo`, um helper usado por uma policy concedida `TO public` também é concedido a `anon` (ele retorna false sem usuário), e `column` conta como coluna de policy para o índice automático.
+
+```ts
+import { policy } from 'accessnexus';
+
+// profiles: your own row, plus the profiles of people you share an org with
+export const profilePolicies = {
+  select: policy.any([
+    policy.isOwner('id'),
+    policy.sharesTenant('id', { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id' }),
+  ]),
+};
+```
+
+::: tip Dica
+Nunca escreva um self-join de membership num `policy.custom` para isso: ele recursa pelo RLS da própria tabela de membership. Use o `sharesTenant`.
+:::
 
 ## matchesField
 

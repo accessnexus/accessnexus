@@ -270,3 +270,91 @@ describe('foreign key ON DELETE', () => {
     expect(sql).toContain('FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE');
   });
 });
+
+describe('splitSqlStatements', () => {
+  it('splits on ; outside quotes, dollar bodies and comments, with start lines', async () => {
+    const { splitSqlStatements } = await import('../cli/run.js');
+    const sql = `-- header\nCREATE TABLE a (x text DEFAULT 'a;b');\n\nCREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $$\nBEGIN\n  RETURN 1; -- ;\nEND;\n$$;\n/* ; */ SELECT ";" ;`;
+    expect(splitSqlStatements(sql)).toEqual([
+      { line: 2, sql: "CREATE TABLE a (x text DEFAULT 'a;b');" },
+      { line: 4, sql: 'CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $$\nBEGIN\n  RETURN 1; -- ;\nEND;\n$$;' },
+      { line: 9, sql: '/* ; */ SELECT ";" ;' },
+    ]);
+  });
+});
+
+describe('findNotNullColumnAdds', () => {
+  it('flags NOT NULL adds without a default only', async () => {
+    const { findNotNullColumnAdds } = await import('../cli/destructive.js');
+    const sql = [
+      'ALTER TABLE tasks ADD COLUMN IF NOT EXISTS org_id UUID NOT NULL;',
+      "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'todo';",
+      'ALTER TABLE tasks ADD COLUMN IF NOT EXISTS note TEXT;',
+    ].join('\n');
+    expect(findNotNullColumnAdds('m.sql', sql)).toEqual([
+      { file: 'm.sql', line: 1, table: 'tasks', column: 'org_id', sql: 'ALTER TABLE tasks ADD COLUMN IF NOT EXISTS org_id UUID NOT NULL;' },
+    ]);
+  });
+});
+
+describe('index names', () => {
+  it('come from the content: reordering indexes generates no DDL, old position names are renamed', async () => {
+    const { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { defineSchema, table } = await import('../core/schema/builders.js');
+    const { SupabaseAdapter } = await import('../adapters/supabase/adapter.js');
+    const { resolveVersionedMigrations } = await import('../cli/migrations.js');
+    const dir = mkdtempSync(join(tmpdir(), 'accessnexus-idx-'));
+    try {
+      const schema = (indexes: Array<{ columns: string[]; unique?: boolean }>) => defineSchema({
+        orgs: table({ columns: { id: 'uuid' }, primaryKey: 'id' }),
+        tasks: table({ columns: { id: 'uuid', org_id: 'uuid', status: 'text', project_id: 'uuid' }, primaryKey: 'id', references: { org_id: 'orgs.id' }, indexes }),
+      });
+      const write = (s: ReturnType<typeof schema>) => {
+        for (const f of resolveVersionedMigrations(s, new SupabaseAdapter({ deterministic: true }), dir)) writeFileSync(join(dir, f.path), f.content);
+      };
+      const a = [{ columns: ['org_id', 'status'] }, { columns: ['project_id'] }];
+      write(schema(a));
+      const init = readFileSync(join(dir, readdirSync(dir).find((f) => f.endsWith('__init.sql'))!), 'utf-8');
+      expect(init).toContain('CREATE INDEX IF NOT EXISTS idx_tasks_org_id_status ON tasks(org_id, status);');
+      // org_id is covered by (org_id, status): no separate foreign-key index.
+      expect(init).not.toContain('idx_tasks_org_id_fk');
+      expect(resolveVersionedMigrations(schema([...a].reverse()), new SupabaseAdapter({ deterministic: true }), dir)).toEqual([]);
+
+      // A snapshot from before 0.4.1 (position-based names): renamed, not rebuilt.
+      const snapPath = join(dir, '.snapshot.json');
+      const snap = JSON.parse(readFileSync(snapPath, 'utf-8'));
+      snap.schemaState.tables.tasks.indexes = snap.schemaState.tables.tasks.indexes.map((i: any, n: number) => ({ ...i, name: `${i.name}_${n + 1}` }));
+      snap.schemaHash = 'old';
+      writeFileSync(snapPath, JSON.stringify(snap));
+      const files = resolveVersionedMigrations(schema(a), new SupabaseAdapter({ deterministic: true }), dir);
+      const sql = files.find((f) => f.path.endsWith('.sql'))!.content;
+      expect(sql).toContain('ALTER INDEX IF EXISTS idx_tasks_org_id_status_1 RENAME TO idx_tasks_org_id_status;');
+      expect(sql).not.toMatch(/DROP INDEX|CREATE INDEX/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('linkOwnPackage', () => {
+  it('points accessnexus imports at the running package when the schema folder cannot resolve it', async () => {
+    const { mkdtempSync, rmSync, existsSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { linkOwnPackage } = await import('../cli/run.js');
+    const dir = mkdtempSync(join(tmpdir(), 'accessnexus-outside-'));
+    try {
+      const code = 'import { defineSchema } from "accessnexus";\nimport { asUser } from "accessnexus/testing";\nimport x from "zod";';
+      const out = linkOwnPackage(code, dir);
+      if (existsSync(join(import.meta.dirname, '..', '..', 'dist', 'index.js'))) {
+        expect(out).toMatch(/from "file:\/\/.*\/dist\/index\.js"/);
+        expect(out).toMatch(/from "file:\/\/.*\/dist\/testing\/index\.js"/);
+      }
+      expect(out).toContain('import x from "zod";');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

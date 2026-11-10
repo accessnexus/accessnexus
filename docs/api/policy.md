@@ -55,6 +55,7 @@ AccessNexus picks the role; the predicate always decides access.
 | [`isOwner(column)`](#isowner) | `owner` | `(SELECT auth.uid()) = <column>` |
 | [`hasRole(role)`](#hasrole) | `role` | `((SELECT auth.jwt()) -> 'app_metadata' ->> 'role') = '<role>'` |
 | [`belongsTo(column, through?)`](#belongsto) | `belongs_to` | `(SELECT <prefix>_<table>_belongs_to_<n>_fn(<column>))` |
+| [`sharesTenant(column, membership)`](#sharestenant) | `shares_tenant` | `(SELECT <prefix>_<table>_shares_tenant_<n>_fn(<column>))` |
 | [`matchesField(a, b)`](#matchesfield) | `matches_field` | `<a> = <b>` |
 | [`custom(expression, adapter?)`](#custom) | `custom` | `<expression>` verbatim |
 | [`any(rules)`](#any) | `any` | `(<r1>) OR (<r2>) ...` |
@@ -228,6 +229,62 @@ export const policies = {
 :::
 
 `validate` checks that `column`, `foreignKey`, `localKey` and `where` columns exist, and that `where` values belong to an enum column's values (`INVALID_ENUM_VALUE`).
+
+## sharesTenant
+
+The row's user shares at least one tenant with the current user. Typical use: profiles visible to co-members of any org.
+
+```ts
+sharesTenant(
+  column: string,
+  membership: { table: string; userColumn: string; tenantColumn: string },
+): SharesTenantRule; // { kind: 'shares_tenant', column, membership }
+```
+
+| Parameter | Type | Description |
+| --- | --- | --- |
+| `column` | `string` | Column on this table holding a **user id**, e.g. `'id'` on `profiles`. Must be `uuid` (the helper takes `p_value uuid`). |
+| `membership.table` | `string` | Membership table, e.g. `'org_members'`. |
+| `membership.userColumn` | `string` | Membership column holding the user id. |
+| `membership.tenantColumn` | `string` | Membership column holding the tenant id. |
+
+Unlike [`belongsTo`](#belongsto), which asks whether the current user is a member of the row's group, `sharesTenant` asks whether the user that `column` points to is in some tenant the current user also belongs to. It compiles to a `SECURITY DEFINER` `STABLE` helper (numbered with the table's other membership helpers), so there is no RLS recursion and Postgres can evaluate it once per value:
+
+```sql
+CREATE OR REPLACE FUNCTION accessnexus_profiles_shares_tenant_1_fn(p_value uuid)
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM public.org_members me
+    JOIN public.org_members them ON them.org_id = me.org_id
+    WHERE me.user_id = (SELECT auth.uid()) AND them.user_id = p_value
+  );
+$$;
+REVOKE EXECUTE ON FUNCTION accessnexus_profiles_shares_tenant_1_fn(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION accessnexus_profiles_shares_tenant_1_fn(uuid) TO authenticated;
+```
+
+The policy predicate is `(SELECT accessnexus_profiles_shares_tenant_1_fn(id))`. As with `belongsTo`, a helper used by a policy granted `TO public` is also granted to `anon` (it returns false without a user), and `column` counts as a policy column for the automatic index.
+
+```ts
+import { policy } from 'accessnexus';
+
+// profiles: your own row, plus the profiles of people you share an org with
+export const profilePolicies = {
+  select: policy.any([
+    policy.isOwner('id'),
+    policy.sharesTenant('id', { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id' }),
+  ]),
+};
+```
+
+::: tip
+Never write a membership self-join in `policy.custom` for this: it recurses through the membership table's own RLS. Use `sharesTenant`.
+:::
 
 ## matchesField
 

@@ -44,10 +44,15 @@ CREATE TRIGGER accessnexus_projects_audit_log
 CREATE OR REPLACE FUNCTION accessnexus_projects_lock_columns_fn()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF current_user IN ('anon', 'authenticated')
-     AND (NEW.created_by IS DISTINCT FROM OLD.created_by OR NEW.org_id IS DISTINCT FROM OLD.org_id) THEN
-    RAISE EXCEPTION 'projects: created_by, org_id cannot be changed'
-      USING ERRCODE = '42501';
+  IF current_user IN ('anon', 'authenticated') THEN
+    IF NEW.created_by IS DISTINCT FROM OLD.created_by THEN
+      RAISE EXCEPTION '%', 'projects.' || 'created_by' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:projects.' || 'created_by';
+    END IF;
+    IF NEW.org_id IS DISTINCT FROM OLD.org_id THEN
+      RAISE EXCEPTION '%', 'projects.' || 'org_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:projects.' || 'org_id';
+    END IF;
   END IF;
   RETURN NEW;
 END;

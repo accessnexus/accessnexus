@@ -25,6 +25,10 @@ import { trigger } from 'accessnexus';
 | [`auditLog`](#auditlog) | `audit_log` | `AFTER INSERT OR UPDATE OR DELETE` | definer |
 | [`lockColumns`](#lockcolumns) | `name` or `lock_columns` | `BEFORE UPDATE` | invoker |
 | [`custom`](#custom) | `name` | `events` | `security` (default invoker) |
+| [`keepAtLeastOne`](#keepatleastone) | `name` or `keep_<column>_<value>` | `BEFORE UPDATE OR DELETE` | definer |
+| [`sameTenant`](#sametenant) | `name` or `same_tenant_<column>` | `BEFORE INSERT OR UPDATE` | invoker |
+| [`memberOfTenant`](#memberoftenant) | `name` or `member_of_tenant_<column>` | `BEFORE INSERT OR UPDATE` | invoker |
+| [`onAuthUserCreated`](#onauthusercreated) | `name` or `on_auth_user_created` | `AFTER INSERT ON auth.users` | definer |
 
 ## updatedAt
 
@@ -147,13 +151,65 @@ lockColumns(options: {
 | `unless` | `string` | `undefined` | Raw SQL condition (`NEW` and `OLD` available) under which the change is allowed. A `NULL` result counts as false. |
 | `name` | `string` | `'lock_columns'` | Trigger suffix, lowercase snake_case. Required to be distinct when a table has two `lockColumns` triggers. |
 
-The `BEFORE UPDATE` function raises SQLSTATE `42501` with `<table>: <cols> cannot be changed` (or `<table>: only <cols> can be changed`) when all of these hold:
+The `BEFORE UPDATE` function raises SQLSTATE `42501` once per column that changed, when all of these hold:
 
 - `current_user IN ('anon', 'authenticated')` — the service role and `SECURITY DEFINER` code are never blocked;
 - `unless` is not true;
-- a locked column changed. With `columns`: `NEW.c IS DISTINCT FROM OLD.c` for each. With `except`: `to_jsonb(NEW) - ARRAY[...]` differs from `to_jsonb(OLD) - ARRAY[...]`.
+- a locked column changed. With `columns`: `NEW.c IS DISTINCT FROM OLD.c` for each. With `except`: the first key (in key order) of `to_jsonb(NEW) - ARRAY[...]` whose value differs from `to_jsonb(OLD)`, found with `jsonb_each`.
+
+The error names the column and carries a stable HINT:
+
+| Field | Value |
+| --- | --- |
+| Message | `<table>.<column> cannot be changed` |
+| SQLSTATE | `42501` (the same as an RLS denial) |
+| HINT | `accessnexus:locked_column:<table>.<column>` |
+
+The HINT is what tells a locked column from an RLS denial: the generated SDK's [`isLockedColumn(error)`](/api/sdk#helpers) checks it.
 
 Columns kept by `trigger.updatedAt` on the same table are always allowed to change.
+
+Generated SQL for `columns: ['reporter_id', 'org_id']` on `tasks`:
+
+```sql
+CREATE OR REPLACE FUNCTION accessnexus_tasks_lock_identity_fn()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF current_user IN ('anon', 'authenticated') THEN
+    IF NEW.reporter_id IS DISTINCT FROM OLD.reporter_id THEN
+      RAISE EXCEPTION '%', 'tasks.' || 'reporter_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || 'reporter_id';
+    END IF;
+    IF NEW.org_id IS DISTINCT FROM OLD.org_id THEN
+      RAISE EXCEPTION '%', 'tasks.' || 'org_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || 'org_id';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+SET search_path = pg_catalog, public;
+```
+
+With `except: ['status']` the function finds the changed key instead of listing columns:
+
+```sql
+DECLARE
+  locked_column text;
+BEGIN
+  IF current_user IN ('anon', 'authenticated') AND NOT COALESCE((<unless>), FALSE) THEN
+    SELECT n.key INTO locked_column
+      FROM jsonb_each(to_jsonb(NEW) - ARRAY['status', 'updated_at']::text[]) AS n
+     WHERE n.value IS DISTINCT FROM (to_jsonb(OLD) -> n.key)
+     ORDER BY n.key LIMIT 1;
+    IF locked_column IS NOT NULL THEN
+      RAISE EXCEPTION '%', 'tasks.' || locked_column || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || locked_column;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+```
 
 ```ts
 import { table, trigger } from 'accessnexus';
@@ -188,6 +244,7 @@ custom(options: {
   forEach?: TriggerForEach;
   security?: 'invoker' | 'definer';
   set?: Record<string, string>;
+  writes?: string[];
 }): CustomTrigger;
 
 type TriggerEvent =
@@ -206,6 +263,7 @@ type TriggerForEach = 'row' | 'statement';
 | `forEach` | `'row' \| 'statement'` | `'row'` | `FOR EACH ROW` or `FOR EACH STATEMENT`. |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | `'definer'` adds `SECURITY DEFINER`: the body runs as the function owner and bypasses RLS. |
 | `set` | `Record<string, string>` | `undefined` | Function configuration, as in [`rpc`](/api/rpc#options): `{ row_security: 'off' }` emits `SET row_security = 'off'`. `search_path` stays pinned to `pg_catalog, public`. |
+| `writes` | `string[]` | `undefined` | Other tables the function writes, e.g. `['team_members']`. Only the SDK uses it: with `reactQuery: true`, a mutation on this table then also invalidates those tables' queries (`teams.create()` refreshes `team_members`). It changes no SQL. |
 
 Events are grouped by timing: `['before_insert', 'before_update']` becomes `BEFORE INSERT OR UPDATE`. The body is wrapped as `BEGIN <functionBody> END;`, so it cannot have its own `DECLARE` section.
 
@@ -229,6 +287,7 @@ export const addCreator = trigger.custom({
   events: ['after_insert'],
   security: 'definer',
   functionBody: "INSERT INTO public.team_members (team_id, user_id, role) VALUES (NEW.id, NEW.created_by, 'owner'); RETURN NEW;",
+  writes: ['team_members'], // React Query: teams.create() also refreshes team_members
 });
 ```
 
@@ -236,6 +295,181 @@ export const addCreator = trigger.custom({
 `security: 'definer'` bypasses RLS for everything the body reads and writes. Use it only for trusted side effects, schema-qualify tables (`public.team_members`), and check the caller inside the body when it matters.
 :::
 
+## keepAtLeastOne
+
+Keep at least one row with `column = value` per `scope`: an org always has an owner. The last such row cannot be deleted, and cannot be changed to another value.
+
+```ts
+keepAtLeastOne(options: {
+  column: string;
+  value: string;
+  scope: string;
+  parent?: string;
+  name?: string;
+}): KeepAtLeastOneTrigger; // { kind: 'keep_at_least_one', ...options }
+```
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `column` | `string` | required | Column that holds the protected value, e.g. `'role'`. |
+| `value` | `string` | required | The protected value, e.g. `'owner'`. |
+| `scope` | `string` | required | Column that groups the rows, e.g. `'team_id'`: each scope needs one. |
+| `parent` | `string` | `undefined` | `'<table>.<column>'` of the scope's parent, e.g. `'teams.id'`. When the parent row is gone (a cascade delete), the guard steps aside, so deleting the team still works. |
+| `name` | `string` | `keep_<column>_<value>` | Trigger suffix, lowercase snake_case. |
+
+The table needs a single `primaryKey` (`INVALID_TRIGGER` otherwise). The function is `SECURITY DEFINER` (it must see every row of the scope, whatever the caller's RLS shows) and fires `BEFORE UPDATE OR DELETE`. It acts when the old row has `column = value` and the operation is a DELETE, or changes `column` or `scope`. It then locks the scope's rows with `SELECT ... FOR UPDATE`, so two concurrent demotions cannot both pass, and raises SQLSTATE `23514` when no other row with the value remains:
+
+```sql
+PERFORM 1 FROM public.team_members m WHERE m.team_id = OLD.team_id AND m.role = 'owner' FOR UPDATE;
+IF NOT EXISTS (
+  SELECT 1 FROM public.team_members m
+  WHERE m.team_id = OLD.team_id AND m.role = 'owner' AND m.id <> OLD.id
+) THEN
+  RAISE EXCEPTION 'team_members: each team_id needs at least one role = owner'
+    USING ERRCODE = '23514';
+END IF;
+```
+
+With `parent`, the condition also requires `EXISTS (SELECT 1 FROM public.teams p WHERE p.id = OLD.team_id)`.
+
+```ts
+import { trigger } from 'accessnexus';
+
+// The last owner of a team cannot leave or be demoted; deleting the team still cascades.
+export const keepOwner = trigger.keepAtLeastOne({ column: 'role', value: 'owner', scope: 'team_id', parent: 'teams.id' });
+```
+
+## sameTenant
+
+`column` must reference a row of the same tenant. Foreign keys are checked without RLS, so without this a member of tenant A could create a row in A that points at tenant B's row (probing its ids, attaching rows that cascade with B's data). `validate` warns `TENANT_PARENT_UNCHECKED` when the guard is missing.
+
+```ts
+sameTenant(options: {
+  column: string;
+  references: string;
+  tenantColumn: string;
+  referencesTenantColumn?: string;
+  name?: string;
+}): SameTenantTrigger; // { kind: 'same_tenant', ...options }
+```
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `column` | `string` | required | Foreign key column of this table, e.g. `'project_id'`. |
+| `references` | `string` | required | Table the column points to, e.g. `'projects'` (matched on its primary key, or `id`). |
+| `tenantColumn` | `string` | required | This table's tenant column, e.g. `'org_id'`. Also the parent's tenant column unless `referencesTenantColumn` is set. |
+| `referencesTenantColumn` | `string` | `tenantColumn` | The parent's tenant column, when it has another name. |
+| `name` | `string` | `same_tenant_<column>` | Trigger suffix, lowercase snake_case. |
+
+The function is `SECURITY INVOKER` and fires `BEFORE INSERT OR UPDATE`. It runs as the writer: a parent row the user cannot see counts as missing, so the check never reveals another tenant's ids. A `NULL` column is allowed. Otherwise a parent that is missing, or in another tenant, raises SQLSTATE `23503`:
+
+```sql
+IF NEW.project_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = NEW.project_id AND p.org_id = NEW.org_id) THEN
+  RAISE EXCEPTION '%', 'tasks.project_id ' || NEW.project_id || ' is not in org_id ' || NEW.org_id
+    USING ERRCODE = '23503';
+END IF;
+```
+
+```ts
+import { trigger } from 'accessnexus';
+
+// tasks.project_id must be a project of the same org (NULL allowed)
+export const sameOrg = trigger.sameTenant({ column: 'project_id', references: 'projects', tenantColumn: 'org_id' });
+```
+
+Pair it with `trigger.lockColumns` on `org_id` and `project_id`, so a later UPDATE cannot move the row. Full example: [Child of a tenant resource](/guide/cookbook#child-of-a-tenant-resource).
+
+## memberOfTenant
+
+`column` (a user id) must be a member of the row's tenant: an assignee, a reviewer.
+
+```ts
+memberOfTenant(options: {
+  column: string;
+  tenant: { table: string; userColumn: string; tenantColumn: string };
+  tenantColumn?: string;
+  name?: string;
+}): MemberOfTenantTrigger; // { kind: 'member_of_tenant', ...options }
+```
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `column` | `string` | required | Column that holds the user id, e.g. `'assignee_id'`. |
+| `tenant` | `{ table, userColumn, tenantColumn }` | required | The membership table, as in [`definePermissions`](/api/permissions). |
+| `tenantColumn` | `string` | `tenant.tenantColumn` | The row's own tenant column, when it has another name than the membership table's. |
+| `name` | `string` | `member_of_tenant_<column>` | Trigger suffix, lowercase snake_case. |
+
+Like `sameTenant` it is `SECURITY INVOKER`, fires `BEFORE INSERT OR UPDATE`, runs as the writer, allows `NULL` and raises SQLSTATE `23503`:
+
+```sql
+IF NEW.assignee_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.team_members m WHERE m.user_id = NEW.assignee_id AND m.team_id = NEW.team_id) THEN
+  RAISE EXCEPTION '%', 'tasks.assignee_id ' || NEW.assignee_id || ' is not a member of team_id ' || NEW.team_id
+    USING ERRCODE = '23503';
+END IF;
+```
+
+```ts
+import { trigger } from 'accessnexus';
+
+// assignee_id must be a member of the row's team (NULL allowed)
+export const assigneeIsMember = trigger.memberOfTenant({
+  column: 'assignee_id',
+  tenant: { table: 'team_members', userColumn: 'user_id', tenantColumn: 'team_id' },
+});
+```
+
+## onAuthUserCreated
+
+Insert a row of this table whenever a user signs up, so the client never needs an "ensure profile" step.
+
+```ts
+onAuthUserCreated(options: {
+  columns: Record<string, string>;
+  name?: string;
+}): OnAuthUserCreatedTrigger; // { kind: 'on_auth_user_created', ...options }
+```
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `columns` | `Record<string, string>` | required | Column of this table to an SQL expression over `NEW` (the `auth.users` row), e.g. `{ id: 'NEW.id', display_name: "split_part(NEW.email, '@', 1)" }`. Each expression must be non-empty SQL (`INVALID_TRIGGER`). |
+| `name` | `string` | `on_auth_user_created` | Trigger suffix, lowercase snake_case. |
+
+The trigger lives on `auth.users`, not on the table. The function is `SECURITY DEFINER`, its `EXECUTE` is revoked from `PUBLIC`, `anon` and `authenticated`, and the insert uses `ON CONFLICT DO NOTHING`, so a row that already exists never blocks sign-up:
+
+```sql
+CREATE OR REPLACE FUNCTION accessnexus_profiles_on_auth_user_created_fn()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, display_name)
+  VALUES (NEW.id, split_part(NEW.email, '@', 1))
+  ON CONFLICT DO NOTHING;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public;
+REVOKE EXECUTE ON FUNCTION accessnexus_profiles_on_auth_user_created_fn() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS accessnexus_profiles_on_auth_user_created ON auth.users;
+CREATE TRIGGER accessnexus_profiles_on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION accessnexus_profiles_on_auth_user_created_fn();
+```
+
+```ts
+import { trigger } from 'accessnexus';
+
+// On the profiles table: a row per new auth user
+export const profileOnSignUp = trigger.onAuthUserCreated({
+  columns: { id: 'NEW.id', display_name: "split_part(NEW.email, '@', 1)" },
+});
+```
+
+::: warning
+Removing the builder from the schema does not drop the trigger on `auth.users`; drop it by hand.
+:::
+
 ## Types
 
-Exported from `accessnexus`: `TriggerRule` (`{ readonly kind: string }`), `TableTriggers` (`TriggerRule[]`), `TriggerEvent`, `TriggerForEach`, `UpdatedAtTrigger`, `SoftDeleteTrigger`, `AuditLogTrigger`, `LockColumnsTrigger`, `CustomTrigger`.
+Exported from `accessnexus`: `TriggerRule` (`{ readonly kind: string }`), `TableTriggers` (`TriggerRule[]`), `TriggerEvent`, `TriggerForEach`, `UpdatedAtTrigger`, `SoftDeleteTrigger`, `AuditLogTrigger`, `LockColumnsTrigger`, `CustomTrigger`, `KeepAtLeastOneTrigger`, `SameTenantTrigger`, `MemberOfTenantTrigger`, `OnAuthUserCreatedTrigger`.

@@ -10,10 +10,12 @@ npx accessnexus <command> --help
 | Command | Purpose | Touches the database |
 | --- | --- | --- |
 | [`init`](#init) | Set up AccessNexus in a project (schema, config, SDK wrappers, AGENTS.md) | only with introspection (read-only) |
-| [`validate`](#validate) | Check the schema without writing anything | no |
+| [`validate`](#validate) | Check the schema without writing anything | only with `--against-db` (rolled back) |
 | [`diff`](#diff) | Show what `generate` would change, without writing | no |
 | [`generate`](#generate) | Write migrations, RLS policies, triggers, RPCs and the typed SDK | no |
 | [`push`](#push) | Apply the generated SQL to the database | yes |
+| [`migration`](#migration) | `discard` the newest unapplied migration, or create a `data` migration (backfill) | `discard`: read-only check |
+| [`test-db`](#test-db) | Start or remove a disposable local Supabase Postgres (Docker) for RLS tests | a local container only |
 | [`seed`](#seed) | Insert seed data | yes |
 | [`help`](#help-and-version) | Show help (also `--help`, `-h`, or no command) | no |
 | [`version`](#help-and-version) | Print the installed version (also `--version`, `-v`) | no |
@@ -83,8 +85,18 @@ Load and check the schema; write nothing.
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--schema <path>` | string | `config.schema` or `./accessnexus.schema.ts` | Schema file. |
+| `--against-db` | boolean | `false` | Also compile the generated SQL in a rolled-back transaction on the database (see below). |
+| `--url <db-url>` / `--adapter <name>` / `--target <name>` | string | see [Database URL](#database-url) | With `--against-db`: same resolution as `push`. Alias of `--url`: `--db-url`. |
 
 Exits `1` with `SCHEMA_VALIDATION_FAILED` when any issue has severity `error`; warnings are listed but do not fail. Issue codes: [Errors](/api/errors#schema-issues).
+
+### Compile against the database (`--against-db`) {#validate-against-db}
+
+`validate --against-db` compiles everything `push` would run, including the raw SQL that static checks cannot read: `policy.custom` conditions, `trigger.custom` bodies, RPC bodies and `check` expressions. It runs in a transaction that is always rolled back, so nothing persists. When Postgres rejects a statement, the issue is an error `SQL_REJECTED` and its `path` names the schema item (`rpcs.<name>`, `<table>.triggers[<i>]`, `<table>.policies.<op>`), so you fix the right place. Catches typos in column names inside custom SQL, bad casts and syntax errors before `push`.
+
+```bash
+npx accessnexus validate --against-db --json
+```
 
 ## generate
 
@@ -109,6 +121,8 @@ Output:
 | sdk | `types.ts` + `client.ts` (manual), `client.ts` (Database mode) |
 
 A file whose content differs only in the `-- Generated at:` line is left untouched (`unchanged`). Destructive statements in migrations written by this run are reported in `destructive`.
+
+`generate` and `diff` also add a warning `NOT_NULL_COLUMN_ADDED` (in `warnings`) when a new migration adds a `NOT NULL` column without a default to an existing table: `push` fails if the table has rows. The recipe is in [Required column on a table with data](/guide/cookbook#required-column-on-a-table-with-data).
 
 ## diff
 
@@ -142,7 +156,7 @@ Without `--against-db`, `diff` compares the schema with the generated **files**,
 4. Run the push code path in the transaction: the same foreign policy/trigger drops (only with the `--replace-*` flags), the same skip/re-apply rules, the same files in the same order.
 5. Snapshot again, `ROLLBACK`, release the lock. Nothing persists: no objects, no `accessnexus_migrations` rows.
 
-The result lists `changes` (`kind`, `object`, `change`, `before`, `after`, `fields`) and `riskyChanges`: function volatility/config/security changes, policy roles widened (for example `authenticated` → `public`), policies, triggers, functions, tables or columns dropped, a column default removed, a type change, `NOT NULL` relaxed, RLS disabled or unforced, and grants. Grants are judged on **effective** access (`has_function_privilege` / `has_table_privilege` for `anon` and `authenticated`, plus the ACL's `PUBLIC` entry), not on the ACL's literal shape: `grant_widened` when one of them gains a privilege on an existing object, `grant_narrowed` when one loses it (`PUBLIC` losing a privilege that `anon` and `authenticated` both keep, as in a definer RPC's `REVOKE ... FROM PUBLIC` plus direct grants, is not flagged). A grant change carries `notes` with the access path per role, e.g. `anon EXECUTE: via PUBLIC → direct grant (no change in access)`; `before`/`after` keep the literal ACL (`privileges`) next to `effective`. With `--replace-foreign-triggers`, `keptTriggerFunctions` lists the functions of the dropped triggers (never dropped) and what still depends on them. Refusals the real push would stop at (`FOREIGN_POLICIES`, `FOREIGN_TRIGGERS`, `DESTRUCTIVE_MIGRATION`, `PUSH_ROLE_NO_BYPASSRLS`) are in `blockers`. When Postgres would reject a file, the command exits `1` with `PUSH_WOULD_FAIL` and `failed` (`file`, `message`, `sqlState`); nothing was persisted.
+The result lists `changes` (`kind`, `object`, `change`, `before`, `after`, `fields`) and `riskyChanges`: function volatility/config/security changes, policy roles widened (for example `authenticated` → `public`), policies, triggers, functions, tables or columns dropped, a column default removed, a type change, `NOT NULL` relaxed, RLS disabled or unforced, and grants. Grants are judged on **effective** access (`has_function_privilege` / `has_table_privilege` for `anon` and `authenticated`, plus the ACL's `PUBLIC` entry), not on the ACL's literal shape: `grant_widened` when one of them gains a privilege on an existing object, `grant_narrowed` when one loses it (`PUBLIC` losing a privilege that `anon` and `authenticated` both keep, as in a definer RPC's `REVOKE ... FROM PUBLIC` plus direct grants, is not flagged). A grant change carries `notes` with the access path per role, e.g. `anon EXECUTE: via PUBLIC → direct grant (no change in access)`; `before`/`after` keep the literal ACL (`privileges`) next to `effective`. With `--replace-foreign-triggers`, `keptTriggerFunctions` lists the functions of the dropped triggers (never dropped) and what still depends on them. Refusals the real push would stop at (`FOREIGN_POLICIES`, `FOREIGN_TRIGGERS`, `DESTRUCTIVE_MIGRATION`, `PUSH_ROLE_NO_BYPASSRLS`, `NOT_NULL_ON_NON_EMPTY_TABLE`) are in `blockers`, each with optional `details`. A pending migration that adds a `NOT NULL` column without a default to a table with rows is reported before Postgres fails: blocker `NOT_NULL_ON_NON_EMPTY_TABLE` with `details: { table, column, rows }`. Making an existing column `NOT NULL` shows as the risky change `column_nullability_tightened`. When Postgres would reject a file, the command exits `1` with `PUSH_WOULD_FAIL` and `failed` (`file`, `message`, `sqlState`, `line`, `statement`: the statement Postgres rejected, with its 1-based line in the file; when Postgres reports no position, the rehearsal replays the file statement by statement to find it). The result then carries the **partial** plan: `wouldApply` lists the files applied before the failure and `changes` the catalog changes up to it. Nothing was persisted.
 
 ```bash
 npx accessnexus diff --against-db --json
@@ -213,6 +227,65 @@ Errors: `SEED_NOT_FOUND`, `SEED_EMPTY` (the export has no tables), `SEED_REMOTE_
 Seeds upsert rows and can create `auth.users` accounts. Run them against local or disposable databases only.
 :::
 
+## migration
+
+Two subcommands for migration files. A subcommand is required (`UNKNOWN_COMMAND` otherwise).
+
+### migration discard {#migration-discard}
+
+Drop the **newest** migration when the database never applied it, restore the snapshot to the state before it and regenerate from the schema. Use it to replace a pending migration (for example a `NOT NULL` column that should have been nullable) instead of editing it: applied and pending migrations are immutable, and editing one is `MIGRATION_DRIFT`.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--url <db-url>` / `--adapter <name>` / `--target <name>` | string | see [Database URL](#database-url) | Database used to check that the migration was never applied (`accessnexus_migrations`). Alias of `--url`: `--db-url`. |
+| `--force` | boolean | `false` | Discard without checking a database (no URL configured): you vouch that no environment ever applied it. |
+| `--no-generate` | boolean | `false` | Only discard; do not regenerate from the schema. |
+| `--last` | boolean | `false` | Discard the newest migration (the default and only mode). |
+| `--schema <path>` / `--output <dir>` / `--prefix <name>` | string | as in `generate` | Used by the regeneration. |
+
+The snapshot (`.snapshot.json`) keeps a `history` of earlier states, which is how the previous state is restored. Errors:
+
+- `NO_MIGRATION_TO_DISCARD`: there is no migration snapshot yet; run `generate` first.
+- `MIGRATION_ALREADY_APPLIED`: the database applied it; generate a new `__changes` migration instead.
+- `MIGRATION_DISCARD_NEEDS_DB`: no database URL; pass `--url` / `--target`, or `--force`.
+- `MIGRATION_HISTORY_MISSING`: the snapshot was written by a version before 0.4.1 and has no history. Nothing is deleted.
+
+```bash
+npx accessnexus migration discard --json
+npx accessnexus migration discard --target staging
+```
+
+The JSON result has `discarded` (the migration file), `restoredTo` (the previous migration, or `null` when the snapshot was removed and the next `generate` writes a new `__init`), `checkedDatabase` (redacted URL, or `null` with `--force`) and `generate` (the `generate` result, or `null` with `--no-generate`).
+
+### migration data {#migration-data}
+
+```bash
+npx accessnexus migration data <name>
+```
+
+Create `<migrations>/data/<UTC timestamp>__<name>.sql`: a data migration that **you** write, for example a backfill `UPDATE`. `<name>` is lowercase snake_case (`INVALID_FLAG_VALUE` otherwise) and required (`MISSING_ARGUMENT`). `push` applies it once, in timestamp order together with the schema migrations (between the migration generated before it and the one after), inside the push transaction, and records it in `accessnexus_migrations`; it is immutable afterwards. It runs as the push user, so RLS is bypassed. The JSON result is `{ created: <file> }`.
+
+Typical use: add a column as nullable, backfill it here, then make it required in a later migration. Full steps: [Required column on a table with data](/guide/cookbook#required-column-on-a-table-with-data).
+
+## test-db
+
+```bash
+npx accessnexus test-db up [--push]
+npx accessnexus test-db down
+```
+
+`up` starts a disposable local `supabase/postgres` in Docker, prepared for RLS tests: GoTrue-like `auth.uid()` / `auth.jwt()` reading `request.jwt.claims`, `auth.users.email_confirmed_at`, an `authenticator` login and `realtime.messages`. It prints the connection URL (`postgres://postgres:postgres@127.0.0.1:<port>/postgres`). `down` removes the container. The container is meant for tests only; never point tests at a hosted project. Writing tests: [Testing RLS](/guide/testing).
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--port <port>` | string | `55439` | Host port. |
+| `--name <name>` | string | `accessnexus-test-db` | Container name. |
+| `--image <image>` | string | `ghcr.io/supabase/postgres:15.19.0.007` | Docker image. |
+| `--push` | boolean | `false` | With `up`: also run `push` against the new database. |
+| `--schema <path>` / `--output <dir>` | string | as in `push` | Used by `--push`. |
+
+Errors: `DOCKER_NOT_FOUND` (the `docker` command is missing), `TEST_DB_START_FAILED` (`docker run` failed, the database was not ready within 2 minutes, or preparing it failed; check `docker logs <name>`). The JSON result of `up` is `{ action, container, url, image, push }` (`push` is the push result, or `null`); of `down`, `{ action, container, removed }`.
+
 ## help and version
 
 | Invocation | Output |
@@ -225,7 +298,7 @@ All accept `--json`.
 
 ## Database URL
 
-`push` and `seed` use the first non-empty value of:
+`push`, `seed`, `diff --against-db`, `validate --against-db` and `migration discard` use the first non-empty value of:
 
 1. `--url` (or its alias `--db-url`)
 2. the env var named by `adapterOptions.dbUrlEnv` of the selected target or adapter (or `adapterOptions.datasource.url.env`)
@@ -258,7 +331,7 @@ Colors are off when stdout is not a TTY, with `NO_COLOR`, and always with `--jso
 | Code | Meaning |
 | --- | --- |
 | `0` | Success. |
-| `1` | User-fixable error: bad flag, missing file, schema error, missing database URL, unreachable database, SQL rejected, stale output, destructive migration without `--allow-destructive`, failed seed. Read `error.hint`. |
+| `1` | User-fixable error: bad flag, missing file, schema error, missing database URL, unreachable database, SQL rejected, stale output, destructive migration without `--allow-destructive`, failed seed, Docker missing for `test-db`. Read `error.hint`. |
 | `2` | Internal error (`INTERNAL_ERROR`): an AccessNexus bug. Re-run with `--verbose` and report the stack trace. |
 
 Error codes: [Errors](/api/errors).
@@ -309,7 +382,7 @@ interface ValidateResult {
   rpcs: string[];
   channels: string[];                                     // defineSchema(..., { channels })
   functions: string[];                                    // defineSchema(..., { functions })
-  issues: SchemaIssue[];                                  // warnings only
+  issues: SchemaIssue[];                                  // warnings only; with --against-db a rejection is SQL_REJECTED
   summary: { errors: number; warnings: number };
 }
 
@@ -324,7 +397,7 @@ interface GenerateResult {
   }>;
   destructive: DestructiveStatement[];                    // in migrations written by this run
   summary: { created: number; updated: number; unchanged: number; files: number; tables: number };
-  warnings: SchemaIssue[];
+  warnings: SchemaIssue[];                                // includes NOT_NULL_COLUMN_ADDED
 }
 
 interface DiffResult {
@@ -335,7 +408,7 @@ interface DiffResult {
   destructive: DestructiveStatement[];                    // in migrations generate would write
   summary: { added: number; modified: number; removed: number };
   changes: Array<{ path: string; status: 'added' | 'modified' | 'removed'; diff: string }>;
-  warnings: SchemaIssue[];
+  warnings: SchemaIssue[];                                // includes NOT_NULL_COLUMN_ADDED
   hint?: string;        // set when a database URL is configured: points to diff --against-db
 }
 
@@ -352,13 +425,17 @@ interface DiffAgainstDbResult extends LivePlan {
 
 interface LivePlan {
   database: string;                                       // redacted URL
-  wouldApply: string[];                                   // files push would execute
+  wouldApply: string[];                                   // files push would execute (with `failed`: those applied before the failure)
   skipped: Array<{ path: string; reason: 'already_applied' | 'checksum_normalized' }>;
   droppedPolicies: ForeignPolicy[]; droppedTriggers: ForeignTrigger[]; // only with the --replace-* flags
   keptTriggerFunctions: Array<{ function: string; dependents: string[]; orphaned: boolean }>; // functions of dropped triggers (kept)
   foreignPolicies: ForeignPolicy[]; foreignTriggers: ForeignTrigger[];
-  blockers: Array<{ code: string; message: string; hint?: string }>; // refusals the real push stops at
-  failed: null | { file: string | null; code: string; message: string; sqlState: string | null };
+  blockers: Array<{ code: string; message: string; hint?: string; details?: Record<string, unknown> }>; // refusals the real push stops at
+  // (NOT_NULL_ON_NON_EMPTY_TABLE has details { table, column, rows })
+  failed: null | {                                        // push would fail; wouldApply and changes then hold the partial plan up to it
+    file: string | null; code: string; message: string; sqlState: string | null;
+    line: number | null; statement: string | null;        // the statement Postgres rejected (1-based line in the file)
+  };
   changed: boolean;
   summary: { added: number; modified: number; removed: number };
   changes: Array<{
@@ -369,7 +446,7 @@ interface LivePlan {
     fields?: string[];                                    // modified: properties that differ
     notes?: string[];                                     // grants: access path per role, e.g. 'anon EXECUTE: via PUBLIC → direct grant (no change in access)'
   }>;
-  riskyChanges: Array<{ code: string; kind: string; object: string; message: string }>;
+  riskyChanges: Array<{ code: string; kind: string; object: string; message: string }>; // code includes column_nullability_tightened (existing nulls fail)
   persisted: false;
 }
 

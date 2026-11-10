@@ -54,6 +54,8 @@ const schema = defineSchema({
   rpcs: {
     ping: rpc({ returns: 'text', language: 'sql', body: `SELECT 'pong'` }),
     add: rpc({ args: { a: 'int', b: 'int' }, returns: 'int', language: 'sql', body: 'SELECT a + b' }),
+    my_docs: rpc({ returns: { setof: 'docs' }, language: 'sql', body: 'SELECT * FROM docs' }),
+    doc_stats: rpc({ returns: { table: { slug: 'text', views: 'int' } }, language: 'sql', body: 'SELECT slug, views FROM docs' }),
   },
 });
 
@@ -105,6 +107,11 @@ export function useEverything() {
   const added = useQuery(q.rpc.add.query({ a: 1, b: 2 }));
   assertType<Equal<typeof added.data, number | null | undefined>>(true);
   const ping = useQuery(q.rpc.ping.query());
+  // RETURNS SETOF / TABLE: never null (an empty result is []).
+  const mine = useSuspenseQuery(q.rpc.my_docs.query());
+  assertType<Equal<typeof mine.data, Doc[]>>(true);
+  const stats = useSuspenseQuery(q.rpc.doc_stats.query());
+  assertType<Equal<typeof stats.data, { slug: string; views: number }[]>>(true);
   const addMut = useMutation(q.rpc.add.mutation());
   addMut.mutate({ a: 1, b: 2 });
 

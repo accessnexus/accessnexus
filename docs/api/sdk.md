@@ -84,8 +84,8 @@ Every table in the schema gets these accessors. `<pk>` is the table's `primaryKe
 | `findOne` | `(filter: Partial<Row>, options?: { columns?; include? }) => QueryResult<Selected>` | `from(t).select(<columns or *>[, joins])[.is(softDelete, null)].match(filter).maybeSingle()` |
 | `findById` | `(id: string, options?: { columns?; include? }) => QueryResult<Selected>` | `from(t).select(<columns or *>[, joins]).eq(<pk>, id)[.is(softDelete, null)].maybeSingle()` |
 | `create` | `(data: Create) => QueryResult<Row>` | `from(t).insert(data).select().single()` |
-| `update` | `(id: string, data: Update) => QueryResult<Row>` | `from(t).update(data).eq(<pk>, id).select().single()` |
-| `delete` | `(id: string) => QueryResult<null>` | `from(t).delete().eq(<pk>, id)` |
+| `update` | `(id: string, data: Update) => QueryResult<Row>` | `from(t).update(data).eq(<pk>, id).select().maybeSingle()`; no row changed is [`ACCESSNEXUS_NOT_FOUND_OR_DENIED`](#errors) |
+| `delete` | `(id: string) => QueryResult<null>` | `from(t).delete({ count: 'exact' }).eq(<pk>, id)`; nothing deleted is [`ACCESSNEXUS_NOT_FOUND_OR_DENIED`](#errors) |
 | `updateOne` | `(filter: RowFilter, data: Update, options?: { columns? }) => QueryResult<Selected>` | `from(t).update(data).match(filter)[.is(softDelete, null)].select(<columns or *>).maybeSingle()` |
 | `updateMany` | `(filter: RowFilter, data: Update, options?: { columns? }) => QueryResult<Selected[]>` | `from(t).update(data).match(filter)[.is(softDelete, null)].select(<columns or *>)` |
 | `deleteOne` | `(filter: RowFilter, options?: { columns? }) => QueryResult<Selected>` | `from(t).delete().match(filter)[.is(softDelete, null)].select(<columns or *>).maybeSingle()` |
@@ -111,7 +111,7 @@ Notes:
 - `filter` is passed to supabase-js `match`: equality on every given column, AND-ed. For other operators use the wrapped supabase-js client directly.
 - `id` is typed `string` for every primary key type.
 - `create` and `update` return the written row (`INSERT/UPDATE ... RETURNING`), so the table's `select` policy must admit that row, or the call fails with an RLS error.
-- `delete` sends a real DELETE. On a `softDelete` table the trigger turns it into `SET <column> = NOW()`, so the DELETE policy decides. supabase-js returns `data: null` for a delete without `.select()`.
+- `delete` sends a real DELETE and asks for the affected-row count, so a delete that removed nothing is an error (see [Errors](#errors)). On a `softDelete` table the trigger turns it into `SET <column> = NOW()`, so the DELETE policy decides; the SDK checks the live row before and after (gone means deleted). `data` is `null` on success.
 - `findOne` and `findById` use `maybeSingle()`: no matching (or no visible) row is `{ data: null, error: null }`, not an error. More than one row matching a `findOne` filter is an error (PGRST116), so filter on a unique column (`{ slug }`, `{ email }`).
 - On a `softDelete` table, `findMany`, `findOne` and `findById` add `.is(<column>, null)`. RLS itself does not hide soft-deleted rows.
 
@@ -126,17 +126,17 @@ import { createAccessNexusClient } from './generated/sdk/client.js';
 const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'public-anon-key'));
 
 export async function publish(slug: string) {
-  // a unique non-PK column: one request, the updated row (or null)
+  // a unique non-PK column: one request, the updated row (an error when none changed)
   const { data, error } = await db.posts.updateOne({ slug }, { published: true }, { columns: ['id', 'slug'] });
   if (error) throw error;
-  return data; // Pick<Posts, 'id' | 'slug'> | null
+  return data; // Pick<Posts, 'id' | 'slug'> | null (null only together with an error)
 }
 ```
 
 - The filter is required and typed `RowFilter<T, TFilter>` (exported from the generated client): keys must be columns, values the column types, and `{}` is a type error. At runtime an empty filter, or one whose values are all `undefined`, throws `[AccessNexus] <table>.<method>: the filter must name at least one column (refusing to write every row)` before any request is sent. `data` is the table's `Update` type.
-- `updateOne` / `deleteOne` use `maybeSingle()`: no visible matching row is `{ data: null, error: null }`. More than one match is a PGRST116 error and PostgREST rolls the write back.
+- `updateOne` / `deleteOne` use `maybeSingle()`. No row changed (missing, hidden by RLS or not writable) is an `ACCESSNEXUS_NOT_FOUND_OR_DENIED` error, never `data: null` (see [Errors](#errors)). More than one match is a PGRST116 error and PostgREST rolls the write back. `updateMany` / `deleteMany` still return `[]` when nothing matches.
 - Returned rows come from `.select()` (`UPDATE/DELETE ... RETURNING`), so they are returned only when the `select` policy lets the user see them. `options.columns` narrows them as in `findOne`.
-- On a `softDelete` table these methods touch only live rows (`.is(<column>, null)`). The trigger turns the DELETE into an UPDATE, so the DELETE returns no row: `deleteOne` gives `null` and `deleteMany` `[]`, even though the rows were soft-deleted.
+- On a `softDelete` table these methods touch only live rows (`.is(<column>, null)`). The trigger turns the DELETE into an UPDATE, so the DELETE itself returns no row: `deleteOne` returns the row as it was before (the SDK reads it first) and `deleteMany` returns `[]`, even though the rows were soft-deleted.
 
 ### columns
 
@@ -177,6 +177,60 @@ export async function postsWithAuthors(orgId: string) {
   // posts.references = { author_id: 'profiles.id' }
   const { data } = await db.posts.findMany({ org_id: orgId }, { include: { author: true } });
   return data?.map((post) => `${post.title} by ${post.author?.name ?? 'unknown'}`);
+}
+```
+
+## Errors
+
+Results are `{ data, error }` like supabase-js. RLS refuses some writes with an error and others silently, by touching zero rows. The SDK turns the silent cases into an error, so a write never "succeeds" without changing anything. The full table of how each statement is refused is in [How a denial shows](/guide/testing#how-a-denial-shows).
+
+### ACCESSNEXUS_NOT_FOUND_OR_DENIED
+
+`update(id)`, `delete(id)`, `updateOne` and `deleteOne` return this error when no row was changed: the row does not exist, RLS hides it, or RLS does not let this user change it. The SDK cannot tell these apart (and should not: it would reveal rows the user cannot see).
+
+```ts
+type AccessNexusError = {
+  code: 'ACCESSNEXUS_NOT_FOUND_OR_DENIED';
+  message: string;
+  details: { table: string; method: string; id?: unknown; filter?: Record<string, unknown> };
+  hint: string;
+};
+```
+
+| Method | `details` |
+| --- | --- |
+| `update(id)`, `delete(id)` | `{ table, method, id }` |
+| `updateOne`, `deleteOne` | `{ table, method, filter }` |
+
+- `delete(id)` asks for the affected-row count. On a `softDelete` table it checks the live row before and after the DELETE; a row that is gone from the live set counts as deleted.
+- `updateMany` and `deleteMany` are not affected: they return `[]` when nothing matches.
+- React Query mutations throw this error like any other.
+- Before this error existed, `delete` reported success, `update` returned a raw `PGRST116` and `updateOne` / `deleteOne` returned `data: null`.
+
+### Helpers
+
+`client.ts` exports these, so the app does not compare codes by hand:
+
+| Export | Returns `true` when |
+| --- | --- |
+| `NOT_FOUND_OR_DENIED` | (constant) the string `'ACCESSNEXUS_NOT_FOUND_OR_DENIED'`. |
+| `isNotFoundOrDenied(error)` | the error is the SDK's `ACCESSNEXUS_NOT_FOUND_OR_DENIED`. |
+| `isAccessDenied(error)` | the database refused the request: `isNotFoundOrDenied`, or SQLSTATE `42501` (an INSERT or `WITH CHECK` rejected by RLS, a locked column, a definer RPC check). |
+| `isLockedColumn(error)` | a [`trigger.lockColumns`](/api/trigger#lockcolumns) guard refused the update: SQLSTATE `42501` with a HINT starting with `accessnexus:locked_column:` (`<table>.<column>`). |
+
+```ts
+import { createClient } from '@supabase/supabase-js';
+import { createAccessNexusClient, isAccessDenied, isLockedColumn, isNotFoundOrDenied } from './generated/sdk/client.js';
+
+const db = createAccessNexusClient(createClient('https://xyz.supabase.co', 'public-anon-key'));
+
+export async function rename(id: string, name: string) {
+  const { data, error } = await db.projects.update(id, { name });
+  if (isLockedColumn(error)) return 'that column cannot be changed'; // trigger.lockColumns
+  if (isNotFoundOrDenied(error)) return 'not found, or not yours';
+  if (isAccessDenied(error)) return 'not allowed'; // 42501
+  if (error) throw error;
+  return data;
 }
 ```
 
@@ -272,7 +326,7 @@ export function Tasks({ projectId }: { projectId: string }) {
 | `q.<table>.invalidateOnChange({ event?, filter? })` | `() => void` | Only on `realtime: true` tables: subscribes and invalidates the table (and the tables that embed it) on every change. Needs `queryClient`. Use in an effect: `useEffect(() => q.tasks.invalidateOnChange(), [])`. |
 | `accessNexusKeys` | key factory | `accessNexusKeys.<table>.all` = `['accessnexus', '<table>']`; `list`, `one`, `byId` and `rpc.<name>` below it. |
 
-- `queryFn` turns `{ data, error }` into a value or a rejection: `error` is thrown as-is (the Supabase `PostgrestError`, with `code` / `message` / `details`). Lists resolve to `[]` instead of `null`; `findOne` / `findById` resolve to `null` when no visible row matches.
+- `queryFn` turns `{ data, error }` into a value or a rejection: `error` is thrown as-is (the Supabase `PostgrestError`, with `code` / `message` / `details`). Lists resolve to `[]` instead of `null`; `findOne` / `findById` resolve to `null` when no visible row matches. A `RETURNS TABLE` / `SETOF` RPC (query and mutation) resolves to `Row[]`, never `null`. The `update`, `delete`, `updateOne` and `deleteOne` mutations throw `ACCESSNEXUS_NOT_FOUND_OR_DENIED` when no row changed (see [Errors](#errors)).
 - Pass `queryClient` to get invalidation: on success a table write invalidates that table plus every table whose queries can embed it through `include`; an RPC mutation invalidates all AccessNexus queries. Without `queryClient`, nothing is invalidated.
 - Add your own options by spreading: `useQuery({ ...q.tasks.findById(id), enabled: !!id })`, `useMutation({ ...q.tasks.update(), onError })`. A spread `onSuccess` replaces the generated one; call `queryClient.invalidateQueries({ queryKey: accessNexusKeys.tasks.all })` yourself in that case.
 - RLS still applies: queries run as the user of the wrapped Supabase client. On a server, create one `QueryClient` per request.

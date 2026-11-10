@@ -21,10 +21,15 @@ CREATE TRIGGER accessnexus_comments_updated_at
 CREATE OR REPLACE FUNCTION accessnexus_comments_lock_columns_fn()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF current_user IN ('anon', 'authenticated')
-     AND (NEW.org_id IS DISTINCT FROM OLD.org_id OR NEW.task_id IS DISTINCT FROM OLD.task_id) THEN
-    RAISE EXCEPTION 'comments: org_id, task_id cannot be changed'
-      USING ERRCODE = '42501';
+  IF current_user IN ('anon', 'authenticated') THEN
+    IF NEW.org_id IS DISTINCT FROM OLD.org_id THEN
+      RAISE EXCEPTION '%', 'comments.' || 'org_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:comments.' || 'org_id';
+    END IF;
+    IF NEW.task_id IS DISTINCT FROM OLD.task_id THEN
+      RAISE EXCEPTION '%', 'comments.' || 'task_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:comments.' || 'task_id';
+    END IF;
   END IF;
   RETURN NEW;
 END;

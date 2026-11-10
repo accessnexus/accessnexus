@@ -24,6 +24,14 @@ export interface AnyPermission {
 }
 
 /**
+ * Combine multiple permission levels with AND: e.g. "own row, and still a
+ * member": `{ all: ['own', { scope: 'tenant', roles: ['member'] }] }`.
+ */
+export interface AllPermission {
+  all: PermissionLevel[];
+}
+
+/**
  * Permission level for a resource action.
  * - `'*'`              — all authenticated users
  * - `'public'`         — no auth required
@@ -35,6 +43,7 @@ export interface AnyPermission {
  * - `{ scope: 'tenant' }` — tenant member
  * - `{ scope: 'tenant', roles: [...] }` — tenant member with specific role
  * - `{ any: [...] }`   — OR combination of levels
+ * - `{ all: [...] }`   — AND combination of levels
  */
 export type PermissionLevel =
   | '*'
@@ -43,7 +52,8 @@ export type PermissionLevel =
   | 'own'
   | string[]
   | TenantScope
-  | AnyPermission;
+  | AnyPermission
+  | AllPermission;
 
 /**
  * Resource permission definition.

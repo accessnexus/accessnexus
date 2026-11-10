@@ -12,7 +12,7 @@ import { join, relative, resolve } from 'node:path';
 const ROOT = resolve(import.meta.dirname, '..');
 const OUT = join(ROOT, '.snippets-tmp');
 const SKIP_DIRS = new Set(['.vitepress', 'node_modules', 'supabase-postgres-best-practices']);
-const IMPORTS_PACKAGE = /from\s+['"]accessnexus(\/adapters\/supabase)?['"]/;
+const IMPORTS_PACKAGE = /from\s+['"]accessnexus(\/adapters\/supabase|\/testing)?['"]/;
 
 function markdownFiles(dir) {
   return readdirSync(dir).flatMap((name) => {
@@ -101,6 +101,7 @@ writeFileSync(join(OUT, 'tsconfig.json'), JSON.stringify({
     paths: {
       accessnexus: ['../src/index.ts'],
       'accessnexus/adapters/supabase': ['../src/adapters/supabase/index.ts'],
+      'accessnexus/testing': ['../src/testing/index.ts'],
     },
   },
   include: ['snippet_*.ts'],

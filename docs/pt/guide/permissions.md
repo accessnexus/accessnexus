@@ -78,6 +78,7 @@ As ações mapeiam para operações de policy: `read` → `select`, `create` →
 | `{ scope: 'tenant', roles: ['admin'] }` | Um membro do tenant da linha com um desses papéis | Igual, filtrado por `roleColumn` |
 | `['admin']` | Usuários com esse papel **global** do app (JWT `app_metadata.role`) | `policy.hasRole('admin')`, com OR para vários papéis |
 | `{ any: [...] }` | Qualquer um dos níveis listados | `policy.any([...])` |
+| `{ all: [...] }` | Todos os níveis listados | `policy.all([...])`, por exemplo `{ all: ['own', { scope: 'tenant', roles: ['member'] }] }`: o dono, e ainda membro com esse papel |
 
 ::: danger `'public'` e `'*'` em escritas
 `create: 'public'` permite que qualquer pessoa com a anon key insira linhas. `'*'` permite que qualquer conta faça isso, e qualquer um pode se cadastrar. Prefira um escopo de tenant, ou mantenha o pin de dono ligado (o padrão) para que `'*'` pelo menos signifique "criar linhas atribuídas a você mesmo".

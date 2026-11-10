@@ -4,6 +4,83 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1-next] - 2026-11-10
+
+Fixes and features from a field report (a multi-tenant SaaS built on 0.4.0). Its schema and
+RLS suite now ship as `examples/saas-teams/` and `saas-teams.integration.test.ts`.
+
+### Changed (SDK behaviour)
+
+- No more silent denials. `update(id)`, `delete(id)`, `updateOne` and `deleteOne` return
+  `error.code === 'ACCESSNEXUS_NOT_FOUND_OR_DENIED'` (`details: { table, method, id | filter }`)
+  when no row was changed, whether the row is missing or RLS hides it or denies the write.
+  - Before, `delete` reported success, `update` returned a raw `PGRST116`, and `updateOne` /
+    `deleteOne` returned `data: null`.
+  - `delete(id)` now asks for the affected-row count. On soft-delete tables it checks the live
+    row before and after, and `deleteOne` returns the row as it was.
+  - React Query mutations throw this error.
+  - New exports of `client.ts`: `isNotFoundOrDenied`, `isAccessDenied` (that, or SQLSTATE
+    42501), `isLockedColumn` and `NOT_FOUND_OR_DENIED`.
+- React Query: the query and mutation of a `RETURNS TABLE` / `SETOF` RPC resolve to `Row[]`, never
+  `null`.
+- `trigger.lockColumns` raises one error per column: message `<table>.<column> cannot be changed`,
+  HINT `accessnexus:locked_column:<table>.<column>`. It is still SQLSTATE 42501.
+- Index names come from their content (`idx_<table>_<columns>[_uniq]`) instead of their
+  position. Reordering `indexes` generates no DDL, and existing snapshots get a one-time
+  migration that renames the indexes (`ALTER INDEX ... RENAME`, never drop and create).
+- The foreign-key index (`idx_<t>_<col>_fk`, and the policy-column index) is skipped when a
+  declared index starts with that column.
+
+### Added
+
+- Migrations with data:
+  - `generate` and `diff` warn `NOT_NULL_COLUMN_ADDED` when a new migration adds a NOT NULL
+    column without default to an existing table.
+  - The live plan and `push` stop with `NOT_NULL_ON_NON_EMPTY_TABLE` and the row count, instead
+    of the raw 23502 error.
+  - `riskyChanges` gains `column_nullability_tightened`.
+  - `PUSH_WOULD_FAIL` returns the partial plan (`wouldApply`, `changes` up to the failure) and
+    `failed.line` / `failed.statement`. When Postgres reports no position, the rehearsal finds
+    the statement by replaying the file statement by statement.
+  - `migration discard`: drops the newest migration when the database never applied it
+    (`MIGRATION_ALREADY_APPLIED`, `MIGRATION_DISCARD_NEEDS_DB`, `--force`), restores the snapshot
+    and regenerates. The snapshot now keeps a `history` of earlier states
+    (`MIGRATION_HISTORY_MISSING` for older snapshots).
+  - `migration data <name>`: creates a data migration `migrations/data/<timestamp>__<name>.sql`.
+    Push applies it once, in timestamp order with the schema migrations; push now orders all
+    migration files by file name.
+- Multi-tenant builders:
+  - `tenantInvitations()`: invitations table, policies, `accept_invitation`, `my_invitations`.
+  - `defineEnum()` + `defineSchema(..., { enums })`: shared Postgres enums (`'enum:<name>'`),
+    usable in RPC args and results.
+  - RPC types may also be `'table.column'`.
+  - `trigger.keepAtLeastOne`, `trigger.sameTenant`, `trigger.memberOfTenant` and
+    `trigger.onAuthUserCreated`.
+  - `trigger.custom({ writes })`: React Query mutations then invalidate those tables too.
+  - `policy.sharesTenant`, with a SECURITY DEFINER STABLE helper.
+  - `definePermissions` levels `{ all: [...] }`.
+  - `validate`: `UNKNOWN_ENUM` and checks for every new builder; the `TENANT_PARENT_UNCHECKED`
+    hint now suggests `trigger.sameTenant`.
+- RLS testing:
+  - `accessnexus/testing` exports `asUser`, `asAnon`, `sqlState`, `affectedRows`,
+    `expectDenied` (an error or 0 rows) and `TEST_DB_STANDINS_SQL`.
+  - `test-db up | down` starts a disposable Supabase Postgres in Docker (`--push` also pushes the
+    schema).
+  - New error codes: `DOCKER_NOT_FOUND` and `TEST_DB_START_FAILED`.
+- `validate --against-db` compiles the generated SQL, including raw policy, trigger and RPC
+  bodies, in a rolled-back transaction. A rejection becomes `SQL_REJECTED`, with `path` set to
+  the schema item.
+- `llms.txt`:
+  - An index at the top, with what to read per task.
+  - "How a denial shows" (error vs 0 rows) and "Testing RLS".
+  - Recipes: a required column on a table with data, the workspace list via memberships, the
+    invitee seeing the org name.
+
+### Fixed
+
+- A schema outside the project (`--schema /tmp/x.schema.ts`) could not import `accessnexus`. It
+  now falls back to the package the CLI runs from.
+
 ## [0.4.0] - 2026-11-10
 
 ### Added

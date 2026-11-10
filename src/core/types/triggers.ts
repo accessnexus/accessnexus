@@ -101,17 +101,61 @@ export interface CustomTrigger extends TriggerRule {
    * Same rules as `rpc({ set })`: `search_path` stays pinned by the generator.
    */
   readonly set?: Readonly<Record<string, string>>;
+  /** Other tables the function writes: React Query mutations of this table invalidate them too. */
+  readonly writes?: readonly string[];
 }
 
 /**
  * All trigger rule types.
  */
+/** Rule from `trigger.keepAtLeastOne(...)`: a row with `column = value` always remains per `scope`. */
+export interface KeepAtLeastOneTrigger extends TriggerRule {
+  readonly kind: 'keep_at_least_one';
+  readonly column: string;
+  readonly value: string;
+  readonly scope: string;
+  /** `'orgs.id'`: when the parent row is gone (cascade delete), the guard steps aside. */
+  readonly parent?: string;
+  readonly name?: string;
+}
+
+/** Rule from `trigger.sameTenant(...)`: `column` points to a row of the same tenant. */
+export interface SameTenantTrigger extends TriggerRule {
+  readonly kind: 'same_tenant';
+  readonly column: string;
+  readonly references: string;
+  readonly tenantColumn: string;
+  readonly referencesTenantColumn?: string;
+  readonly name?: string;
+}
+
+/** Rule from `trigger.memberOfTenant(...)`: `column` is a user who is a member of the row's tenant. */
+export interface MemberOfTenantTrigger extends TriggerRule {
+  readonly kind: 'member_of_tenant';
+  readonly column: string;
+  readonly tenant: { readonly table: string; readonly userColumn: string; readonly tenantColumn: string };
+  readonly tenantColumn?: string;
+  readonly name?: string;
+}
+
+/** Rule from `trigger.onAuthUserCreated(...)`: insert a row of this table for every new auth user. */
+export interface OnAuthUserCreatedTrigger extends TriggerRule {
+  readonly kind: 'on_auth_user_created';
+  /** Column → SQL expression over `NEW` (the auth.users row), e.g. `{ id: 'NEW.id' }`. */
+  readonly columns: Readonly<Record<string, string>>;
+  readonly name?: string;
+}
+
 export type TriggerRuleType =
   | UpdatedAtTrigger
   | SoftDeleteTrigger
   | AuditLogTrigger
   | LockColumnsTrigger
-  | CustomTrigger;
+  | CustomTrigger
+  | KeepAtLeastOneTrigger
+  | SameTenantTrigger
+  | MemberOfTenantTrigger
+  | OnAuthUserCreatedTrigger;
 
 /**
  * Array of trigger rules for a table.

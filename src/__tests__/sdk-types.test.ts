@@ -290,7 +290,15 @@ export async function writes() {
     ]);
     // writes still return the single written row
     expect(await run(() => client.profiles.update('1', { name: 'y' }))).toEqual([
-      ['from', 'profiles'], ['update', { name: 'y' }], ['eq', 'id', '1'], ['select'], ['single'],
+      ['from', 'profiles'], ['update', { name: 'y' }], ['eq', 'id', '1'], ['select'], ['maybeSingle'],
+    ]);
+    // delete by key asks for the affected-row count (0 = missing or denied by RLS)
+    expect(await run(() => client.profiles.delete('1'))).toEqual([
+      ['from', 'profiles'], ['delete', { count: 'exact' }], ['eq', 'id', '1'],
+    ]);
+    // soft-delete tables: live row checked before and after the DELETE
+    expect(await run(() => client.docs.delete('1'))).toEqual([
+      ['from', 'docs'], ['select', 'id'], ['eq', 'id', '1'], ['is', 'deleted_at', null], ['maybeSingle'],
     ]);
     // filtered writes: one round trip, live rows only, guarded filter
     expect(await run(() => client.docs.updateOne({ slug: 'a' }, { views: 1 }, { columns: ['id'] }))).toEqual([

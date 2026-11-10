@@ -18,6 +18,7 @@ interface SchemaOptions {
   rpcs?: Record<string, RpcDef>;
   channels?: Record<string, ChannelDef>;
   functions?: Record<string, EdgeFunctionDef>;
+  enums?: EnumDef[] | Record<string, readonly string[]>;
 }
 ```
 
@@ -27,6 +28,7 @@ interface SchemaOptions {
 | `options.rpcs` | `Record<string, RpcDef>` | `undefined` | Postgres functions built with [`rpc()`](/api/rpc). Stored as a non-enumerable `__rpcs` property, so `Object.keys(schema)` lists only tables. |
 | `options.channels` | `Record<string, ChannelDef>` | `undefined` | Private Realtime channels (Broadcast / Presence) built with [`channel()`](/api/realtime#channel); names are lowercase snake_case. Stored as a non-enumerable `__channels` property. `{}` removes every channel policy on the next push. |
 | `options.functions` | `Record<string, EdgeFunctionDef>` | `undefined` | Supabase Edge Functions built with [`edgeFunction()`](/api/edge-functions), keyed by function name (`'invite-member'`). Stored as a non-enumerable `__functions` property. |
+| `options.enums` | `EnumDef[]` or `Record<string, readonly string[]>` | `undefined` | Shared Postgres enums from [`defineEnum()`](/api/tenancy#defineenum) (or a `{ name: values }` map). Each one is one `CREATE TYPE <name>`, used by columns, RPC `args` and `returns.table` as `'enum:<name>'`. An undeclared name is `UNKNOWN_ENUM`. Stored as a non-enumerable `__enums` property. |
 
 The schema file must `export default` the result. The CLI loads it with esbuild, so it may import sibling files.
 
@@ -199,6 +201,7 @@ A column is a type string, or a [`ColumnDef`](#columndef) object. Append `?` to 
 | `'int[]'` | `INTEGER[]` | `number[]` |
 | `'uuid[]'` | `UUID[]` | `string[]` |
 | `"enum('a','b')"` | `<table>_<column>_enum` | `'a' \| 'b'` |
+| `'enum:<name>'` | `<name>` (shared enum) | union of the values |
 | any of the above + `?` | same, nullable | `... \| null` |
 
 Exported types: `ScalarType` (the types above), `NullableType` (`` `${ScalarType}?` ``), `ColumnType` (`ScalarType | NullableType`), `ColumnInput` (`ColumnType | ColumnDef`).
@@ -208,6 +211,21 @@ Unknown types are reported as `UNKNOWN_COLUMN_TYPE`, with a suggestion for commo
 ### Enums
 
 Write the values inside `enum(...)`, quoted: `"enum('draft','published')"`. Each enum column gets its own Postgres type named `<table>_<column>_enum`, created with an idempotent `DO $$ ... $$` block. Two enum columns with the same values are still two distinct types: cast through text (`v.role::text::org_members_role_enum`) when comparing them in SQL.
+
+To share one type between columns and RPCs, declare it once with [`defineEnum`](/api/tenancy#defineenum) and register it in `defineSchema(tables, { enums })`. The column type is then `'enum:<name>'` (`'enum:<name>?'` when nullable): the Postgres type is `<name>`, there is nothing to cast, and the SDK types it as a union and as `Database['public']['Enums'][<name>]`.
+
+```ts
+import { defineEnum, defineSchema, table } from 'accessnexus';
+
+const memberRole = defineEnum('member_role', ['owner', 'admin', 'member', 'viewer']);
+
+export default defineSchema({
+  org_members: table({
+    columns: { id: 'uuid', user_id: 'uuid', role: { type: memberRole.type, default: "'member'" } },
+    primaryKey: 'id',
+  }),
+}, { enums: [memberRole] });
+```
 
 ### Primary key defaults
 
@@ -306,7 +324,7 @@ interface IndexDef {
 | --- | --- | --- | --- |
 | `columns` | `string[]` | required | Indexed columns, in order. |
 | `unique` | `boolean` | `false` | `CREATE UNIQUE INDEX`. |
-| `name` | `string` | `idx_<table>_<col1>_<col2>_<n>` | `n` is the 1-based position in `indexes`. |
+| `name` | `string` | `idx_<table>_<col1>_<col2>[_uniq]` | Named from the content, not the position: `_uniq` is added to a unique index, and `_2`, `_3`... to a clash. Reordering `indexes` generates no DDL. |
 
 `IndexDef` is not exported from `accessnexus`; write the objects inline.
 
@@ -314,9 +332,11 @@ AccessNexus also creates these indexes automatically (`CREATE INDEX IF NOT EXIST
 
 | Index | Columns | Skipped when |
 | --- | --- | --- |
-| `idx_<table>_<col>_fk` | each foreign key column | the column is the primary key, is `unique`, or an explicit non-unique single-column index already covers it |
+| `idx_<table>_<col>_fk` | each foreign key column | the column is the primary key, is `unique`, or a declared index starts with that column (so the declared index already serves the foreign key) |
 | `idx_<table>_<col>_rls` | each column used by `policy.isOwner`, `policy.belongsTo` or a column side of `policy.matchesField` | the column is the primary key or already indexed above |
 | `idx_<table>_active_pk` | `(<primaryKey>) WHERE <softDelete> IS NULL` | the table has no `softDelete` or no `primaryKey` |
+
+Schemas generated before 0.4.1 named indexes by position (`..._<n>`). The first `generate` after upgrading adds one migration that renames them (`ALTER INDEX ... RENAME`, never drop and create) and drops foreign-key indexes that a declared index now covers.
 
 ## Identifiers
 

@@ -25,6 +25,10 @@ import { trigger } from 'accessnexus';
 | [`auditLog`](#auditlog) | `audit_log` | `AFTER INSERT OR UPDATE OR DELETE` | definer |
 | [`lockColumns`](#lockcolumns) | `name` ou `lock_columns` | `BEFORE UPDATE` | invoker |
 | [`custom`](#custom) | `name` | `events` | `security` (padrão invoker) |
+| [`keepAtLeastOne`](#keepatleastone) | `name` ou `keep_<column>_<value>` | `BEFORE UPDATE OR DELETE` | definer |
+| [`sameTenant`](#sametenant) | `name` ou `same_tenant_<column>` | `BEFORE INSERT OR UPDATE` | invoker |
+| [`memberOfTenant`](#memberoftenant) | `name` ou `member_of_tenant_<column>` | `BEFORE INSERT OR UPDATE` | invoker |
+| [`onAuthUserCreated`](#onauthusercreated) | `name` ou `on_auth_user_created` | `AFTER INSERT ON auth.users` | definer |
 
 ## updatedAt
 
@@ -147,13 +151,65 @@ lockColumns(options: {
 | `unless` | `string` | `undefined` | Condição SQL crua (com `NEW` e `OLD` disponíveis) sob a qual a alteração é permitida. Um resultado `NULL` conta como falso. |
 | `name` | `string` | `'lock_columns'` | Sufixo do trigger, em snake_case minúsculo. Precisa ser diferente quando a tabela tem dois triggers `lockColumns`. |
 
-A função `BEFORE UPDATE` lança SQLSTATE `42501` com `<table>: <cols> cannot be changed` (ou `<table>: only <cols> can be changed`) quando todas estas condições valem:
+A função `BEFORE UPDATE` lança SQLSTATE `42501`, uma vez por coluna que mudou, quando todas estas condições valem:
 
 - `current_user IN ('anon', 'authenticated')` — a service role e código `SECURITY DEFINER` nunca são bloqueados;
 - `unless` não é verdadeiro;
-- uma coluna travada mudou. Com `columns`: `NEW.c IS DISTINCT FROM OLD.c` para cada uma. Com `except`: `to_jsonb(NEW) - ARRAY[...]` difere de `to_jsonb(OLD) - ARRAY[...]`.
+- uma coluna travada mudou. Com `columns`: `NEW.c IS DISTINCT FROM OLD.c` para cada uma. Com `except`: a primeira chave (em ordem de chave) de `to_jsonb(NEW) - ARRAY[...]` cujo valor difere do de `to_jsonb(OLD)`, encontrada com `jsonb_each`.
+
+O erro nomeia a coluna e leva um HINT estável:
+
+| Campo | Valor |
+| --- | --- |
+| Mensagem | `<table>.<column> cannot be changed` |
+| SQLSTATE | `42501` (o mesmo de uma negação do RLS) |
+| HINT | `accessnexus:locked_column:<table>.<column>` |
+
+O HINT é o que distingue uma coluna travada de uma negação do RLS: o [`isLockedColumn(error)`](/pt/api/sdk#helpers) do SDK gerado o confere.
 
 Colunas mantidas por `trigger.updatedAt` na mesma tabela sempre podem mudar.
+
+SQL gerado para `columns: ['reporter_id', 'org_id']` em `tasks`:
+
+```sql
+CREATE OR REPLACE FUNCTION accessnexus_tasks_lock_identity_fn()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF current_user IN ('anon', 'authenticated') THEN
+    IF NEW.reporter_id IS DISTINCT FROM OLD.reporter_id THEN
+      RAISE EXCEPTION '%', 'tasks.' || 'reporter_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || 'reporter_id';
+    END IF;
+    IF NEW.org_id IS DISTINCT FROM OLD.org_id THEN
+      RAISE EXCEPTION '%', 'tasks.' || 'org_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || 'org_id';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+SET search_path = pg_catalog, public;
+```
+
+Com `except: ['status']`, a função encontra a chave que mudou em vez de listar colunas:
+
+```sql
+DECLARE
+  locked_column text;
+BEGIN
+  IF current_user IN ('anon', 'authenticated') AND NOT COALESCE((<unless>), FALSE) THEN
+    SELECT n.key INTO locked_column
+      FROM jsonb_each(to_jsonb(NEW) - ARRAY['status', 'updated_at']::text[]) AS n
+     WHERE n.value IS DISTINCT FROM (to_jsonb(OLD) -> n.key)
+     ORDER BY n.key LIMIT 1;
+    IF locked_column IS NOT NULL THEN
+      RAISE EXCEPTION '%', 'tasks.' || locked_column || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || locked_column;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+```
 
 ```ts
 import { table, trigger } from 'accessnexus';
@@ -188,6 +244,7 @@ custom(options: {
   forEach?: TriggerForEach;
   security?: 'invoker' | 'definer';
   set?: Record<string, string>;
+  writes?: string[];
 }): CustomTrigger;
 
 type TriggerEvent =
@@ -206,6 +263,7 @@ type TriggerForEach = 'row' | 'statement';
 | `forEach` | `'row' \| 'statement'` | `'row'` | `FOR EACH ROW` ou `FOR EACH STATEMENT`. |
 | `security` | `'invoker' \| 'definer'` | `'invoker'` | `'definer'` adiciona `SECURITY DEFINER`: o corpo roda como o dono da função e ignora o RLS. |
 | `set` | `Record<string, string>` | `undefined` | Configuração da função, como em [`rpc`](/pt/api/rpc#options): `{ row_security: 'off' }` emite `SET row_security = 'off'`. O `search_path` continua fixado em `pg_catalog, public`. |
+| `writes` | `string[]` | `undefined` | Outras tabelas que a função escreve, por exemplo `['team_members']`. Só o SDK usa: com `reactQuery: true`, uma mutation nesta tabela também invalida as queries dessas tabelas (`teams.create()` atualiza `team_members`). Não muda nenhum SQL. |
 
 Os eventos são agrupados por momento: `['before_insert', 'before_update']` vira `BEFORE INSERT OR UPDATE`. O corpo é envolvido como `BEGIN <functionBody> END;`, então não pode ter uma seção `DECLARE` própria.
 
@@ -229,6 +287,7 @@ export const addCreator = trigger.custom({
   events: ['after_insert'],
   security: 'definer',
   functionBody: "INSERT INTO public.team_members (team_id, user_id, role) VALUES (NEW.id, NEW.created_by, 'owner'); RETURN NEW;",
+  writes: ['team_members'], // React Query: teams.create() also refreshes team_members
 });
 ```
 
@@ -236,6 +295,181 @@ export const addCreator = trigger.custom({
 `security: 'definer'` ignora o RLS em tudo o que o corpo lê e escreve. Use só para efeitos colaterais confiáveis, qualifique as tabelas com o schema (`public.team_members`) e verifique quem está chamando dentro do corpo quando isso importar.
 :::
 
+## keepAtLeastOne
+
+Mantém pelo menos uma linha com `column = value` por `scope`: uma org sempre tem um owner. A última linha assim não pode ser apagada, nem alterada para outro valor.
+
+```ts
+keepAtLeastOne(options: {
+  column: string;
+  value: string;
+  scope: string;
+  parent?: string;
+  name?: string;
+}): KeepAtLeastOneTrigger; // { kind: 'keep_at_least_one', ...options }
+```
+
+| Opção | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `column` | `string` | obrigatório | Coluna que guarda o valor protegido, por exemplo `'role'`. |
+| `value` | `string` | obrigatório | O valor protegido, por exemplo `'owner'`. |
+| `scope` | `string` | obrigatório | Coluna que agrupa as linhas, por exemplo `'team_id'`: cada escopo precisa de uma. |
+| `parent` | `string` | `undefined` | `'<table>.<column>'` do pai do escopo, por exemplo `'teams.id'`. Quando a linha pai some (um delete em cascata), a guarda se afasta, então apagar o time continua funcionando. |
+| `name` | `string` | `keep_<column>_<value>` | Sufixo do trigger, em snake_case minúsculo. |
+
+A tabela precisa de um único `primaryKey` (senão `INVALID_TRIGGER`). A função é `SECURITY DEFINER` (ela precisa ver todas as linhas do escopo, qualquer que seja o RLS de quem chama) e dispara em `BEFORE UPDATE OR DELETE`. Age quando a linha antiga tem `column = value` e a operação é um DELETE, ou muda `column` ou `scope`. Então trava as linhas do escopo com `SELECT ... FOR UPDATE`, para que dois rebaixamentos concorrentes não passem juntos, e lança SQLSTATE `23514` quando não sobra outra linha com o valor:
+
+```sql
+PERFORM 1 FROM public.team_members m WHERE m.team_id = OLD.team_id AND m.role = 'owner' FOR UPDATE;
+IF NOT EXISTS (
+  SELECT 1 FROM public.team_members m
+  WHERE m.team_id = OLD.team_id AND m.role = 'owner' AND m.id <> OLD.id
+) THEN
+  RAISE EXCEPTION 'team_members: each team_id needs at least one role = owner'
+    USING ERRCODE = '23514';
+END IF;
+```
+
+Com `parent`, a condição exige também `EXISTS (SELECT 1 FROM public.teams p WHERE p.id = OLD.team_id)`.
+
+```ts
+import { trigger } from 'accessnexus';
+
+// The last owner of a team cannot leave or be demoted; deleting the team still cascades.
+export const keepOwner = trigger.keepAtLeastOne({ column: 'role', value: 'owner', scope: 'team_id', parent: 'teams.id' });
+```
+
+## sameTenant
+
+`column` precisa referenciar uma linha do mesmo tenant. Foreign keys são checadas sem RLS, então sem isto um membro do tenant A poderia criar uma linha em A que aponta para a linha do tenant B (sondando os ids dele, pendurando linhas que somem em cascata com os dados de B). O `validate` avisa `TENANT_PARENT_UNCHECKED` quando a guarda falta.
+
+```ts
+sameTenant(options: {
+  column: string;
+  references: string;
+  tenantColumn: string;
+  referencesTenantColumn?: string;
+  name?: string;
+}): SameTenantTrigger; // { kind: 'same_tenant', ...options }
+```
+
+| Opção | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `column` | `string` | obrigatório | Coluna de foreign key desta tabela, por exemplo `'project_id'`. |
+| `references` | `string` | obrigatório | Tabela para a qual a coluna aponta, por exemplo `'projects'` (casada pela primary key dela, ou `id`). |
+| `tenantColumn` | `string` | obrigatório | A coluna de tenant desta tabela, por exemplo `'org_id'`. É também a coluna de tenant do pai, a menos que `referencesTenantColumn` seja informada. |
+| `referencesTenantColumn` | `string` | `tenantColumn` | A coluna de tenant do pai, quando ela tem outro nome. |
+| `name` | `string` | `same_tenant_<column>` | Sufixo do trigger, em snake_case minúsculo. |
+
+A função é `SECURITY INVOKER` e dispara em `BEFORE INSERT OR UPDATE`. Roda como quem escreve: uma linha pai que o usuário não enxerga conta como inexistente, então a checagem nunca revela ids de outro tenant. Uma coluna `NULL` é permitida. Fora isso, um pai inexistente, ou de outro tenant, lança SQLSTATE `23503`:
+
+```sql
+IF NEW.project_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = NEW.project_id AND p.org_id = NEW.org_id) THEN
+  RAISE EXCEPTION '%', 'tasks.project_id ' || NEW.project_id || ' is not in org_id ' || NEW.org_id
+    USING ERRCODE = '23503';
+END IF;
+```
+
+```ts
+import { trigger } from 'accessnexus';
+
+// tasks.project_id must be a project of the same org (NULL allowed)
+export const sameOrg = trigger.sameTenant({ column: 'project_id', references: 'projects', tenantColumn: 'org_id' });
+```
+
+Combine com `trigger.lockColumns` em `org_id` e `project_id`, para que um UPDATE posterior não mova a linha. Exemplo completo: [Filho de um recurso de tenant](/pt/guide/cookbook#child-of-a-tenant-resource).
+
+## memberOfTenant
+
+`column` (um id de usuário) precisa ser membro do tenant da linha: um responsável, um revisor.
+
+```ts
+memberOfTenant(options: {
+  column: string;
+  tenant: { table: string; userColumn: string; tenantColumn: string };
+  tenantColumn?: string;
+  name?: string;
+}): MemberOfTenantTrigger; // { kind: 'member_of_tenant', ...options }
+```
+
+| Opção | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `column` | `string` | obrigatório | Coluna que guarda o id do usuário, por exemplo `'assignee_id'`. |
+| `tenant` | `{ table, userColumn, tenantColumn }` | obrigatório | A tabela de membership, como no [`definePermissions`](/pt/api/permissions). |
+| `tenantColumn` | `string` | `tenant.tenantColumn` | A coluna de tenant da própria linha, quando ela tem outro nome que a da tabela de membership. |
+| `name` | `string` | `member_of_tenant_<column>` | Sufixo do trigger, em snake_case minúsculo. |
+
+Como o `sameTenant`, é `SECURITY INVOKER`, dispara em `BEFORE INSERT OR UPDATE`, roda como quem escreve, permite `NULL` e lança SQLSTATE `23503`:
+
+```sql
+IF NEW.assignee_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM public.team_members m WHERE m.user_id = NEW.assignee_id AND m.team_id = NEW.team_id) THEN
+  RAISE EXCEPTION '%', 'tasks.assignee_id ' || NEW.assignee_id || ' is not a member of team_id ' || NEW.team_id
+    USING ERRCODE = '23503';
+END IF;
+```
+
+```ts
+import { trigger } from 'accessnexus';
+
+// assignee_id must be a member of the row's team (NULL allowed)
+export const assigneeIsMember = trigger.memberOfTenant({
+  column: 'assignee_id',
+  tenant: { table: 'team_members', userColumn: 'user_id', tenantColumn: 'team_id' },
+});
+```
+
+## onAuthUserCreated
+
+Insere uma linha desta tabela sempre que um usuário se cadastra, para que o client nunca precise de um passo "garantir o profile".
+
+```ts
+onAuthUserCreated(options: {
+  columns: Record<string, string>;
+  name?: string;
+}): OnAuthUserCreatedTrigger; // { kind: 'on_auth_user_created', ...options }
+```
+
+| Opção | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `columns` | `Record<string, string>` | obrigatório | Coluna desta tabela para uma expressão SQL sobre `NEW` (a linha de `auth.users`), por exemplo `{ id: 'NEW.id', display_name: "split_part(NEW.email, '@', 1)" }`. Cada expressão precisa ser SQL não vazio (`INVALID_TRIGGER`). |
+| `name` | `string` | `on_auth_user_created` | Sufixo do trigger, em snake_case minúsculo. |
+
+O trigger mora em `auth.users`, não na tabela. A função é `SECURITY DEFINER`, o `EXECUTE` dela é revogado de `PUBLIC`, `anon` e `authenticated`, e o insert usa `ON CONFLICT DO NOTHING`, então uma linha que já existe nunca bloqueia o cadastro:
+
+```sql
+CREATE OR REPLACE FUNCTION accessnexus_profiles_on_auth_user_created_fn()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, display_name)
+  VALUES (NEW.id, split_part(NEW.email, '@', 1))
+  ON CONFLICT DO NOTHING;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public;
+REVOKE EXECUTE ON FUNCTION accessnexus_profiles_on_auth_user_created_fn() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS accessnexus_profiles_on_auth_user_created ON auth.users;
+CREATE TRIGGER accessnexus_profiles_on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION accessnexus_profiles_on_auth_user_created_fn();
+```
+
+```ts
+import { trigger } from 'accessnexus';
+
+// On the profiles table: a row per new auth user
+export const profileOnSignUp = trigger.onAuthUserCreated({
+  columns: { id: 'NEW.id', display_name: "split_part(NEW.email, '@', 1)" },
+});
+```
+
+::: warning Atenção
+Remover o builder do schema não apaga o trigger em `auth.users`; apague-o à mão.
+:::
+
 ## Tipos {#types}
 
-Exportados de `accessnexus`: `TriggerRule` (`{ readonly kind: string }`), `TableTriggers` (`TriggerRule[]`), `TriggerEvent`, `TriggerForEach`, `UpdatedAtTrigger`, `SoftDeleteTrigger`, `AuditLogTrigger`, `LockColumnsTrigger`, `CustomTrigger`.
+Exportados de `accessnexus`: `TriggerRule` (`{ readonly kind: string }`), `TableTriggers` (`TriggerRule[]`), `TriggerEvent`, `TriggerForEach`, `UpdatedAtTrigger`, `SoftDeleteTrigger`, `AuditLogTrigger`, `LockColumnsTrigger`, `CustomTrigger`, `KeepAtLeastOneTrigger`, `SameTenantTrigger`, `MemberOfTenantTrigger`, `OnAuthUserCreatedTrigger`.

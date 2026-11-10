@@ -412,8 +412,8 @@ describe('Supabase Adapter', () => {
       expect(sql).toContain('slug TEXT NOT NULL UNIQUE');
       expect(sql).toContain('rating NUMERIC NOT NULL CHECK (rating >= 0)');
       expect(sql).toContain('owner_id UUID NOT NULL REFERENCES profiles(id)');
-      expect(sql).toContain('CREATE UNIQUE INDEX IF NOT EXISTS idx_shops_slug_1 ON shops(slug);');
-      expect(sql).toContain('CREATE INDEX IF NOT EXISTS idx_shops_owner_id_2 ON shops(owner_id);');
+      expect(sql).toContain('CREATE UNIQUE INDEX IF NOT EXISTS idx_shops_slug_uniq ON shops(slug);');
+      expect(sql).toContain('CREATE INDEX IF NOT EXISTS idx_shops_owner_id ON shops(owner_id);');
       expect(sql).not.toContain('CREATE INDEX IF NOT EXISTS idx_shops_owner_id_fk ON shops(owner_id);');
     });
 

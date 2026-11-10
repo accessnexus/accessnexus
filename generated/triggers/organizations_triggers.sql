@@ -60,10 +60,11 @@ CREATE TRIGGER accessnexus_organizations_add_owner_as_admin
 CREATE OR REPLACE FUNCTION accessnexus_organizations_lock_columns_fn()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF current_user IN ('anon', 'authenticated')
-     AND (NEW.owner_id IS DISTINCT FROM OLD.owner_id) THEN
-    RAISE EXCEPTION 'organizations: owner_id cannot be changed'
-      USING ERRCODE = '42501';
+  IF current_user IN ('anon', 'authenticated') THEN
+    IF NEW.owner_id IS DISTINCT FROM OLD.owner_id THEN
+      RAISE EXCEPTION '%', 'organizations.' || 'owner_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:organizations.' || 'owner_id';
+    END IF;
   END IF;
   RETURN NEW;
 END;

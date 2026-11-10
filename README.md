@@ -237,6 +237,9 @@ to `select` if raw API reads must not see them).
 `updateOne`/`updateMany`/`deleteOne`/`deleteMany(filter, ...)` write by any columns (e.g. a
 unique `slug`) and return the written rows; the filter must name at least one column (type
 error and runtime error otherwise), so a typo never updates or deletes the whole table.
+Writes never fail silently: `update`/`delete`/`updateOne`/`deleteOne` that change no row (missing,
+or RLS hides it) return `error.code === 'ACCESSNEXUS_NOT_FOUND_OR_DENIED'`; `isNotFoundOrDenied`,
+`isAccessDenied` and `isLockedColumn` are exported by the generated client.
 
 **TanStack Query.** Set `adapterOptions: { reactQuery: true }` and `generate` also writes
 `react-query.ts`: `createAccessNexusQueries(db, { queryClient })` returns `queryOptions` for
@@ -347,6 +350,17 @@ writes are `TO public` only for an explicit `policy.public()`.
   and hands your handler an RLS-scoped client, scaffolds `supabase/functions/<name>/index.ts` once,
   sets `verify_jwt` in `supabase/config.toml`, and adds `db.functions.inviteMember(input)`.
   See the [Edge Functions guide](https://accessnexus.github.io/accessnexus/guide/edge-functions).
+- **Multi-tenant building blocks** — `tenantInvitations()` (invitations table, policies,
+  `accept_invitation`, `my_invitations`), `defineEnum()` (one Postgres enum shared by columns and
+  RPCs), `trigger.keepAtLeastOne` (an org always keeps an owner), `trigger.sameTenant` /
+  `trigger.memberOfTenant` (foreign keys that stay inside the tenant), `trigger.onAuthUserCreated`
+  (a profile per sign-up), `policy.sharesTenant` (people who share an org with you), and
+  `definePermissions` levels `{ all: [...] }`. See `examples/saas-teams/`.
+- **Testing RLS** — `npx accessnexus test-db up --push` (a disposable Supabase Postgres in Docker)
+  and `accessnexus/testing` (`asUser`, `asAnon`, `sqlState`, `affectedRows`, `expectDenied`).
+- **Migrations with data** — `NOT_NULL_COLUMN_ADDED` / `NOT_NULL_ON_NON_EMPTY_TABLE` before a
+  required column breaks a push, `migration data <name>` (backfill migrations applied in order),
+  `migration discard` (replace a migration no database applied), `validate --against-db`.
 - **`defineConfig`** (`accessnexus.config.ts`) — `schema`, `seed`, `output.{dir,migrations,policies,triggers,rpcs,sdk,functions}`, `adapter` (default `supabase`), `adapterOptions`, `naming.policyPrefix` (default `accessnexus`), `generate.{sqlOnly,sdkOnly}`, `targets` (for `--target`).
 - **`defineSeed`** — manual `defineSeed(schema, data)` or Database-mode `defineSeed<DB>(data)`.
   Users referenced through `auth.users` FKs are created with a random password

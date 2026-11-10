@@ -238,9 +238,11 @@ describe('Supabase Adapter - Trigger SQL Generation', () => {
       const sql = adapter.generateTriggers(schema)[0].content;
       expect(sql).toContain('CREATE OR REPLACE FUNCTION accessnexus_tasks_lock_columns_fn()');
       expect(sql).toContain("current_user IN ('anon', 'authenticated')");
-      expect(sql).toContain('(NEW.reporter_id IS DISTINCT FROM OLD.reporter_id OR NEW.org_id IS DISTINCT FROM OLD.org_id)');
-      expect(sql).toContain("RAISE EXCEPTION 'tasks: reporter_id, org_id cannot be changed'");
-      expect(sql).toContain("USING ERRCODE = '42501'");
+      expect(sql).toContain('IF NEW.reporter_id IS DISTINCT FROM OLD.reporter_id THEN');
+      expect(sql).toContain('IF NEW.org_id IS DISTINCT FROM OLD.org_id THEN');
+      // One error per column, with a stable HINT for isLockedColumn().
+      expect(sql).toContain("RAISE EXCEPTION '%', 'tasks.' || 'org_id' || ' cannot be changed'");
+      expect(sql).toContain("USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || 'org_id';");
       expect(sql).toContain('BEFORE UPDATE ON tasks');
       expect(sql).not.toContain('SECURITY DEFINER');
       expect(sql).toContain('SET search_path = pg_catalog, public');
@@ -258,10 +260,11 @@ describe('Supabase Adapter - Trigger SQL Generation', () => {
         }),
       });
       const sql = adapter.generateTriggers(schema)[0].content;
-      expect(sql).toContain("(to_jsonb(NEW) - ARRAY['status', 'updated_at']::text[]) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'updated_at']::text[])");
+      expect(sql).toContain("FROM jsonb_each(to_jsonb(NEW) - ARRAY['status', 'updated_at']::text[]) AS n");
+      expect(sql).toContain('WHERE n.value IS DISTINCT FROM (to_jsonb(OLD) -> n.key)');
       expect(sql).toContain('NOT COALESCE((OLD.title IS NULL), FALSE)');
       expect(sql).toContain('CREATE TRIGGER accessnexus_tasks_status_only');
-      expect(sql).toContain("RAISE EXCEPTION 'tasks: only status can be changed'");
+      expect(sql).toContain("HINT = 'accessnexus:locked_column:tasks.' || locked_column;");
     });
   });
 

@@ -75,6 +75,15 @@ export interface CustomRule extends PolicyRule {
   readonly adapter?: string;
 }
 
+/** Rule from `policy.sharesTenant(column, membership)`. */
+export interface SharesTenantRule extends PolicyRule {
+  readonly kind: 'shares_tenant';
+  /** Column on this table holding a user id (e.g. `'id'` on profiles). */
+  readonly column: string;
+  /** Membership table: user ↔ tenant. */
+  readonly membership: { readonly table: string; readonly userColumn: string; readonly tenantColumn: string };
+}
+
 // ---- Combinators ----
 
 /** Rule from `policy.any(rules)` (OR). */
@@ -120,6 +129,7 @@ export type PolicyRuleType =
   | BelongsToRule
   | MatchesFieldRule
   | CustomRule
+  | SharesTenantRule
   | AnyRule
   | AllRule
   | WithCheckRule;

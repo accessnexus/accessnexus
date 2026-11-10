@@ -130,7 +130,7 @@ describe('global behaviour', () => {
       const result = await run(...argv);
       expect(result.code).toBe(0);
       expect(result.json).toMatchObject({ ok: true, command: 'help', topic: null });
-      expect(result.json.commands.map((c: any) => c.name)).toEqual(['init', 'generate', 'diff', 'validate', 'push', 'seed']);
+      expect(result.json.commands.map((c: any) => c.name)).toEqual(['init', 'generate', 'diff', 'validate', 'push', 'seed', 'migration', 'test-db']);
       expect(result.json.exitCodes).toHaveProperty('2');
     }
 

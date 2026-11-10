@@ -147,6 +147,40 @@ Aqui os owners adicionam pessoas diretamente, o que só é aceitável porque co-
 
 Quando colegas de org conseguem ler os perfis uns dos outros, ninguém pode ser adicionado a uma org sem concordar. As memberships só são criadas pelo trigger do owner e pela `accept_invitation`, que checa o email convidado e confirmado. `org_members.insert` é `policy.none()`.
 
+Comece pelo [`tenantInvitations`](/pt/api/tenancy#tenantinvitations): uma chamada devolve tudo isso pronto, sem SQL para escrever (ou errar). Ele gera:
+
+- uma tabela `invitations` (`id`, a coluna de tenant, `email`, `role`, `invited_by`, `created_at`, única por tenant e e-mail) com policies: os papéis de `inviterRoles` criam convites em nome próprio para os papéis que podem conceder, e leem e revogam os convites do tenant deles; o convidado (o e-mail do JWT) lê e recusa os dele; ninguém faz update;
+- `accept_invitation(p_invitation uuid) => uuid` (`SECURITY DEFINER`): quem chama precisa estar logado, ter e-mail confirmado e bater com o endereço convidado; entra com o papel convidado, o convite é consumido e o id do tenant é retornado (`42501` quando anônimo ou não confirmado, `P0002` quando não encontrado);
+- `my_invitations()` (`SECURITY DEFINER`, stable): os convites de quem chama com o nome do tenant, que essa pessoa ainda não consegue ler.
+
+```ts [accessnexus.schema.ts]
+import { defineEnum, defineSchema, policy, table, tenantInvitations } from 'accessnexus';
+
+const memberRole = defineEnum('member_role', ['owner', 'admin', 'member', 'viewer']);
+
+const invites = tenantInvitations({
+  tenant: { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id', roleColumn: 'role' },
+  tenantTable: 'orgs',
+  tenantNameColumn: 'name',
+  roles: memberRole,
+  inviterRoles: { owner: ['admin', 'member', 'viewer'], admin: ['member', 'viewer'] },
+});
+
+export default defineSchema({
+  orgs: table({ columns: { id: 'uuid', name: 'text' }, primaryKey: 'id', policies: { select: policy.isAuthenticated() } }),
+  org_members: table({
+    columns: { id: 'uuid', org_id: 'uuid', user_id: 'uuid', role: { type: memberRole.type, default: "'member'" } },
+    primaryKey: 'id',
+    references: { org_id: 'orgs.id', user_id: 'auth.users.id' },
+    indexes: [{ columns: ['org_id', 'user_id'], unique: true }],
+    policies: { select: policy.isOwner('user_id'), insert: policy.none() },
+  }),
+  invitations: invites.table,
+}, { enums: [memberRole], rpcs: { ...invites.rpcs } });
+```
+
+Opções e detalhes: [defineEnum / tenantInvitations](/pt/api/tenancy). A versão abaixo é a mesma ideia escrita à mão, com um token opaco e uma validade em vez do id do convite. Escreva-a você mesmo só quando precisar disso.
+
 ```ts [accessnexus.schema.ts]
 import { defineSchema, policy, rpc, table, trigger } from 'accessnexus';
 
@@ -267,7 +301,7 @@ O token sozinho não basta: a checagem do email barra um link vazado, e a checag
 
 ## Filho de um recurso de tenant {#child-of-a-tenant-resource}
 
-O RLS checa cada linha contra a própria coluna de tenant, e foreign keys são checadas sem RLS. Por isso `tasks` carrega o próprio `org_id`, e um trigger o mantém igual ao do projeto. Sem isso, um membro da org A consegue anexar uma task a um projeto da org B (`TENANT_PARENT_UNCHECKED`).
+O RLS checa cada linha contra a própria coluna de tenant, e foreign keys são checadas sem RLS. Por isso `tasks` carrega o próprio `org_id`, e o [`trigger.sameTenant`](/pt/api/trigger#sametenant) o mantém igual ao do projeto. Sem isso, um membro da org A consegue anexar uma task a um projeto da org B (`TENANT_PARENT_UNCHECKED`).
 
 ```ts [accessnexus.schema.ts]
 import { defineSchema, policy, table, trigger } from 'accessnexus';
@@ -301,17 +335,10 @@ export default defineSchema({
     references: { org_id: 'orgs.id', project_id: 'projects.id' },
     onDelete: { project_id: 'cascade' },
     triggers: [
-      // Roda como o usuário que escreve: o projeto de outra org é invisível, então
-      // é reportado exatamente como um projeto que não existe.
-      trigger.custom({
-        name: 'same_org_project',
-        events: ['before_insert', 'before_update'],
-        functionBody: `
-          IF NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = NEW.project_id AND p.org_id = NEW.org_id) THEN
-            RAISE EXCEPTION 'project % not found in org %', NEW.project_id, NEW.org_id USING ERRCODE = '23503';
-          END IF;
-          RETURN NEW;`,
-      }),
+      // Runs as the writing user (INVOKER): another org's project is invisible
+      // through RLS, so it is reported exactly like a project that does not
+      // exist (23503). NULL is allowed.
+      trigger.sameTenant({ column: 'project_id', references: 'projects', tenantColumn: 'org_id' }),
       trigger.lockColumns({ name: 'lock_tenant', columns: ['org_id', 'project_id'] }),
     ],
     policies: memberPolicies,
@@ -490,6 +517,46 @@ export async function upcoming() {
 ```
 
 Para retornar linhas inteiras de uma tabela, use `{ setof: 'bookings' }` (SDK `Bookings[]`). Mudar as colunas de resultado depois é tratado pelo `push`: veja [Alterando ou removendo uma RPC](/pt/guide/rpcs#changing-or-removing-an-rpc).
+
+## Coluna obrigatória numa tabela com dados {#required-column-on-a-table-with-data}
+
+`ALTER TABLE ... ADD COLUMN x NOT NULL` falha numa tabela que tem linhas. O `generate` e o `diff` avisam `NOT_NULL_COLUMN_ADDED`, e o plano ao vivo (`diff --against-db`) e o `push` param com `NOT_NULL_ON_NON_EMPTY_TABLE` e a contagem de linhas, em vez do `23502` cru do Postgres. Faça em etapas, todas em **um** push:
+
+1. Adicione a coluna como nullable (`org_id: 'uuid?'`) e rode `npx accessnexus generate`.
+2. Crie uma migration de dados, `npx accessnexus migration data backfill_task_org`, e escreva o backfill no arquivo criado, por exemplo:
+
+   ```sql
+   UPDATE public.tasks t SET org_id = (
+     SELECT m.org_id FROM public.org_members m WHERE m.user_id = t.user_id LIMIT 1
+   ) WHERE t.org_id IS NULL;
+   ```
+
+   Ela roda como o usuário do push, então o RLS é ignorado.
+3. Torne a coluna obrigatória (`org_id: 'uuid'`) e rode `generate` de novo: uma migration `SET NOT NULL`. Contra um banco que já tem a coluna, o `riskyChanges` mostra `column_nullability_tightened`.
+4. `npx accessnexus diff --against-db`, depois `push`. A coluna nullable, o backfill e o `NOT NULL` são aplicados em ordem de timestamp, dentro de uma transação.
+
+Já gerou a migration `NOT NULL` e ainda não fez o push? `npx accessnexus migration discard` a descarta (depois de conferir que o banco nunca a aplicou), restaura o snapshot e regenera; mude o schema e rode `generate` de novo. Veja [`migration`](/pt/api/cli#migration).
+
+## Lista de workspaces de um usuário {#workspace-list-for-a-user}
+
+Com `orgs.read: { any: ['own', { scope: 'tenant' }] }`, quem criou a org continua lendo a linha dela mesmo depois de ser removido (`own`). Então não liste os workspaces de um usuário só a partir de `orgs`. Liste pelas memberships:
+
+```ts
+const { data: memberships } = await db.org_members.findMany({ user_id: me }, { include: { org: true } });
+// each membership has its org: memberships[0].org
+```
+
+O `org_members` precisa de uma policy de `select` que mostre as linhas do próprio usuário: `policy.isOwner('user_id')`.
+
+## O convidado vê o nome da org antes de entrar {#the-invitee-sees-the-org-name-before-joining}
+
+Quem tem um convite pendente ainda não consegue ler `orgs`, então o nome da org fica fora do alcance. Use o [`tenantInvitations`](/pt/api/tenancy#tenantinvitations) com `tenantNameColumn: 'name'`: o `my_invitations` é uma função definer que devolve o nome junto com cada convite.
+
+```ts
+const { data: pending } = await db.rpc.my_invitations();
+// [{ id, org_id, tenant_name, role, created_at }]
+const { data: orgId } = await db.rpc.accept_invitation({ p_invitation: pending![0].id });
+```
 
 ## Veja também {#related}
 

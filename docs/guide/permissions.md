@@ -78,6 +78,7 @@ Actions map to policy operations: `read` → `select`, `create` → `insert`, `u
 | `{ scope: 'tenant', roles: ['admin'] }` | A member of the row's tenant with one of these roles | Same, filtered on `roleColumn` |
 | `['admin']` | Users with this **global** app role (JWT `app_metadata.role`) | `policy.hasRole('admin')`, OR-ed for several roles |
 | `{ any: [...] }` | Any of the listed levels | `policy.any([...])` |
+| `{ all: [...] }` | All of the listed levels | `policy.all([...])`, e.g. `{ all: ['own', { scope: 'tenant', roles: ['member'] }] }`: the owner, and still a member with that role |
 
 ::: danger `'public'` and `'*'` for writes
 `create: 'public'` lets anyone with the anon key insert rows. `'*'` lets any account do it, and anyone can sign up. Prefer a tenant scope, or keep the owner pin on (the default) so `'*'` at least means "create rows attributed to yourself".

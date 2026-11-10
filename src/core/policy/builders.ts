@@ -15,6 +15,7 @@ import type {
   PolicyRule,
   PublicRule,
   RoleRule,
+  SharesTenantRule,
   WithCheckMode,
   WithCheckRule,
 } from '../types/policy.js';
@@ -145,6 +146,20 @@ export const policy = {
    * }
    * ```
    */
+  /**
+   * The row's user (`column`, a user id) shares at least one tenant with the
+   * current user, e.g. profiles visible to co-members of any org:
+   * `policy.sharesTenant('id', { table: 'org_members', userColumn: 'user_id', tenantColumn: 'org_id' })`.
+   * Uses a SECURITY DEFINER STABLE helper (no RLS recursion, evaluated once per value),
+   * like `belongsTo` — never a membership subquery in `policy.custom`.
+   */
+  sharesTenant(
+    column: string,
+    membership: { table: string; userColumn: string; tenantColumn: string },
+  ): SharesTenantRule {
+    return { kind: 'shares_tenant', column, membership } as const;
+  },
+
   belongsTo(
     column: string,
     through?: {

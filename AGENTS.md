@@ -39,7 +39,9 @@ The hard problem this repo solves is **correct RLS**: the generated SQL must be 
 performant. Treat the RLS/permission generators as the crown jewels.
 
 Public runtime API (from `src/index.ts`): `defineSchema`, `table`, `policy`, `definePermissions`,
-`trigger`, `rpc`, `channel`, `edgeFunction`, `defineSeed`, `defineConfig`, `SupabaseAdapter`. Two schema modes: **manual**
+`trigger`, `rpc`, `channel`, `edgeFunction`, `defineEnum`, `tenantInvitations`, `defineSeed`, `defineConfig`,
+`SupabaseAdapter`; plus `accessnexus/testing` (RLS test kit: `asUser`, `asAnon`, `sqlState`, `affectedRows`,
+`expectDenied`). Two schema modes: **manual**
 (explicit `columns`) and **Database mode** (columns inferred from a Supabase `Database` type —
 detected when no table declares `columns`).
 
@@ -54,8 +56,12 @@ src/
   cli/           # CLI: index.ts (bin) → run.ts (commands, --json, exit codes), schema-check.ts
                  #   (static checks), destructive.ts, diff.ts, migrations.ts, init/
   __tests__/     # vitest suites: source of truth for generator + CLI behavior
-                 #   (push.integration.test.ts runs only with ACCESSNEXUS_TEST_DB_URL)
-examples/        # fullstack-saas.schema.ts + seed — reference schema exercising all features
+                 #   (*.integration.test.ts run only with ACCESSNEXUS_TEST_DB_URL; sdk.integration
+                 #   also needs ACCESSNEXUS_TEST_REST_URL — a PostgREST, see its header)
+  testing/       # accessnexus/testing: RLS test kit + TEST_DB_STANDINS_SQL
+examples/        # fullstack-saas.schema.ts + seed — reference schema exercising all features;
+                 #   saas-teams/ — multi-tenant schema from the field report (its RLS suite:
+                 #   src/__tests__/saas-teams.integration.test.ts)
 generated/       # committed generated output (migrations, policies, triggers, rpcs, sdk)
 docs/            # VitePress site (English at the root, Portuguese under docs/pt/); private
                  #   notes in docs/ are gitignored and excluded from the build
@@ -80,8 +86,9 @@ npm run build               # clean tsc build to dist/
 npm run typecheck           # tsc --noEmit for src/ and examples/
 npm run docs:snippets       # typecheck every ts snippet importing 'accessnexus' (llms.txt, README, docs/)
 npm run docs:dev            # docs site locally (docs:build fails on dead links)
-# Integration tests against a real Supabase Postgres (see the file header for the docker setup):
-ACCESSNEXUS_TEST_DB_URL=postgres://postgres:postgres@127.0.0.1:55439/postgres npx vitest run push.integration
+# Integration tests against a real Supabase Postgres (`node dist/cli/index.js test-db up` starts one
+# prepared on port 55439; see the file headers, and sdk.integration.test.ts for PostgREST):
+ACCESSNEXUS_TEST_DB_URL=postgres://postgres:postgres@127.0.0.1:55439/postgres npx vitest run integration
 ```
 
 ## Working rules
@@ -117,6 +124,10 @@ ACCESSNEXUS_TEST_DB_URL=postgres://postgres:postgres@127.0.0.1:55439/postgres np
   - Realtime channel policies on `realtime.messages` (`<prefix>_rt_*`) keep the topic match, the
     `(SELECT auth.uid())` wrap and, with `table`, the row check run as the user (the table's RLS
     decides); push only drops policies with its own `<prefix>_rt_` names;
+  - SDK writes never fail silently: update/delete/updateOne/deleteOne that change no row return
+    `ACCESSNEXUS_NOT_FOUND_OR_DENIED`;
+  - tenant guards (`sameTenant`, `memberOfTenant`) run as the writer (INVOKER, no existence
+    oracle); `keepAtLeastOne` and `onAuthUserCreated` are SECURITY DEFINER with pinned search_path;
   - Edge Function wrappers keep `withSupabase` checking credentials before the handler,
     `verify_jwt = true` unless `auth` accepts `'none'`, input validation before the handler,
     and a generic 500 (no internal error text) for unexpected exceptions.

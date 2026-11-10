@@ -18,6 +18,7 @@ interface SchemaOptions {
   rpcs?: Record<string, RpcDef>;
   channels?: Record<string, ChannelDef>;
   functions?: Record<string, EdgeFunctionDef>;
+  enums?: EnumDef[] | Record<string, readonly string[]>;
 }
 ```
 
@@ -27,6 +28,7 @@ interface SchemaOptions {
 | `options.rpcs` | `Record<string, RpcDef>` | `undefined` | Funções do Postgres criadas com [`rpc()`](/pt/api/rpc). Guardadas numa propriedade não enumerável `__rpcs`, então `Object.keys(schema)` lista só as tabelas. |
 | `options.channels` | `Record<string, ChannelDef>` | `undefined` | Canais privados do Realtime (Broadcast / Presence) criados com [`channel()`](/pt/api/realtime#channel); os nomes são snake_case em minúsculas. Guardados numa propriedade não enumerável `__channels`. `{}` remove todas as policies de canal no próximo push. |
 | `options.functions` | `Record<string, EdgeFunctionDef>` | `undefined` | Supabase Edge Functions criadas com [`edgeFunction()`](/pt/api/edge-functions), indexadas pelo nome da função (`'invite-member'`). Guardadas numa propriedade não enumerável `__functions`. |
+| `options.enums` | `EnumDef[]` ou `Record<string, readonly string[]>` | `undefined` | Enums compartilhados do Postgres, vindos de [`defineEnum()`](/pt/api/tenancy#defineenum) (ou um mapa `{ nome: valores }`). Cada um é um único `CREATE TYPE <name>`, usado por colunas, `args` e `returns.table` de RPC como `'enum:<name>'`. Um nome não declarado é `UNKNOWN_ENUM`. Guardados numa propriedade não enumerável `__enums`. |
 
 O arquivo de schema precisa fazer `export default` do resultado. A CLI carrega o arquivo com esbuild, então ele pode importar arquivos vizinhos.
 
@@ -199,6 +201,7 @@ Uma coluna é uma string de tipo ou um objeto [`ColumnDef`](#columndef). Acresce
 | `'int[]'` | `INTEGER[]` | `number[]` |
 | `'uuid[]'` | `UUID[]` | `string[]` |
 | `"enum('a','b')"` | `<table>_<column>_enum` | `'a' \| 'b'` |
+| `'enum:<name>'` | `<name>` (enum compartilhado) | união dos valores |
 | qualquer um acima + `?` | o mesmo, nullable | `... \| null` |
 
 Tipos exportados: `ScalarType` (os tipos acima), `NullableType` (`` `${ScalarType}?` ``), `ColumnType` (`ScalarType | NullableType`), `ColumnInput` (`ColumnType | ColumnDef`).
@@ -208,6 +211,21 @@ Tipos desconhecidos são reportados como `UNKNOWN_COLUMN_TYPE`, com sugestão pa
 ### Enums {#enums}
 
 Escreva os valores dentro de `enum(...)`, entre aspas: `"enum('draft','published')"`. Cada coluna enum ganha seu próprio tipo no Postgres, chamado `<table>_<column>_enum`, criado com um bloco `DO $$ ... $$` idempotente. Duas colunas enum com os mesmos valores continuam sendo dois tipos distintos: faça cast via text (`v.role::text::org_members_role_enum`) ao compará-las em SQL.
+
+Para compartilhar um tipo entre colunas e RPCs, declare-o uma vez com [`defineEnum`](/pt/api/tenancy#defineenum) e registre-o em `defineSchema(tables, { enums })`. O tipo da coluna passa a ser `'enum:<name>'` (`'enum:<name>?'` quando nullable): o tipo no Postgres é `<name>`, não há nada para converter, e o SDK o tipa como união e como `Database['public']['Enums'][<name>]`.
+
+```ts
+import { defineEnum, defineSchema, table } from 'accessnexus';
+
+const memberRole = defineEnum('member_role', ['owner', 'admin', 'member', 'viewer']);
+
+export default defineSchema({
+  org_members: table({
+    columns: { id: 'uuid', user_id: 'uuid', role: { type: memberRole.type, default: "'member'" } },
+    primaryKey: 'id',
+  }),
+}, { enums: [memberRole] });
+```
 
 ### Padrões da primary key {#primary-key-defaults}
 
@@ -306,7 +324,7 @@ interface IndexDef {
 | --- | --- | --- | --- |
 | `columns` | `string[]` | obrigatório | Colunas indexadas, em ordem. |
 | `unique` | `boolean` | `false` | `CREATE UNIQUE INDEX`. |
-| `name` | `string` | `idx_<table>_<col1>_<col2>_<n>` | `n` é a posição (a partir de 1) em `indexes`. |
+| `name` | `string` | `idx_<table>_<col1>_<col2>[_uniq]` | Nomeado pelo conteúdo, não pela posição: `_uniq` é acrescentado a um índice único, e `_2`, `_3`... a um conflito. Reordenar `indexes` não gera DDL. |
 
 `IndexDef` não é exportado de `accessnexus`; escreva os objetos inline.
 
@@ -314,9 +332,11 @@ O AccessNexus também cria estes índices automaticamente (`CREATE INDEX IF NOT 
 
 | Índice | Colunas | Pulado quando |
 | --- | --- | --- |
-| `idx_<table>_<col>_fk` | cada coluna de foreign key | a coluna é a primary key, é `unique` ou já está coberta por um índice explícito não único de coluna única |
+| `idx_<table>_<col>_fk` | cada coluna de foreign key | a coluna é a primary key, é `unique`, ou um índice declarado começa com essa coluna (então o índice declarado já atende a foreign key) |
 | `idx_<table>_<col>_rls` | cada coluna usada por `policy.isOwner`, `policy.belongsTo` ou por um lado de coluna de `policy.matchesField` | a coluna é a primary key ou já foi indexada acima |
 | `idx_<table>_active_pk` | `(<primaryKey>) WHERE <softDelete> IS NULL` | a tabela não tem `softDelete` ou não tem `primaryKey` |
+
+Schemas gerados antes da 0.4.1 nomeavam os índices pela posição (`..._<n>`). O primeiro `generate` depois da atualização adiciona uma migration que os renomeia (`ALTER INDEX ... RENAME`, nunca apaga e recria) e remove os índices de foreign key que um índice declarado agora cobre.
 
 ## Identificadores {#identifiers}
 

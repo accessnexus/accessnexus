@@ -257,9 +257,10 @@ export async function run(p_client_id: string) {
       const res = await alice.bookings.updateOne({ slug: 'a-1' }, { reviewed: true }, { columns: ['slug', 'reviewed'] });
       expect(res).toEqual({ data: { slug: 'a-1', reviewed: true }, error: null });
       expect(statements).toEqual(['UPDATE bookings SET reviewed = $2 WHERE slug = $1 RETURNING slug, reviewed']);
-      // Bob cannot see (so cannot update) Alice's booking: data null, row unchanged.
+      // Bob cannot see (so cannot update) Alice's booking: NOT_FOUND_OR_DENIED, row unchanged.
       const bob = createAccessNexusClient(restStandIn(BOB, []));
-      expect(await bob.bookings.updateOne({ slug: 'a-1' }, { reviewed: false })).toEqual({ data: null, error: null });
+      // A row RLS hides: nothing changes, and the SDK says so (no silent success).
+      expect((await bob.bookings.updateOne({ slug: 'a-1' }, { reviewed: false })).error).toMatchObject({ code: 'ACCESSNEXUS_NOT_FOUND_OR_DENIED' });
       expect((await admin.query(`SELECT reviewed FROM bookings WHERE slug = 'a-1'`)).rows[0].reviewed).toBe(true);
       expect(() => alice.bookings.updateMany({}, { reviewed: false })).toThrow(/at least one column/);
     } finally {

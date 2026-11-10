@@ -164,6 +164,32 @@ export class SupabaseAdapter implements Adapter {
     databaseTypes?: string;
   };
   private policyHelperFnBySignature = new Map<string, string>();
+  /** Shared enums (`defineSchema(..., { enums })`) and tables of the schema being generated. */
+  private namedEnums: Record<string, readonly string[]> = {};
+  private schemaInUse: SchemaDef = {};
+
+  /** Remember the schema's named enums and tables for type mapping (`enum:x`, `table.column`). */
+  private useSchema(schema: SchemaDef): void {
+    this.namedEnums = ((schema as any).__enums as Record<string, readonly string[]> | undefined) ?? {};
+    this.schemaInUse = schema;
+  }
+
+  /**
+   * A `'table.column'` type (RPC args / returns): that column's type, keeping
+   * the reference's own `?`. Per-column enums map to `<table>_<column>_enum`.
+   */
+  private resolveColumnRef(type: string): { pg: string; ts: string } | null {
+    const nullable = type.endsWith('?');
+    const base = nullable ? type.slice(0, -1) : type;
+    const m = /^([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)$/.exec(base);
+    if (!m) return null;
+    const col = this.schemaInUse[m[1]]?.columns?.[m[2]];
+    if (col === undefined) return null;
+    const colType = baseType(normalizeColumn(col).type);
+    const pg = colType.startsWith('enum(') ? this.enumTypeName(m[1], m[2]) : this.columnTypeToPG(colType);
+    const ts = this.columnTypeToTS(colType);
+    return { pg, ts: nullable ? `${ts} | null` : ts };
+  }
 
   constructor(options: SupabaseAdapterOptions = {}) {
     this.options = {
@@ -374,6 +400,7 @@ export class SupabaseAdapter implements Adapter {
 
   /** Typed SDK files (`types.ts` + `client.ts`, or `client.ts` in Database mode). */
   generateClient(schema: SchemaDef): GeneratedOutput[] {
+    this.useSchema(schema);
     // Detect Database mode: all tables have empty columns
     const isDatabaseMode = Object.values(schema).every(
       (t) => Object.keys(t.columns).length === 0
@@ -393,6 +420,7 @@ export class SupabaseAdapter implements Adapter {
 
   /** Full DDL (`001_initial.sql`): enums, tables, FKs, indexes. Empty in Database mode. */
   generateMigrations(schema: SchemaDef): GeneratedOutput[] {
+    this.useSchema(schema);
     const tableEntries = Object.entries(schema);
     if (tableEntries.length === 0) return [];
 
@@ -431,8 +459,11 @@ export class SupabaseAdapter implements Adapter {
       }
     }
 
-    if (enumStatements.length > 0) {
-      lines.push(...enumStatements);
+    // Shared enums (defineEnum) first: columns of any table may use them.
+    const namedEnumStatements = Object.entries(this.namedEnums).map(([name, values]) =>
+      this.createEnumSQL(name, `enum(${values.map((v) => `'${v.replace(/'/g, "''")}'`).join(',')})`));
+    if (namedEnumStatements.length > 0 || enumStatements.length > 0) {
+      lines.push(...namedEnumStatements, ...enumStatements);
       lines.push('');
     }
 
@@ -627,6 +658,14 @@ export class SupabaseAdapter implements Adapter {
       case 'custom':
         return (rule as any).expression;
 
+      case 'shares_tenant': {
+        const r = rule as any;
+        const helper = this.policyHelperFnBySignature.get(this.belongsToSignature(rule));
+        if (helper) return `(SELECT ${helper}(${r.column}))`;
+        const m = r.membership;
+        return `${r.column} IN (SELECT them.${m.userColumn} FROM ${this.qualifyTable(m.table)} me JOIN ${this.qualifyTable(m.table)} them ON them.${m.tenantColumn} = me.${m.tenantColumn} WHERE me.${m.userColumn} = (SELECT auth.uid()))`;
+      }
+
       case 'any': {
         const r = rule as any;
         const parts = r.rules.map((sub: PolicyRule) => this.ruleToSQL(sub));
@@ -685,7 +724,7 @@ export class SupabaseAdapter implements Adapter {
     for (const [tableName, tableDef] of Object.entries(schema)) {
       if (!tableDef.triggers || tableDef.triggers.length === 0) continue;
 
-      const sql = this.generateTableTriggers(tableName, tableDef);
+      const sql = this.generateTableTriggers(tableName, tableDef, schema);
       outputs.push({
         path: `${tableName}_triggers.sql`,
         content: sql,
@@ -695,7 +734,7 @@ export class SupabaseAdapter implements Adapter {
     return outputs;
   }
 
-  private generateTableTriggers(tableName: string, tableDef: TableDef): string {
+  private generateTableTriggers(tableName: string, tableDef: TableDef, schema?: SchemaDef): string {
     const { timestamps } = this.options;
     const lines: string[] = [];
 
@@ -711,7 +750,7 @@ export class SupabaseAdapter implements Adapter {
     }
 
     for (const rule of tableDef.triggers!) {
-      lines.push(this.triggerRuleToSQL(rule, tableName, tableDef));
+      lines.push(this.triggerRuleToSQL(rule, tableName, tableDef, schema));
       lines.push('');
     }
 
@@ -719,7 +758,7 @@ export class SupabaseAdapter implements Adapter {
   }
 
   /** Convert a TriggerRule to complete SQL (function + trigger) */
-  triggerRuleToSQL(rule: TriggerRule, tableName: string, tableDef: TableDef): string {
+  triggerRuleToSQL(rule: TriggerRule, tableName: string, tableDef: TableDef, schema?: SchemaDef): string {
     const { policyPrefix, idempotent } = this.options;
     const searchPath = this.functionSearchPathClause();
 
@@ -859,37 +898,58 @@ export class SupabaseAdapter implements Adapter {
           .filter((t: any) => t.kind === 'updated_at')
           .map((t: any) => t.column as string);
 
-        let changed: string;
-        let label: string;
+        // INVOKER: current_user is the API role for PostgREST requests and the
+        // owner inside SECURITY DEFINER code, which is therefore never blocked.
+        const applies = [
+          `current_user IN ('anon', 'authenticated')`,
+          ...(r.unless ? [`NOT COALESCE((${r.unless}), FALSE)`] : []),
+        ].join(' AND ');
+        // The error names the column (message) and carries a stable HINT
+        // 'accessnexus:locked_column:<table>.<column>' for the SDK's isLockedColumn().
+        const raise = (column: string, indent: string) => [
+          `${indent}RAISE EXCEPTION '%', ${quoteLiteral(`${tableName}.`)} || ${column} || ' cannot be changed'`,
+          `${indent}  USING ERRCODE = '42501', HINT = ${quoteLiteral(`accessnexus:locked_column:${tableName}.`)} || ${column};`,
+        ];
+        let body: string[];
         if (Array.isArray(r.except)) {
           const free = [...new Set([...(r.except as string[]), ...managed])];
           const keys = `ARRAY[${free.map((c) => quoteLiteral(c)).join(', ')}]::text[]`;
-          changed = `(to_jsonb(NEW) - ${keys}) IS DISTINCT FROM (to_jsonb(OLD) - ${keys})`;
-          label = `only ${(r.except as string[]).join(', ')} can be changed`;
+          body = [
+            `DECLARE`,
+            `  locked_column text;`,
+            `BEGIN`,
+            `  IF ${applies} THEN`,
+            `    SELECT n.key INTO locked_column`,
+            `      FROM jsonb_each(to_jsonb(NEW) - ${keys}) AS n`,
+            `     WHERE n.value IS DISTINCT FROM (to_jsonb(OLD) -> n.key)`,
+            `     ORDER BY n.key LIMIT 1;`,
+            `    IF locked_column IS NOT NULL THEN`,
+            ...raise('locked_column', '      '),
+            `    END IF;`,
+            `  END IF;`,
+            `  RETURN NEW;`,
+            `END;`,
+          ];
         } else {
           const locked = (r.columns as string[]).filter((c) => !managed.includes(c));
-          changed = locked.map((c) => `NEW.${c} IS DISTINCT FROM OLD.${c}`).join(' OR ') || 'FALSE';
-          label = `${locked.join(', ')} cannot be changed`;
+          body = [
+            `BEGIN`,
+            `  IF ${applies} THEN`,
+            ...locked.flatMap((c) => [
+              `    IF NEW.${c} IS DISTINCT FROM OLD.${c} THEN`,
+              ...raise(quoteLiteral(c), '      '),
+              `    END IF;`,
+            ]),
+            `  END IF;`,
+            `  RETURN NEW;`,
+            `END;`,
+          ];
         }
-
-        // INVOKER: current_user is the API role for PostgREST requests and the
-        // owner inside SECURITY DEFINER code, which is therefore never blocked.
-        const condition = [
-          `current_user IN ('anon', 'authenticated')`,
-          ...(r.unless ? [`NOT COALESCE((${r.unless}), FALSE)`] : []),
-          `(${changed})`,
-        ].join('\n     AND ');
 
         return [
           `CREATE OR REPLACE FUNCTION ${fnName}()`,
           `RETURNS TRIGGER AS $$`,
-          `BEGIN`,
-          `  IF ${condition} THEN`,
-          `    RAISE EXCEPTION ${quoteLiteral(`${tableName}: ${label}`)}`,
-          `      USING ERRCODE = '42501';`,
-          `  END IF;`,
-          `  RETURN NEW;`,
-          `END;`,
+          ...body,
           `$$ LANGUAGE plpgsql`,
           `${searchPath};`,
           '',
@@ -937,6 +997,126 @@ export class SupabaseAdapter implements Adapter {
         ].join('\n');
       }
 
+      case 'keep_at_least_one': {
+        const r = rule as any;
+        const suffix = r.name ?? `keep_${r.column}_${String(r.value).replace(/[^a-z0-9_]/gi, '_').toLowerCase()}`;
+        const fnName = `${policyPrefix}_${tableName}_${suffix}_fn`;
+        const trgName = `${policyPrefix}_${tableName}_${suffix}`;
+        const pk = singlePrimaryKey(tableDef) ?? 'id';
+        const target = `${this.options.schemaName}.${tableName}`;
+        const value = quoteLiteral(r.value);
+        const parentCheck = r.parent
+          ? (() => {
+              const [pt, pc] = String(r.parent).split('.');
+              return [`     AND EXISTS (SELECT 1 FROM ${this.options.schemaName}.${pt} p WHERE p.${pc} = OLD.${r.scope})`];
+            })()
+          : [];
+        return [
+          `CREATE OR REPLACE FUNCTION ${fnName}()`,
+          `RETURNS TRIGGER AS $$`,
+          `BEGIN`,
+          `  IF OLD.${r.column} = ${value}`,
+          `     AND (TG_OP = 'DELETE' OR NEW.${r.column} IS DISTINCT FROM OLD.${r.column} OR NEW.${r.scope} IS DISTINCT FROM OLD.${r.scope})`,
+          ...parentCheck,
+          `  THEN`,
+          `    -- Serialize concurrent removals in the same scope.`,
+          `    PERFORM 1 FROM ${target} m WHERE m.${r.scope} = OLD.${r.scope} AND m.${r.column} = ${value} FOR UPDATE;`,
+          `    IF NOT EXISTS (`,
+          `      SELECT 1 FROM ${target} m`,
+          `      WHERE m.${r.scope} = OLD.${r.scope} AND m.${r.column} = ${value} AND m.${pk} <> OLD.${pk}`,
+          `    ) THEN`,
+          `      RAISE EXCEPTION ${quoteLiteral(`${tableName}: each ${r.scope} needs at least one ${r.column} = ${r.value}`)}`,
+          `        USING ERRCODE = '23514';`,
+          `    END IF;`,
+          `  END IF;`,
+          `  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;`,
+          `  RETURN NEW;`,
+          `END;`,
+          `$$ LANGUAGE plpgsql`,
+          `SECURITY DEFINER`,
+          `${searchPath};`,
+          '',
+          ...(idempotent ? [`DROP TRIGGER IF EXISTS ${trgName} ON ${tableName};`] : []),
+          `CREATE TRIGGER ${trgName}`,
+          `  BEFORE UPDATE OR DELETE ON ${tableName}`,
+          `  FOR EACH ROW`,
+          `  EXECUTE FUNCTION ${fnName}();`,
+        ].join('\n');
+      }
+
+      case 'same_tenant':
+      case 'member_of_tenant': {
+        const r = rule as any;
+        const isMember = rule.kind === 'member_of_tenant';
+        const suffix = r.name ?? `${isMember ? 'member_of_tenant' : 'same_tenant'}_${r.column}`;
+        const fnName = `${policyPrefix}_${tableName}_${suffix}_fn`;
+        const trgName = `${policyPrefix}_${tableName}_${suffix}`;
+        let exists: string;
+        let label: string;
+        if (isMember) {
+          const own = r.tenantColumn ?? r.tenant.tenantColumn;
+          exists = `SELECT 1 FROM ${this.options.schemaName}.${r.tenant.table} m WHERE m.${r.tenant.userColumn} = NEW.${r.column} AND m.${r.tenant.tenantColumn} = NEW.${own}`;
+          label = `is not a member of`;
+        } else {
+          const refDef = schema?.[r.references];
+          const refPk = refDef ? (singlePrimaryKey(refDef) ?? 'id') : 'id';
+          const theirs = r.referencesTenantColumn ?? r.tenantColumn;
+          exists = `SELECT 1 FROM ${this.options.schemaName}.${r.references} p WHERE p.${refPk} = NEW.${r.column} AND p.${theirs} = NEW.${r.tenantColumn}`;
+          label = `is not in`;
+        }
+        const tenantOf = isMember ? (r.tenantColumn ?? r.tenant.tenantColumn) : r.tenantColumn;
+        return [
+          `CREATE OR REPLACE FUNCTION ${fnName}()`,
+          `RETURNS TRIGGER AS $$`,
+          `BEGIN`,
+          `  -- Runs as the writer: a row they cannot see counts as missing (no existence oracle).`,
+          `  IF NEW.${r.column} IS NOT NULL AND NOT EXISTS (${exists}) THEN`,
+          `    RAISE EXCEPTION '%', ${quoteLiteral(`${tableName}.${r.column} `)} || NEW.${r.column} || ${quoteLiteral(` ${label} ${tenantOf} `)} || NEW.${tenantOf}`,
+          `      USING ERRCODE = '23503';`,
+          `  END IF;`,
+          `  RETURN NEW;`,
+          `END;`,
+          `$$ LANGUAGE plpgsql`,
+          `${searchPath};`,
+          '',
+          ...(idempotent ? [`DROP TRIGGER IF EXISTS ${trgName} ON ${tableName};`] : []),
+          `CREATE TRIGGER ${trgName}`,
+          `  BEFORE INSERT OR UPDATE ON ${tableName}`,
+          `  FOR EACH ROW`,
+          `  EXECUTE FUNCTION ${fnName}();`,
+        ].join('\n');
+      }
+
+      case 'on_auth_user_created': {
+        const r = rule as any;
+        const suffix = r.name ?? 'on_auth_user_created';
+        const fnName = `${policyPrefix}_${tableName}_${suffix}_fn`;
+        const trgName = `${policyPrefix}_${tableName}_${suffix}`;
+        const cols = Object.keys(r.columns);
+        const exprs = cols.map((c) => r.columns[c]);
+        return [
+          `-- New auth user → row in ${tableName} (no client-side "ensure profile").`,
+          `CREATE OR REPLACE FUNCTION ${fnName}()`,
+          `RETURNS TRIGGER AS $$`,
+          `BEGIN`,
+          `  INSERT INTO ${this.options.schemaName}.${tableName} (${cols.join(', ')})`,
+          `  VALUES (${exprs.join(', ')})`,
+          `  ON CONFLICT DO NOTHING;`,
+          `  RETURN NEW;`,
+          `END;`,
+          `$$ LANGUAGE plpgsql`,
+          `SECURITY DEFINER`,
+          `${searchPath};`,
+          `REVOKE EXECUTE ON FUNCTION ${fnName}() FROM PUBLIC, anon, authenticated;`,
+          '',
+          ...(idempotent ? [`DROP TRIGGER IF EXISTS ${trgName} ON auth.users;`] : []),
+          `CREATE TRIGGER ${trgName}`,
+          `  AFTER INSERT ON auth.users`,
+          `  FOR EACH ROW`,
+          `  EXECUTE FUNCTION ${fnName}();`,
+        ].join('\n');
+      }
+
       default:
         throw new Error(`[AccessNexus] Unknown trigger rule kind: ${rule.kind}`);
     }
@@ -966,6 +1146,7 @@ export class SupabaseAdapter implements Adapter {
 
   /** `rpcs.sql` with a function for every `rpc()` that has a `body`. */
   generateRpcs(schema: SchemaDef): GeneratedOutput[] {
+    this.useSchema(schema);
     const rpcs = (schema as any).__rpcs as Record<string, RpcDef> | undefined;
     if (!rpcs || Object.keys(rpcs).length === 0) return [];
 
@@ -1262,6 +1443,9 @@ export class SupabaseAdapter implements Adapter {
   /** Map ColumnType to PostgreSQL type name */
   private columnTypeToPG(type: string): string {
     const base = type.endsWith('?') ? type.slice(0, -1) : type;
+    if (base.startsWith('enum:')) return base.slice(5);
+    const ref = this.resolveColumnRef(base);
+    if (ref) return ref.pg;
 
     const map: Record<string, string> = {
       uuid: 'UUID',
@@ -1385,6 +1569,8 @@ export class SupabaseAdapter implements Adapter {
     const channels = Object.entries(((schema as any).__channels as Record<string, ChannelDef> | undefined) ?? {});
     const realtimeTables = Object.entries(schema).filter(([, def]) => !!def.realtime).map(([name]) => name);
     const usesRealtime = realtimeTables.length > 0 || channels.length > 0;
+    const hasSoftDelete = Object.values(schema).some((def) => !!def.softDelete);
+    const hasHardDelete = Object.values(schema).some((def) => !def.softDelete);
     const edgeFunctions = Object.entries(edgeFunctionsOf(schema) ?? {});
 
     lines.push(
@@ -1416,13 +1602,86 @@ export class SupabaseAdapter implements Adapter {
       `  return Object.fromEntries(entries);`,
       `}`,
       '',
+      `/** Code of the error a write gets when no row it may change matches (missing, or RLS hides/denies it). */`,
+      `export const NOT_FOUND_OR_DENIED = 'ACCESSNEXUS_NOT_FOUND_OR_DENIED';`,
+      `/** Error built by the SDK itself (writes that matched no row the caller may change). */`,
+      `export type AccessNexusError = { code: string; message: string; details: Record<string, unknown>; hint: string };`,
+      '',
+      `function notFoundOrDenied(table: string, method: string, details: Record<string, unknown>): AccessNexusError {`,
+      `  return {`,
+      `    code: NOT_FOUND_OR_DENIED,`,
+      `    message: \`\${table}.\${method}: no row was changed — it does not exist, or RLS does not let you change it\`,`,
+      `    details: { table, method, ...details },`,
+      `    hint: 'RLS hides rows you may not see and skips rows you may not write; check the row id and the policies.',`,
+      `  };`,
+      `}`,
+      '',
+      `/** True for the SDK's "no row changed" error (missing row, or denied by RLS). */`,
+      `export function isNotFoundOrDenied(error: unknown): boolean {`,
+      `  return !!error && typeof error === 'object' && (error as { code?: unknown }).code === NOT_FOUND_OR_DENIED;`,
+      `}`,
+      '',
+      `/**`,
+      ` * True when the database refused the request: the SDK's NOT_FOUND_OR_DENIED, or SQLSTATE`,
+      ` * 42501 (an INSERT / WITH CHECK rejected by RLS, a locked column, a definer RPC check).`,
+      ` */`,
+      `export function isAccessDenied(error: unknown): boolean {`,
+      `  return isNotFoundOrDenied(error) || (!!error && typeof error === 'object' && (error as { code?: unknown }).code === '42501');`,
+      `}`,
+      '',
+      `/** True when a \`trigger.lockColumns\` guard refused the update (SQLSTATE 42501, stable hint). */`,
+      `export function isLockedColumn(error: unknown): boolean {`,
+      `  if (!error || typeof error !== 'object') return false;`,
+      `  const e = error as { code?: unknown; hint?: unknown };`,
+      `  return e.code === '42501' && typeof e.hint === 'string' && e.hint.startsWith('accessnexus:locked_column:');`,
+      `}`,
+      '',
+      `type RawResult = { data: unknown; error: unknown; count?: number | null };`,
+      '',
+      `// One-row writes: no row back (and no error) means nothing was changed.`,
+      `async function changedOne(table: string, method: string, details: Record<string, unknown>, run: PromiseLike<unknown>): Promise<{ data: unknown; error: unknown }> {`,
+      `  const res = (await run) as RawResult;`,
+      `  if (res.error) return { data: null, error: res.error };`,
+      `  if (res.data === null || res.data === undefined) return { data: null, error: notFoundOrDenied(table, method, details) };`,
+      `  return { data: res.data, error: null };`,
+      `}`,
+      '',
+      ...(hasHardDelete ? [
+      `// DELETE by key: the affected-row count tells a real delete from one RLS skipped.`,
+      `async function deletedById(table: string, id: unknown, run: PromiseLike<unknown>): Promise<{ data: null; error: unknown }> {`,
+      `  const res = (await run) as RawResult;`,
+      `  if (res.error) return { data: null, error: res.error };`,
+      `  if (res.count === 0) return { data: null, error: notFoundOrDenied(table, 'delete', { id }) };`,
+      `  return { data: null, error: null };`,
+      `}`,
+      '',
+      ] : []),
+      ...(hasSoftDelete ? [
+      `// Soft-delete tables: the trigger turns DELETE into an UPDATE, so the DELETE reports 0 rows`,
+      `// either way. Look at the live row before and after: gone means deleted, still there means denied.`,
+      `async function softDeleted(`,
+      `  table: string, method: string, details: Record<string, unknown>,`,
+      `  before: () => PromiseLike<unknown>, remove: () => PromiseLike<unknown>, after: () => PromiseLike<unknown>,`,
+      `): Promise<{ data: unknown; error: unknown }> {`,
+      `  const pre = (await before()) as RawResult;`,
+      `  if (pre.error) return { data: null, error: pre.error };`,
+      `  if (pre.data === null || pre.data === undefined) return { data: null, error: notFoundOrDenied(table, method, details) };`,
+      `  const del = (await remove()) as RawResult;`,
+      `  if (del.error) return { data: null, error: del.error };`,
+      `  const post = (await after()) as RawResult;`,
+      `  if (post.error) return { data: null, error: post.error };`,
+      `  if (post.data !== null && post.data !== undefined) return { data: null, error: notFoundOrDenied(table, method, details) };`,
+      `  return { data: method === 'delete' ? null : pre.data, error: null };`,
+      `}`,
+      '',
+      ] : []),
       `// Internal, loosely typed view of the Supabase query builder. Results are`,
       `// typed per method below.`,
       `interface QueryBuilder extends PromiseLike<unknown> {`,
       `  select(columns?: string): QueryBuilder;`,
       `  insert(data: object): QueryBuilder;`,
       `  update(data: object): QueryBuilder;`,
-      `  delete(): QueryBuilder;`,
+      `  delete(options?: { count?: 'exact' }): QueryBuilder;`,
       `  match(filter: object): QueryBuilder;`,
       `  eq(column: string, value: unknown): QueryBuilder;`,
       `  is(column: string, value: null): QueryBuilder;`,
@@ -1573,13 +1832,24 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`      create: (data: ${insertType}) =>`);
       lines.push(`        ${from}.insert(data).select().single() as unknown as QueryResult<${rowType}>,`);
       lines.push('');
+      lines.push(`      // The updated row; error NOT_FOUND_OR_DENIED when no row was changed`);
+      lines.push(`      // (it does not exist, or RLS hides it / denies the update).`);
       lines.push(`      update: (id: string, data: ${updateType}) =>`);
-      lines.push(`        ${from}.update(data).eq('${pk}', id).select().single() as unknown as QueryResult<${rowType}>,`);
+      lines.push(`        changedOne('${tableName}', 'update', { id }, ${from}.update(data).eq('${pk}', id).select().maybeSingle()) as unknown as QueryResult<${rowType}>,`);
       lines.push('');
+      lines.push(`      // Error NOT_FOUND_OR_DENIED when nothing was deleted (missing row, or RLS).`);
       lines.push(`      delete: (id: string) =>`);
-      // On softDelete tables the BEFORE DELETE trigger turns this into
-      // SET <column> = NOW(), so the DELETE policy (not UPDATE) decides it.
-      lines.push(`        ${from}.delete().eq('${pk}', id) as unknown as QueryResult<null>,`);
+      if (softDeleteColumn) {
+        // The BEFORE DELETE trigger turns this into SET <column> = NOW(), so the
+        // DELETE policy (not UPDATE) decides it; the live row is checked around it.
+        lines.push(`        softDeleted('${tableName}', 'delete', { id },`);
+        lines.push(`          () => ${from}.select('${pk}').eq('${pk}', id)${live}.maybeSingle(),`);
+        lines.push(`          () => ${from}.delete().eq('${pk}', id),`);
+        lines.push(`          () => ${from}.select('${pk}').eq('${pk}', id)${live}.maybeSingle(),`);
+        lines.push(`        ) as unknown as QueryResult<null>,`);
+      } else {
+        lines.push(`        deletedById('${tableName}', id, ${from}.delete({ count: 'exact' }).eq('${pk}', id)) as unknown as QueryResult<null>,`);
+      }
       lines.push('');
       // Filtered writes. The filter is required (type and runtime) so a
       // mistake never writes the whole table; RLS still decides which rows.
@@ -1589,15 +1859,15 @@ export class SupabaseAdapter implements Adapter {
       const wRow = `SelectedRow<'${tableName}', TColumns>`;
       const guard = (method: string) => `requireFilter(filter, '${tableName}.${method}')`;
       lines.push(`      // Updates the row matching \`filter\` (a unique column) and returns it in one`);
-      lines.push(`      // round trip; \`data: null\` when no visible row matches. More than one match`);
-      lines.push(`      // is an error (PGRST116) and nothing is updated.`);
+      lines.push(`      // round trip; error NOT_FOUND_OR_DENIED when no row was changed. More than`);
+      lines.push(`      // one match is an error (PGRST116) and nothing is updated.`);
       lines.push(`      updateOne: ${wGenerics}(`);
       lines.push(`        ${wFilter},`);
       lines.push(`        data: ${updateType},`);
       lines.push(`        ${wOptions},`);
       lines.push(`      ) => {`);
       lines.push(`        const match = ${guard('updateOne')};`);
-      lines.push(`        return ${from}.update(data).match(match)${live}.select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<${wRow}>;`);
+      lines.push(`        return changedOne('${tableName}', 'updateOne', { filter: match }, ${from}.update(data).match(match)${live}.select(selectClause(options?.columns)).maybeSingle()) as unknown as QueryResult<${wRow}>;`);
       lines.push(`      },`);
       lines.push('');
       lines.push(`      // Updates every row matching \`filter\` (at least one column) and returns them.`);
@@ -1610,15 +1880,22 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`        return ${from}.update(data).match(match)${live}.select(selectClause(options?.columns)) as unknown as QueryResult<${wRow}[]>;`);
       lines.push(`      },`);
       lines.push('');
-      lines.push(`      // Deletes the row matching \`filter\` and returns it (\`data: null\` when none`);
-      lines.push(`      // matches${softDeleteColumn ? ' — and always on this soft-delete table, whose trigger turns the DELETE into an UPDATE' : ''}).`);
-      lines.push(`      // More than one match is an error (PGRST116) and nothing is deleted.`);
+      lines.push(`      // Deletes the row matching \`filter\` and returns it; error NOT_FOUND_OR_DENIED`);
+      lines.push(`      // when nothing was deleted. More than one match is an error (PGRST116).`);
       lines.push(`      deleteOne: ${wGenerics}(`);
       lines.push(`        ${wFilter},`);
       lines.push(`        ${wOptions},`);
       lines.push(`      ) => {`);
       lines.push(`        const match = ${guard('deleteOne')};`);
-      lines.push(`        return ${from}.delete().match(match)${live}.select(selectClause(options?.columns)).maybeSingle() as unknown as QueryResult<${wRow}>;`);
+      if (softDeleteColumn) {
+        lines.push(`        return softDeleted('${tableName}', 'deleteOne', { filter: match },`);
+        lines.push(`          () => ${from}.select(selectClause(options?.columns)).match(match)${live}.maybeSingle(),`);
+        lines.push(`          () => ${from}.delete().match(match)${live},`);
+        lines.push(`          () => ${from}.select('${pk}').match(match)${live}.maybeSingle(),`);
+        lines.push(`        ) as unknown as QueryResult<${wRow}>;`);
+      } else {
+        lines.push(`        return changedOne('${tableName}', 'deleteOne', { filter: match }, ${from}.delete().match(match)${live}.select(selectClause(options?.columns)).maybeSingle()) as unknown as QueryResult<${wRow}>;`);
+      }
       lines.push(`      },`);
       lines.push('');
       lines.push(`      // Deletes every row matching \`filter\` (at least one column) and returns them${softDeleteColumn ? ' (\`[]\` on this soft-delete table)' : ''}.`);
@@ -1841,6 +2118,13 @@ export class SupabaseAdapter implements Adapter {
   private columnTypeToTS(colType: string): string {
     const base = colType.endsWith('?') ? colType.slice(0, -1) : colType;
     const nullable = colType.endsWith('?');
+    if (base.startsWith('enum:')) {
+      const values = this.namedEnums[base.slice(5)];
+      const union = values && values.length > 0 ? values.map((v) => `'${v.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`).join(' | ') : 'string';
+      return nullable ? `${union} | null` : union;
+    }
+    const ref = this.resolveColumnRef(base);
+    if (ref) return nullable ? `${ref.ts} | null` : ref.ts;
 
     const map: Record<string, string> = {
       uuid: 'string',
@@ -1947,9 +2231,14 @@ export class SupabaseAdapter implements Adapter {
     const output: string[] = [];
     const seenSignatures = new Set<string>();
 
-    explicit.forEach((index, idx) => {
+    const usedNames: string[] = [];
+    explicit.forEach((index) => {
       const unique = index.unique ? 'UNIQUE ' : '';
-      const indexName = index.name ?? `idx_${tableName}_${index.columns.join('_')}_${idx + 1}`;
+      // Named from the content only (reordering `indexes` changes nothing); _2... on a clash.
+      const base = `idx_${tableName}_${index.columns.join('_')}${index.unique ? '_uniq' : ''}`;
+      let indexName = index.name ?? base;
+      for (let n = 2; !index.name && usedNames.includes(indexName); n++) indexName = `${base}_${n}`;
+      usedNames.push(indexName);
       const signature = `${index.unique ? 'u' : 'n'}|${index.columns.join(',')}`;
       seenSignatures.add(signature);
       output.push(`CREATE ${unique}INDEX IF NOT EXISTS ${indexName} ON ${tableName}(${index.columns.join(', ')});`);
@@ -1958,6 +2247,8 @@ export class SupabaseAdapter implements Adapter {
     for (const fkColumn of fkColumns) {
       const signature = `n|${fkColumn}`;
       if (seenSignatures.has(signature)) continue;
+      // A declared index that starts with the column already serves the foreign key.
+      if (explicit.some((index) => index.columns[0] === fkColumn)) continue;
       // The primary key / a UNIQUE column already has an index.
       if (fkColumn === singlePk || normalizeColumn(tableDef.columns[fkColumn] ?? 'text').unique) continue;
       seenSignatures.add(signature);
@@ -1969,6 +2260,7 @@ export class SupabaseAdapter implements Adapter {
       if (col === singlePk) continue;
       const signature = `n|${col}`;
       if (seenSignatures.has(signature)) continue;
+      if (explicit.some((index) => index.columns[0] === col)) continue;
       seenSignatures.add(signature);
       output.push(`CREATE INDEX IF NOT EXISTS idx_${tableName}_${col}_rls ON ${tableName}(${col});`);
     }
@@ -2133,7 +2425,8 @@ export class SupabaseAdapter implements Adapter {
         }
 
         helperCount++;
-        const fnName = `${this.options.policyPrefix}_${tableName}_belongs_to_${helperCount}_fn`;
+        const kindName = belongsToRule.kind === 'shares_tenant' ? 'shares_tenant' : 'belongs_to';
+        const fnName = `${this.options.policyPrefix}_${tableName}_${kindName}_${helperCount}_fn`;
         this.policyHelperFnBySignature.set(signature, fnName);
         helpers.push({ fnName, rule: belongsToRule, anon });
       }
@@ -2149,7 +2442,7 @@ export class SupabaseAdapter implements Adapter {
   }
 
   private collectBelongsToRules(rule: PolicyRule): PolicyRule[] {
-    if (rule.kind === 'belongs_to') return [rule];
+    if (rule.kind === 'belongs_to' || rule.kind === 'shares_tenant') return [rule];
     if (rule.kind === 'any' || rule.kind === 'all') {
       const nested = (rule as any).rules as PolicyRule[];
       return nested.flatMap((r) => this.collectBelongsToRules(r));
@@ -2177,6 +2470,7 @@ export class SupabaseAdapter implements Adapter {
           cols.add((rule as any).column);
           break;
         case 'belongs_to':
+        case 'shares_tenant':
           cols.add((rule as any).column);
           break;
         case 'matches_field':
@@ -2202,6 +2496,9 @@ export class SupabaseAdapter implements Adapter {
 
   private belongsToSignature(rule: PolicyRule): string {
     const r = rule as any;
+    if (rule.kind === 'shares_tenant') {
+      return `shares|${r.column}|${r.membership.table}|${r.membership.userColumn}|${r.membership.tenantColumn}`;
+    }
     const through = r.through
       ? `${r.through.table}|${r.through.foreignKey}|${r.through.localKey}`
       : '';
@@ -2212,6 +2509,25 @@ export class SupabaseAdapter implements Adapter {
   private belongsToRuleToHelperSQL(fnName: string, rule: any): string {
     const qualifyTable = (table: string) =>
       table.includes('.') ? table : `${this.options.schemaName}.${table}`;
+
+    if (rule.kind === 'shares_tenant') {
+      const m = rule.membership;
+      return [
+        `CREATE OR REPLACE FUNCTION ${fnName}(p_value uuid)`,
+        `RETURNS boolean`,
+        `LANGUAGE sql`,
+        `STABLE`,
+        `SECURITY DEFINER`,
+        this.functionSearchPathClause(),
+        `AS $$`,
+        `  SELECT EXISTS (`,
+        `    SELECT 1 FROM ${qualifyTable(m.table)} me`,
+        `    JOIN ${qualifyTable(m.table)} them ON them.${m.tenantColumn} = me.${m.tenantColumn}`,
+        `    WHERE me.${m.userColumn} = (SELECT auth.uid()) AND them.${m.userColumn} = p_value`,
+        `  );`,
+        `$$;`,
+      ].join('\n');
+    }
 
     let predicate: string;
     if (rule.through) {
@@ -2463,7 +2779,15 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`      };`);
     }
     lines.push(`    };`);
-    lines.push(`    Enums: Record<string, never>;`);
+    // Shared enums (defineEnum), shaped like `supabase gen types`.
+    const namedEnums = Object.entries(this.namedEnums);
+    if (namedEnums.length === 0) {
+      lines.push(`    Enums: Record<string, never>;`);
+    } else {
+      lines.push(`    Enums: {`);
+      for (const [name] of namedEnums) lines.push(`      ${name}: ${this.columnTypeToTS(`enum:${name}`)};`);
+      lines.push(`    };`);
+    }
     lines.push(`    CompositeTypes: Record<string, never>;`);
     lines.push(`  };`);
     lines.push(`}`);
@@ -2502,6 +2826,7 @@ export class SupabaseAdapter implements Adapter {
    * when missing, then yours). Empty when the schema declares no `functions`.
    */
   generateEdgeFunctions(schema: SchemaDef): GeneratedOutput[] {
+    this.useSchema(schema);
     const functions = edgeFunctionsOf(schema);
     if (functions === undefined) return [];
     const entries = Object.entries(functions);
@@ -2629,7 +2954,7 @@ export class SupabaseAdapter implements Adapter {
       } else {
         L.push(`const ${specConst}: Record<string, Field> = {`);
         for (const [field, colType] of fields) {
-          L.push(`  ${field}: ${edgeFieldSpec(colType)},`);
+          L.push(`  ${field}: ${edgeFieldSpec(colType, this.namedEnums)},`);
         }
         L.push(`};`);
       }
@@ -2857,7 +3182,13 @@ export class SupabaseAdapter implements Adapter {
         : `<TColumns extends ColumnsOf<'${t}'> | undefined = undefined>`;
       const optionsType = hasRel ? `{ columns?: TColumns; include?: TInclude }` : `{ columns?: TColumns }`;
       const typeArgs = hasRel ? `<TColumns, TInclude>` : `<TColumns>`;
-      const affected = [t, ...(embeddedIn.get(t) ?? [])].map((x) => `accessNexusKeys.${x}.all`).join(', ');
+      // Its own queries, the tables that embed it, and what its triggers write
+      // (trigger.custom({ writes: [...] }): e.g. orgs.create also adds an org_members row).
+      const triggerWrites = (schema[t].triggers ?? []).flatMap((rule: any) =>
+        rule?.kind === 'custom' && Array.isArray(rule.writes) ? (rule.writes as string[]) : []);
+      const affected = [...new Set([t, ...(embeddedIn.get(t) ?? []), ...triggerWrites])]
+        .filter((x) => x in schema)
+        .map((x) => `accessNexusKeys.${x}.all`).join(', ');
       const keys = `accessNexusKeys.${t}`;
       lines.push(
         `    ${t}: {`,
@@ -2936,16 +3267,20 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`    rpc: {`);
       for (const name of rpcNames) {
         const params = `Parameters<Client['rpc']['${name}']>`;
+        // RETURNS TABLE / SETOF: an empty result is [], never null.
+        const returns = rpcs?.[name]?.returns as unknown;
+        const isList = !!returns && typeof returns === 'object' && (isTableReturn(returns) || isSetofReturn(returns));
+        const unwrapFn = isList ? 'unwrapList' : 'unwrap';
         lines.push(
           `      ${name}: {`,
           `        query: (...args: ${params}) =>`,
           `          queryOptions({`,
           `            queryKey: accessNexusKeys.rpc.${name}(args[0]),`,
-          `            queryFn: () => unwrap(client.rpc.${name}(...args)),`,
+          `            queryFn: () => ${unwrapFn}(client.rpc.${name}(...args)),`,
           `          }),`,
           `        mutation: () => ({`,
           `          mutationKey: [...accessNexusKeys.rpc.all, '${name}'] as const,`,
-          `          mutationFn: (args: ${params}[0]) => unwrap(client.rpc.${name}(args)),`,
+          `          mutationFn: (args: ${params}[0]) => ${unwrapFn}(client.rpc.${name}(args)),`,
           `          onSuccess: invalidate(accessNexusKeys.all),`,
           `        }),`,
           `      },`,
@@ -3069,10 +3404,15 @@ function edgeFunctionTypeName(name: string): string {
 }
 
 /** Runtime validation spec of one input field (a TS object literal). */
-function edgeFieldSpec(colType: string): string {
+function edgeFieldSpec(colType: string, namedEnums: Record<string, readonly string[]> = {}): string {
   const optional = colType.endsWith('?');
   const base = optional ? colType.slice(0, -1) : colType;
   const parts: string[] = [];
+  const named = /^enum:(.+)$/.exec(base)?.[1];
+  if (named) {
+    const values = namedEnums[named] ?? [];
+    return `{ type: 'enum', optional: ${optional}, values: [${values.map(quoteTsString).join(', ')}] }`;
+  }
   const enumMatch = /^enum\((.*)\)$/.exec(base);
   const varchar = /^varchar\((\d+)\)$/.exec(base);
   if (enumMatch) {

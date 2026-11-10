@@ -8,10 +8,12 @@
 //   - exit 0 = ok, 1 = user-fixable error, 2 = internal error.
 // ============================================
 
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, join, relative, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
 import { EDGE_FUNCTIONS_TOML_BEGIN, EDGE_FUNCTIONS_TOML_END, SupabaseAdapter } from '../adapters/supabase/adapter.js';
 import { defineConfig, type ResolvedConfig } from '../core/schema/builders.js';
 import type { GeneratedOutput, SchemaDef } from '../core/types/index.js';
@@ -26,8 +28,9 @@ import {
   type OutputScope,
 } from './diff.js';
 import { runInit } from './init/index.js';
-import { findDestructiveStatements, type DestructiveStatement } from './destructive.js';
-import { resolveVersionedMigrations } from './migrations.js';
+import { findDestructiveStatements, findNotNullColumnAdds, type DestructiveStatement } from './destructive.js';
+import { TEST_DB_STANDINS_SQL } from '../testing/index.js';
+import { discardLastMigration, lastSnapshotMigration, resolveVersionedMigrations } from './migrations.js';
 import {
   CliError,
   EXIT,
@@ -62,7 +65,7 @@ const DEFAULT_SCHEMA_PATH = './accessnexus.schema.ts';
 const DEFAULT_SEED_PATH = './accessnexus.seed.ts';
 const CONFIG_FILES = ['accessnexus.config.ts', 'accessnexus.config.js', 'accessnexus.config.mjs'];
 
-type CommandName = 'init' | 'generate' | 'diff' | 'push' | 'seed' | 'validate';
+type CommandName = 'init' | 'generate' | 'diff' | 'push' | 'seed' | 'validate' | 'migration' | 'test-db';
 type CommandResult = Record<string, unknown>;
 
 const SCHEMA_FLAG = { kind: 'string', value: '<path>', description: 'Schema file (default: config.schema or ./accessnexus.schema.ts)' } as const;
@@ -120,8 +123,17 @@ export const COMMANDS: Readonly<Record<CommandName, { summary: string; flags: Fl
   },
   validate: {
     summary: 'Check the schema for errors without writing anything',
-    flags: { schema: SCHEMA_FLAG },
-    examples: ['npx accessnexus validate', 'npx accessnexus validate --json'],
+    flags: {
+      schema: SCHEMA_FLAG,
+      'against-db': { kind: 'boolean', description: 'Also compile the generated SQL (raw policy/trigger/RPC bodies included) in a rolled-back transaction on the database' },
+      url: DB_FLAGS.url,
+      'db-url': DB_FLAGS['db-url'],
+      adapter: DB_FLAGS.adapter,
+      target: DB_FLAGS.target,
+      prefix: OUTPUT_FLAGS.prefix,
+      output: OUTPUT_FLAGS.output,
+    },
+    examples: ['npx accessnexus validate', 'npx accessnexus validate --json', 'npx accessnexus validate --against-db --json'],
   },
   push: {
     summary: 'Apply the generated SQL to the database (refuses stale output and unconfirmed data loss)',
@@ -148,6 +160,33 @@ export const COMMANDS: Readonly<Record<CommandName, { summary: string; flags: Fl
       'allow-remote-seed': { kind: 'boolean', description: 'Allow seeding a hosted Supabase database (*.supabase.co / *.supabase.com)' },
     },
     examples: ['npx accessnexus seed --dry-run', 'npx accessnexus seed --json'],
+  },
+  migration: {
+    summary: 'migration discard: drop the newest migration if no database applied it (restores the snapshot, regenerates); migration data <name>: create a data migration (backfill)',
+    flags: {
+      url: DB_FLAGS.url,
+      'db-url': DB_FLAGS['db-url'],
+      adapter: DB_FLAGS.adapter,
+      target: DB_FLAGS.target,
+      schema: SCHEMA_FLAG,
+      ...OUTPUT_FLAGS,
+      last: { kind: 'boolean', description: 'Discard the newest migration (the default and only mode)' },
+      force: { kind: 'boolean', description: 'Discard without checking a database (no URL configured): you vouch it was never applied anywhere' },
+      'no-generate': { kind: 'boolean', description: 'Only discard; do not regenerate from the schema' },
+    },
+    examples: ['npx accessnexus migration discard --json', 'npx accessnexus migration discard --target staging', 'npx accessnexus migration data backfill_task_org --json'],
+  },
+  'test-db': {
+    summary: 'test-db up | down: a disposable local Supabase Postgres (Docker) ready for RLS tests',
+    flags: {
+      port: { kind: 'string', value: '<port>', description: 'Host port (default 55439)' },
+      name: { kind: 'string', value: '<name>', description: 'Container name (default accessnexus-test-db)' },
+      image: { kind: 'string', value: '<image>', description: 'Image (default ghcr.io/supabase/postgres:15.19.0.007)' },
+      push: { kind: 'boolean', description: 'With up: also run `push` against it' },
+      schema: SCHEMA_FLAG,
+      output: OUTPUT_FLAGS.output,
+    },
+    examples: ['npx accessnexus test-db up --push --json', 'npx accessnexus test-db down'],
   },
 };
 
@@ -189,7 +228,43 @@ export async function runCli(argv: readonly string[]): Promise<number> {
     }
 
     const name = first as CommandName;
-    const flags = parseFlags(argv.slice(1), COMMANDS[name].flags, name);
+    let rest = argv.slice(1);
+    let testDbAction: 'up' | 'down' | null = null;
+    if (name === 'test-db') {
+      const action = rest[0];
+      if (action !== 'up' && action !== 'down' && !rest.includes('--help') && !rest.includes('-h')) {
+        throw new CliError('UNKNOWN_COMMAND', `Unknown test-db action ${action === undefined ? '(none)' : `"${action}"`}`, {
+          hint: 'Use `npx accessnexus test-db up` or `npx accessnexus test-db down`.',
+        });
+      }
+      if (action === 'up' || action === 'down') {
+        testDbAction = action;
+        rest = rest.slice(1);
+      }
+    }
+    let migrationSub: { sub: 'discard' | 'data'; name?: string } | null = null;
+    if (name === 'migration') {
+      const sub = rest[0];
+      if (sub !== 'discard' && sub !== 'data' && !rest.includes('--help') && !rest.includes('-h')) {
+        throw new CliError('UNKNOWN_COMMAND', `Unknown migration subcommand ${sub === undefined ? '(none)' : `"${sub}"`}`, {
+          hint: 'Use `npx accessnexus migration discard` (drop the newest, never-applied migration) or `npx accessnexus migration data <name>` (new data migration).',
+        });
+      }
+      if (sub === 'discard') {
+        migrationSub = { sub };
+        rest = rest.slice(1);
+      } else if (sub === 'data') {
+        const dataName = rest[1];
+        if (!dataName || dataName.startsWith('-')) {
+          throw new CliError('MISSING_ARGUMENT', 'migration data needs a name', { hint: 'Example: `npx accessnexus migration data backfill_task_org`.' });
+        }
+        migrationSub = { sub, name: dataName };
+        rest = rest.slice(2);
+      }
+    }
+    const flags = parseFlags(rest, COMMANDS[name].flags, name);
+    if (migrationSub) Object.assign(flags, { _migration: migrationSub });
+    if (testDbAction) Object.assign(flags, { _action: testDbAction });
     configureUi({ json: flags.json === true, verbose: flags.verbose === true });
     if (flags.help === true) {
       if (isJsonMode()) emitJson(helpJson(name));
@@ -236,7 +311,84 @@ async function dispatch(name: CommandName, flags: ParsedFlags): Promise<CommandR
       return runPush(flags);
     case 'seed':
       return runSeed(flags);
+    case 'test-db':
+      return runTestDb(flags);
+    case 'migration':
+      return (flags._migration as unknown as { sub: string } | undefined)?.sub === 'data'
+        ? runMigrationData(flags)
+        : runMigrationDiscard(flags);
   }
+}
+
+async function runMigrationDiscard(opts: ParsedFlags): Promise<CommandResult> {
+  log(`\n${brand()} migration discard...\n`);
+  const { config, fileConfig } = await loadConfigWithSource(opts);
+  const outputBase = config.output.migrations;
+  const last = lastSnapshotMigration(outputBase);
+  if (!last) {
+    throw new CliError('NO_MIGRATION_TO_DISCARD', `No migration snapshot in ${prettyPath(outputBase)}`, {
+      hint: 'There is nothing to discard: run `npx accessnexus generate` first.',
+    });
+  }
+  const display = relativePathFromCwd(resolve(outputBase, last));
+
+  let dbUrl: string | undefined;
+  try {
+    dbUrl = resolveDbUrl(opts, resolveAdapterSelection(opts, config, fileConfig)).dbUrl;
+  } catch {
+    dbUrl = undefined;
+  }
+  if (dbUrl) {
+    const client = await createPgClient(dbUrl);
+    try {
+      const table = await client.query(`SELECT to_regclass('public.accessnexus_migrations') IS NOT NULL AS ok`);
+      if (table.rows?.[0]?.ok === true) {
+        const applied = await client.query(
+          `SELECT 1 FROM public.accessnexus_migrations WHERE category = 'migrations' AND filename = $1 AND success = TRUE LIMIT 1`,
+          [display],
+        );
+        if ((applied.rows ?? []).length > 0) {
+          throw new CliError('MIGRATION_ALREADY_APPLIED', `${display} was already applied to ${redactUrl(dbUrl)}; it cannot be discarded`, {
+            hint: 'Applied migrations are immutable. Change accessnexus.schema.ts and run `npx accessnexus generate` to get a new __changes migration that fixes it.',
+            data: { migration: display, database: redactUrl(dbUrl) },
+          });
+        }
+      }
+    } finally {
+      await client.end().catch(() => {});
+    }
+  } else if (opts.force !== true) {
+    throw new CliError('MIGRATION_DISCARD_NEEDS_DB', `Cannot check whether ${display} was applied: no database URL`, {
+      hint: 'Pass --url / --target (or set the configured env var) so discard can confirm the database never applied it. '
+        + 'Without a database, pass --force only if no environment ever applied it.',
+      data: { migration: display },
+    });
+  }
+
+  let restoredTo: string | null;
+  try {
+    restoredTo = discardLastMigration(outputBase).restoredTo;
+  } catch (err) {
+    if ((err as Error).message === 'HISTORY_MISSING') {
+      throw new CliError('MIGRATION_HISTORY_MISSING', `The snapshot has no record of the state before ${display}`, {
+        hint: 'It was written by accessnexus < 0.4.1, which kept only the latest state. Nothing was deleted. '
+          + 'Rebuild the previous snapshot by hand, or generate a new __changes migration that undoes the change.',
+        data: { migration: display },
+      });
+    }
+    throw err;
+  }
+  log(`  ${paint.green('✓')} Discarded ${display}${restoredTo ? ` (snapshot restored to ${restoredTo})` : ' (snapshot removed: the next generate writes a new __init)'}`);
+  log(`  ${paint.gray(dbUrl ? `Checked: ${redactUrl(dbUrl)} never applied it.` : 'Not checked against a database (--force).')}\n`);
+
+  const result: CommandResult = {
+    discarded: display,
+    restoredTo: restoredTo ? relativePathFromCwd(resolve(outputBase, restoredTo)) : null,
+    checkedDatabase: dbUrl ? redactUrl(dbUrl) : null,
+  };
+  if (opts['no-generate'] === true) return { ...result, generate: null };
+  const generate = await runGenerate(opts);
+  return { ...result, generate };
 }
 
 let cachedVersion: string | undefined;
@@ -429,7 +581,7 @@ async function importFile(absolute: string, label: string): Promise<Record<strin
       packages: 'external',
       logLevel: 'silent',
     });
-    code = result.outputFiles[0].text;
+    code = linkOwnPackage(result.outputFiles[0].text, dirname(absolute));
   } catch (buildError: any) {
     const first = buildError?.errors?.[0];
     const where = first?.location ? ` (${first.location.file}:${first.location.line}:${first.location.column})` : '';
@@ -724,6 +876,11 @@ async function runGenerate(opts: ParsedFlags): Promise<CommandResult> {
     new Set(files.filter((file) => file.status !== 'unchanged').map((file) => file.path)),
   );
   reportDestructive(destructive, 'The new migration');
+  const migrationWarnings = notNullColumnWarnings(
+    generated,
+    new Set(files.filter((file) => file.status !== 'unchanged').map((file) => file.path)),
+  );
+  reportMigrationWarnings(migrationWarnings);
 
   log(`${paint.green('✓ Done!')} ${counts.created} created, ${counts.updated} updated, ${counts.unchanged} unchanged\n`);
 
@@ -733,7 +890,7 @@ async function runGenerate(opts: ParsedFlags): Promise<CommandResult> {
     files,
     destructive,
     summary: { ...counts, files: files.length, tables: summary.tables.length },
-    warnings,
+    warnings: [...warnings, ...migrationWarnings],
   };
 }
 
@@ -771,10 +928,10 @@ async function runDiff(opts: ParsedFlags): Promise<CommandResult> {
   const summary = { added: 0, modified: 0, removed: 0 };
   for (const change of changes) summary[change.status] += 1;
 
-  const destructive = destructiveInChangedMigrations(
-    generated,
-    new Set(changes.filter((change) => change.status !== 'removed').map((change) => change.displayPath)),
-  );
+  const changedPaths = new Set(changes.filter((change) => change.status !== 'removed').map((change) => change.displayPath));
+  const destructive = destructiveInChangedMigrations(generated, changedPaths);
+  const migrationWarnings = notNullColumnWarnings(generated, changedPaths);
+  reportMigrationWarnings(migrationWarnings);
 
   const result: CommandResult = {
     schemaPath: config.schema,
@@ -786,7 +943,7 @@ async function runDiff(opts: ParsedFlags): Promise<CommandResult> {
       status: change.status,
       diff: renderUnifiedDiff(change),
     })),
-    warnings,
+    warnings: [...warnings, ...migrationWarnings],
     ...(liveHint ? { hint: liveHint } : {}),
   };
 
@@ -866,7 +1023,7 @@ async function runDiffAgainstDb(
       if (file.absolutePath.endsWith('.sql')) byPath.set(resolve(file.absolutePath), file.content);
     }
     const files = [...byPath.keys()]
-      .sort((a, b) => a.localeCompare(b))
+      .sort(bySqlFileOrder)
       .map((absolute) => ({ path: relativePathFromCwd(absolute), sql: byPath.get(absolute)! }));
     return { key, title: group?.title ?? key, files };
   });
@@ -916,12 +1073,38 @@ async function runDiffAgainstDb(
 async function runValidate(opts: ParsedFlags): Promise<CommandResult> {
   log(`\n${brand()} validating...\n`);
 
-  const { config } = await loadConfigWithSource(opts);
+  const { config, fileConfig } = await loadConfigWithSource(opts);
   const schema = await loadSchema(config.schema);
   const summary = summarizeSchema(schema);
   const base = { schemaPath: config.schema, ...summary };
 
   const warnings = assertSchemaValid(schema, base);
+
+  if (opts['against-db'] === true) {
+    // Compile everything push would run (raw SQL bodies included) and roll back.
+    const adapter = new SupabaseAdapter({ policyPrefix: config.naming.policyPrefix, ...config.adapterOptions });
+    const generated = collectGeneratedOutputs(schema, adapter, config);
+    try {
+      await runDiffAgainstDb(opts, { config, fileConfig, schema, generated, warnings, generatedUpToDate: true });
+    } catch (err) {
+      const error = toCliError(err);
+      if (error.code !== 'PUSH_WOULD_FAIL') throw err;
+      const failed = ((error.data ?? {}) as { failed?: { file?: string | null; message?: string; statement?: string | null; sqlState?: string | null } }).failed;
+      const issue: SchemaIssue = {
+        severity: 'error',
+        code: 'SQL_REJECTED',
+        path: schemaPathOfStatement(failed?.file ?? null, failed?.statement ?? null, schema, config.naming.policyPrefix),
+        message: `Postgres rejected the generated SQL${failed?.sqlState ? ` (${failed.sqlState})` : ''}: ${failed?.message ?? error.message}`,
+        hint: 'Fix the SQL in that part of the schema (policy.custom, trigger.custom functionBody, rpc body, check/default), then run validate again. Nothing was persisted.',
+      };
+      const issues = [issue, ...warnings];
+      throw new CliError('SCHEMA_VALIDATION_FAILED', 'The database rejected the generated SQL', {
+        hint: issue.hint,
+        issues,
+        data: { ...base, issues, summary: { errors: 1, warnings: warnings.length } },
+      });
+    }
+  }
 
   log(`  ${paint.green('✓')} Schema is valid — ${summary.tables.length} tables (${summary.mode} mode)\n`);
   for (const t of summary.tables) {
@@ -1105,7 +1288,17 @@ function collectSqlFiles(dir: string): string[] {
     }
   }
 
-  return files.sort((a, b) => a.localeCompare(b));
+  return files.sort(bySqlFileOrder);
+}
+
+/**
+ * Apply order of SQL files: by file name, then path. Migration names start with
+ * their timestamp, so data migrations (`migrations/data/<timestamp>__<name>.sql`)
+ * run between the schema migrations generated before and after them.
+ */
+function bySqlFileOrder(a: string, b: string): number {
+  const byName = basename(a).localeCompare(basename(b));
+  return byName !== 0 ? byName : a.localeCompare(b);
 }
 
 function shouldForceSsl(dbUrl: string): boolean {
@@ -1721,7 +1914,7 @@ interface PushState {
   foreignPolicies: ForeignPolicy[] | null;
   foreignTriggers: ForeignTrigger[] | null;
   /** Rehearsal only: the refusals a real push would stop at (it would apply nothing). */
-  blockers: Array<{ code: string; message: string; hint?: string }>;
+  blockers: Array<{ code: string; message: string; hint?: string; details?: Record<string, unknown> }>;
 }
 
 function newPushState(): PushState {
@@ -1859,15 +2052,44 @@ async function applyPushInTransaction(client: any, ctx: PushContext, state: Push
         }
       }
 
+      if (group.key === 'migrations') {
+        for (const add of findNotNullColumnAdds(display, sql)) {
+          const rows = await countTableRows(client, add.table);
+          if (rows === null || rows === 0) continue;
+          throw new CliError('NOT_NULL_ON_NON_EMPTY_TABLE',
+            `${display}:${add.line} adds ${add.table}.${add.column} as NOT NULL without a default, but ${add.table} has ${rows} row(s)`, {
+              hint: `Nothing was applied. Add the column as nullable ('<type>?'), backfill it with a data migration `
+                + `(migrations/data/), push, then make it required. Or give it a default.`,
+              data: {
+                ...pushRolledBack(ctx.base, state), failed: display, sqlState: '23502',
+                table: add.table, column: add.column, rows, line: add.line, statement: add.sql,
+              },
+            });
+        }
+      }
+
       const startedAt = Date.now();
+      // A rehearsal keeps going after a failure (savepoint), so the plan can show
+      // what was applied up to the statement Postgres rejected.
+      if (rehearse) await client.query('SAVEPOINT accessnexus_file');
       try {
         await client.query(sql);
       } catch (error: any) {
+        let where = failedStatement(sql, error?.position);
+        if (rehearse) {
+          await client.query('ROLLBACK TO SAVEPOINT accessnexus_file');
+          // No position (constraint/data errors): replay statement by statement to find it.
+          if (!where) where = await locateFailingStatement(client, sql);
+          await client.query('ROLLBACK TO SAVEPOINT accessnexus_file');
+        }
         const pgMessage = String(error?.message ?? 'unknown SQL error');
-        throw new CliError('PUSH_FAILED', `Postgres rejected ${display}: ${pgMessage}`, {
+        throw new CliError('PUSH_FAILED', `Postgres rejected ${display}${where ? `:${where.line}` : ''}: ${pgMessage}`, {
           hint: 'The whole push was rolled back: nothing from it was applied (not the files in "rolledBack", not the foreign-policy drops). '
             + 'Fix the cause in accessnexus.schema.ts (or the database state), run `npx accessnexus generate`, then push again.',
-          data: { ...pushRolledBack(ctx.base, state), failed: display, sqlState: error?.code ?? null },
+          data: {
+            ...pushRolledBack(ctx.base, state), failed: display, sqlState: error?.code ?? null,
+            ...(where ? { line: where.line, statement: where.statement } : {}),
+          },
           cause: error,
         });
       }
@@ -1911,9 +2133,13 @@ export interface LivePlan {
   foreignPolicies: ForeignPolicy[];
   foreignTriggers: ForeignTrigger[];
   /** Refusals the real push stops at before applying anything. */
-  blockers: Array<{ code: string; message: string; hint?: string }>;
-  /** The push would fail: the file Postgres rejected and its error. Nothing persisted. */
-  failed: { file: string | null; code: string; message: string; sqlState: string | null } | null;
+  blockers: Array<{ code: string; message: string; hint?: string; details?: Record<string, unknown> }>;
+  /** The push would fail: the file Postgres rejected, its error and the statement. Nothing persisted. */
+  failed: {
+    file: string | null; code: string; message: string; sqlState: string | null;
+    /** 1-based line of the rejected statement in `file`, and its text, when Postgres reports a position. */
+    line: number | null; statement: string | null;
+  } | null;
   changed: boolean;
   summary: { added: number; modified: number; removed: number };
   changes: PlanChange[];
@@ -1962,11 +2188,20 @@ async function rehearsePush(dbUrl: string, ctx: PushContext, defaultSchema: stri
           code: error.code,
           message: error.message,
           sqlState: (data.sqlState as string | null | undefined) ?? null,
+          line: (data.line as number | undefined) ?? null,
+          statement: (data.statement as string | undefined) ?? null,
         };
+        if (error.code === 'NOT_NULL_ON_NON_EMPTY_TABLE') {
+          state.blockers.push({
+            code: error.code, message: error.message, ...(error.hint ? { hint: error.hint } : {}),
+            details: { table: data.table, column: data.column, rows: data.rows },
+          });
+        }
       }
       // Snapshot the same functions again, even those only reached through a
       // trigger the push drops: dropping a trigger never drops its function.
-      if (!failed) changes = diffSnapshots(before, await captureSnapshot(client, { ...scope, functionOids: snapshotFunctionOids(before) }));
+      // After a failure this is the partial plan: what applied before it.
+      changes = diffSnapshots(before, await captureSnapshot(client, { ...scope, functionOids: snapshotFunctionOids(before) }));
     } finally {
       await client.query('ROLLBACK').catch(() => {});
     }
@@ -1977,7 +2212,8 @@ async function rehearsePush(dbUrl: string, ctx: PushContext, defaultSchema: stri
 
   return {
     database: redactUrl(dbUrl),
-    wouldApply: failed ? [] : state.applied,
+    // With a failure: the files applied before it (the push itself would apply none).
+    wouldApply: state.applied,
     skipped: state.skipped,
     droppedPolicies: state.droppedPolicies,
     droppedTriggers: state.droppedTriggers,
@@ -1998,7 +2234,8 @@ function reportLivePlan(plan: LivePlan): void {
   log(paint.bold(`  Live plan against ${plan.database} (rehearsed in a rolled-back transaction):\n`));
   if (plan.failed) {
     log(`  ${paint.red('✗ The push would fail:')} ${plan.failed.message}`);
-    if (plan.failed.file) log(`    file: ${plan.failed.file}`);
+    if (plan.failed.file) log(`    file: ${plan.failed.file}${plan.failed.line ? `:${plan.failed.line}` : ''}`);
+    if (plan.failed.statement) log(`    statement: ${plan.failed.statement.split('\n')[0]}${plan.failed.statement.includes('\n') ? ' …' : ''}`);
     log(`  ${paint.gray('Nothing was persisted.')}\n`);
     return;
   }
@@ -2395,4 +2632,283 @@ function edgeFunctionsConfigToml(adapter: SupabaseAdapter, schema: SchemaDef, fu
     content = `${original.replace(/\s*$/, '')}\n\n${blockText}\n`;
   }
   return { absolutePath, displayPath: relativePathFromCwd(absolutePath), content };
+}
+
+/** NOT_NULL_COLUMN_ADDED warnings for the changed migration files. */
+function notNullColumnWarnings(groups: GeneratedGroup[], changedPaths: Set<string>): SchemaIssue[] {
+  const migrations = groups.find((group) => group.category === 'migrations');
+  if (!migrations) return [];
+  return migrations.files
+    .filter((file) => file.absolutePath.endsWith('.sql') && changedPaths.has(file.displayPath))
+    .flatMap((file) => findNotNullColumnAdds(file.displayPath, file.content))
+    .map((add) => ({
+      severity: 'warning' as const,
+      code: 'NOT_NULL_COLUMN_ADDED',
+      path: `${add.table}.columns.${add.column}`,
+      message: `${add.file}:${add.line} adds ${add.table}.${add.column} as NOT NULL without a default: push fails if ${add.table} has rows`,
+      hint: `Give it a default, or add it in two steps: make it nullable ('<type>?') with a backfill data migration, `
+        + `push, then make it required (see the "required column on a table with data" recipe).`,
+    }));
+}
+
+function reportMigrationWarnings(warnings: SchemaIssue[]): void {
+  for (const w of warnings) log(`  ${paint.yellow('⚠')} ${w.message}\n    ${paint.gray(w.hint ?? '')}`);
+  if (warnings.length > 0) log('');
+}
+
+/** Rows in `table` (public), or null when it does not exist yet. */
+async function countTableRows(client: any, table: string): Promise<number | null> {
+  const exists = await client.query(`SELECT to_regclass($1) IS NOT NULL AS ok`, [`public.${table}`]);
+  if (exists.rows?.[0]?.ok !== true) return null;
+  const res = await client.query(`SELECT count(*)::int AS n FROM public.${quoteIdent(table)}`);
+  return res.rows?.[0]?.n ?? 0;
+}
+
+/** The statement around Postgres' 1-based error `position` in `sql`, with its line. */
+function failedStatement(sql: string, position: unknown): { line: number; statement: string } | null {
+  const pos = Number(position);
+  if (!Number.isFinite(pos) || pos < 1 || pos > sql.length + 1) return null;
+  const offset = pos - 1;
+  const line = sql.slice(0, offset).split('\n').length;
+  // The statement (dollar-quoted bodies kept whole) that contains the offset.
+  let cursor = 0;
+  for (const stmt of splitSqlStatements(sql)) {
+    const start = sql.indexOf(stmt.sql, cursor);
+    if (start === -1) break;
+    const end = start + stmt.sql.length;
+    if (offset >= start && offset <= end) return { line, statement: stmt.sql };
+    cursor = end;
+  }
+  return null;
+}
+
+/**
+ * Split SQL into statements with their 1-based start line. Respects quotes,
+ * dollar-quoted bodies ($$ / $tag$) and comments, so function bodies stay whole.
+ */
+export function splitSqlStatements(sql: string): Array<{ line: number; sql: string }> {
+  const out: Array<{ line: number; sql: string }> = [];
+  let start = 0;
+  let i = 0;
+  const push = (end: number) => {
+    let text = sql.slice(start, end);
+    let offset = start;
+    // Leading blank lines and -- comment lines belong to no statement.
+    for (;;) {
+      const m = /^(\s*--[^\n]*\n|\s+)/.exec(text);
+      if (!m || m[0].length === 0) break;
+      offset += m[0].length;
+      text = text.slice(m[0].length);
+    }
+    const body = text.trim();
+    if (body.replace(/--[^\n]*/g, '').trim() !== '') {
+      out.push({ line: sql.slice(0, offset).split('\n').length, sql: body });
+    }
+  };
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (ch === '-' && sql[i + 1] === '-') {
+      const nl = sql.indexOf('\n', i);
+      i = nl === -1 ? sql.length : nl + 1;
+    } else if (ch === '/' && sql[i + 1] === '*') {
+      const end = sql.indexOf('*/', i + 2);
+      i = end === -1 ? sql.length : end + 2;
+    } else if (ch === "'" || ch === '"') {
+      let j = i + 1;
+      while (j < sql.length) {
+        if (sql[j] === ch && sql[j + 1] === ch) { j += 2; continue; }
+        if (sql[j] === ch) break;
+        j += 1;
+      }
+      i = j + 1;
+    } else if (ch === '$') {
+      const tag = /^\$[A-Za-z_]*\$/.exec(sql.slice(i))?.[0];
+      if (tag) {
+        const end = sql.indexOf(tag, i + tag.length);
+        i = end === -1 ? sql.length : end + tag.length;
+      } else {
+        i += 1;
+      }
+    } else if (ch === ';') {
+      push(i + 1);
+      i += 1;
+      start = i;
+    } else {
+      i += 1;
+    }
+  }
+  push(sql.length);
+  return out;
+}
+
+/** Inside a savepoint: run `sql` statement by statement; the first one that fails. */
+async function locateFailingStatement(client: any, sql: string): Promise<{ line: number; statement: string } | null> {
+  for (const stmt of splitSqlStatements(sql)) {
+    await client.query('SAVEPOINT accessnexus_stmt');
+    try {
+      await client.query(stmt.sql);
+      await client.query('RELEASE SAVEPOINT accessnexus_stmt');
+    } catch {
+      await client.query('ROLLBACK TO SAVEPOINT accessnexus_stmt');
+      return { line: stmt.line, statement: stmt.sql };
+    }
+  }
+  return null;
+}
+
+/** `migration data <name>`: an empty data migration, ordered after every existing migration. */
+async function runMigrationData(opts: ParsedFlags): Promise<CommandResult> {
+  const name = (opts._migration as unknown as { name: string }).name;
+  if (!/^[a-z][a-z0-9_]*$/.test(name)) {
+    throw new CliError('INVALID_FLAG_VALUE', `Data migration name "${name}" must be lowercase snake_case`, {
+      hint: 'Example: backfill_task_org.',
+    });
+  }
+  const { config } = await loadConfigWithSource(opts);
+  const dir = resolve(config.output.migrations);
+  const dataDir = join(dir, 'data');
+  const existing = [...collectSqlFiles(dir)].map((f) => /^(\d{14})__/.exec(basename(f))?.[1]).filter((t): t is string => !!t);
+  let stamp = timestampNow();
+  const latest = existing.sort().at(-1);
+  if (latest && stamp <= latest) stamp = bumpTimestamp(latest);
+  const file = join(dataDir, `${stamp}__${name}.sql`);
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(file, [
+    `-- Data migration ${name}: written by you, applied once by \`accessnexus push\`, in timestamp`,
+    `-- order with the schema migrations (after ${latest ? `${latest}__*` : 'none yet'}).`,
+    `-- It runs as the push user (RLS bypassed) inside the push transaction, and is recorded in`,
+    `-- public.accessnexus_migrations: never edit it after it was applied (MIGRATION_DRIFT).`,
+    `-- Typical use: backfill a column added as nullable, before a later migration makes it NOT NULL.`,
+    '',
+    `-- UPDATE public.tasks SET org_id = ... WHERE org_id IS NULL;`,
+    '',
+  ].join('\n'));
+  const display = relativePathFromCwd(file);
+  log(`\n  ${paint.green('✓')} Created ${display}\n`);
+  return { created: display };
+}
+
+function timestampNow(date = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${date.getUTCFullYear()}${p(date.getUTCMonth() + 1)}${p(date.getUTCDate())}${p(date.getUTCHours())}${p(date.getUTCMinutes())}${p(date.getUTCSeconds())}`;
+}
+
+function bumpTimestamp(stamp: string): string {
+  const d = new Date(Date.UTC(+stamp.slice(0, 4), +stamp.slice(4, 6) - 1, +stamp.slice(6, 8), +stamp.slice(8, 10), +stamp.slice(10, 12), +stamp.slice(12, 14) + 1));
+  return timestampNow(d);
+}
+
+// ---- test-db ----
+
+function docker(args: string[], input?: string): { status: number; stdout: string; stderr: string } {
+  const res = spawnSync('docker', args, { encoding: 'utf-8', ...(input !== undefined ? { input } : {}) });
+  if (res.error && (res.error as NodeJS.ErrnoException).code === 'ENOENT') {
+    throw new CliError('DOCKER_NOT_FOUND', 'test-db needs Docker, and the docker command was not found', {
+      hint: 'Install Docker (or start Docker Desktop), then run the command again.',
+    });
+  }
+  return { status: res.status ?? 1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
+}
+
+async function runTestDb(opts: ParsedFlags): Promise<CommandResult> {
+  const action = opts._action as unknown as 'up' | 'down';
+  const name = (opts.name as string | undefined) ?? 'accessnexus-test-db';
+  const port = Number((opts.port as string | undefined) ?? '55439');
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new CliError('INVALID_FLAG_VALUE', `--port must be a TCP port, got "${String(opts.port)}"`);
+  }
+  if (action === 'down') {
+    const res = docker(['rm', '-f', name]);
+    log(`\n  ${res.status === 0 ? paint.green('✓') : paint.gray('-')} ${res.status === 0 ? `Removed ${name}` : `${name} was not running`}\n`);
+    return { action, container: name, removed: res.status === 0 };
+  }
+
+  const image = (opts.image as string | undefined) ?? 'ghcr.io/supabase/postgres:15.19.0.007';
+  const url = `postgres://postgres:postgres@127.0.0.1:${port}/postgres`;
+  log(`\n${brand()} test-db up (${image})...\n`);
+  const running = docker(['ps', '-q', '--filter', `name=^${name}$`]).stdout.trim() !== '';
+  if (!running) {
+    const run = docker(['run', '-d', '--rm', '--name', name, '-e', 'POSTGRES_PASSWORD=postgres', '-p', `${port}:5432`, image]);
+    if (run.status !== 0) {
+      throw new CliError('TEST_DB_START_FAILED', `docker run failed: ${run.stderr.trim().split('\n').pop() ?? 'unknown error'}`, {
+        hint: `Is port ${port} free (--port) and is ${name} not used by another container (--name)?`,
+      });
+    }
+  }
+  // The image runs its own init scripts before accepting supabase_admin.
+  let ready = false;
+  for (let i = 0; i < 120 && !ready; i++) {
+    // Ready when the image's init scripts are done (they create the realtime schema
+    // and the supabase_realtime publication last).
+    const probe = docker(['exec', name, 'psql', '-U', 'supabase_admin', '-d', 'postgres', '-tAc',
+      "SELECT to_regnamespace('realtime') IS NOT NULL AND EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime')"]);
+    ready = probe.status === 0 && probe.stdout.trim() === 't';
+    if (!ready) await new Promise((r) => setTimeout(r, 1000));
+  }
+  if (!ready) {
+    throw new CliError('TEST_DB_START_FAILED', `${name} did not become ready within 2 minutes`, {
+      hint: `Check \`docker logs ${name}\`.`,
+    });
+  }
+  const standins = docker(['exec', '-i', name, 'psql', '-v', 'ON_ERROR_STOP=1', '-U', 'supabase_admin', '-d', 'postgres'], TEST_DB_STANDINS_SQL);
+  if (standins.status !== 0) {
+    throw new CliError('TEST_DB_START_FAILED', `Preparing ${name} failed: ${standins.stderr.trim()}`);
+  }
+  log(`  ${paint.green('✓')} ${name} ready: ${url}`);
+  log(`  ${paint.gray('auth.uid()/auth.jwt() read request.jwt.claims; auth.users.email_confirmed_at, realtime.messages ready.')}\n`);
+
+  let push: CommandResult | null = null;
+  if (opts.push === true) {
+    push = await runPush({ ...opts, url, _action: undefined } as unknown as ParsedFlags);
+  }
+  return { action, container: name, url, image, push };
+}
+
+/**
+ * The schema path behind a rejected statement: `rpcs.<name>` for a function of
+ * rpcs.sql, `<table>.triggers[<i>]` for a trigger function, `<table>.policies.<op>`
+ * for a policy, else the file.
+ */
+function schemaPathOfStatement(file: string | null, statement: string | null, schema: SchemaDef, prefix: string): string {
+  const text = statement ?? '';
+  const fn = /FUNCTION\s+(?:public\.)?([a-z_][a-z0-9_]*)\s*\(/i.exec(text)?.[1];
+  const rpcs = ((schema as any).__rpcs ?? {}) as Record<string, unknown>;
+  if (fn && fn in rpcs) return `rpcs.${fn}`;
+  for (const [tableName, def] of Object.entries(schema)) {
+    const triggers = (def.triggers ?? []) as Array<{ kind: string; name?: string; column?: string }>;
+    for (let i = 0; i < triggers.length; i++) {
+      const t = triggers[i];
+      const suffix = t.name ?? (t.kind === 'updated_at' ? 'updated_at' : t.kind === 'lock_columns' ? 'lock_columns' : undefined);
+      if (fn && suffix && fn === `${prefix}_${tableName}_${suffix}_fn`) return `${tableName}.triggers[${i}]`;
+    }
+    const policy = new RegExp(`POLICY\\s+"${prefix}_${tableName}_(select|insert|update|delete)"`, 'i').exec(text);
+    if (policy) return `${tableName}.policies.${policy[1].toLowerCase()}`;
+  }
+  return file ?? '(generated SQL)';
+}
+
+/**
+ * A schema outside the project (e.g. `--schema /tmp/old.schema.ts`) cannot
+ * resolve `accessnexus` from its own folder: point those imports at the package
+ * this CLI runs from. Imports that do resolve locally are left alone.
+ */
+export function linkOwnPackage(code: string, sourceDir: string): string {
+  if (!/["']accessnexus(?:\/[a-z/]+)?["']/.test(code)) return code;
+  const local = createRequire(join(sourceDir, 'noop.js'));
+  const ownRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const ownEntry = (specifier: string): string | null => {
+    const sub = specifier.slice('accessnexus'.length).replace(/^\//, '');
+    const rel = sub === '' ? 'dist/index.js' : `dist/${sub}/index.js`;
+    const file = join(ownRoot, rel);
+    return existsSync(file) ? pathToFileURL(file).href : null;
+  };
+  return code.replace(/(\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(["'])(accessnexus(?:\/[a-z/]+)?)\2/g, (match, lead: string, quote: string, specifier: string) => {
+    try {
+      local.resolve(specifier);
+      return match;
+    } catch {
+      const target = ownEntry(specifier);
+      return target ? `${lead}${quote}${target}${quote}` : match;
+    }
+  });
 }

@@ -287,4 +287,72 @@ describe.skipIf(!DB_URL)('live change plan against a real Supabase Postgres', ()
     expect(await migrationsTableAbsent()).toBe(true);
     expect(await lockIsFree()).toBe(true);
   }, 60_000);
+
+  it('a NOT NULL column added to a table with rows: blocker with the row count, and a warning at generate', async () => {
+    writeSchema(notesSchema());
+    expect((await cli('generate')).code).toBe(0);
+    expect((await cli('push')).code).toBe(0);
+    await admin.query(`INSERT INTO notes (id, owner_id, body) VALUES (gen_random_uuid(), gen_random_uuid(), 'a'), (gen_random_uuid(), gen_random_uuid(), 'b')`);
+
+    writeSchema(notesSchema().replace("body: 'text' }", "body: 'text', org_id: 'uuid' }"));
+    const diff = await cli('diff');
+    expect(diff.json.warnings.map((w: any) => `${w.code} ${w.path}`)).toContain('NOT_NULL_COLUMN_ADDED notes.columns.org_id');
+    const gen = await cli('generate');
+    expect(gen.json.warnings.map((w: any) => w.code)).toContain('NOT_NULL_COLUMN_ADDED');
+
+    const plan = await cli('diff', '--against-db');
+    expect(plan.code).toBe(1);
+    expect(plan.json.error.code).toBe('PUSH_WOULD_FAIL');
+    expect(plan.json.blockers).toEqual([expect.objectContaining({
+      code: 'NOT_NULL_ON_NON_EMPTY_TABLE',
+      details: { table: 'notes', column: 'org_id', rows: 2 },
+    })]);
+    expect(plan.json.failed).toMatchObject({ code: 'NOT_NULL_ON_NON_EMPTY_TABLE', sqlState: '23502', line: expect.any(Number) });
+    expect(plan.json.failed.statement).toContain('ADD COLUMN IF NOT EXISTS org_id UUID NOT NULL');
+
+    const push = await cli('push');
+    expect(push.code).toBe(1);
+    expect(push.json.error.code).toBe('NOT_NULL_ON_NON_EMPTY_TABLE');
+    expect(push.json.error.message).toContain('2 row(s)');
+    expect((await admin.query(`SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = 'notes' AND column_name = 'org_id'`)).rows[0].n).toBe(0);
+  }, 60_000);
+
+  it('a push that fails mid-way: the partial plan, the failing statement and its line', async () => {
+    writeSchema(notesSchema());
+    expect((await cli('generate')).code).toBe(0);
+    expect((await cli('push')).code).toBe(0);
+    await admin.query(`INSERT INTO notes (id, owner_id, body) VALUES (gen_random_uuid(), gen_random_uuid(), 'same'), (gen_random_uuid(), gen_random_uuid(), 'same')`);
+
+    // body becomes unique (the data violates it) and the select policy changes.
+    writeSchema(notesSchema('policy.isAuthenticated()').replace("body: 'text'", "body: { type: 'text', unique: true }"));
+    expect((await cli('generate')).code).toBe(0);
+    const plan = await cli('diff', '--against-db');
+    expect(plan.code).toBe(1);
+    expect(plan.json.failed.code).toBe('PUSH_FAILED');
+    expect(plan.json.failed.sqlState).toBe('23505');
+    expect(plan.json.failed.file).toMatch(/migrations/);
+    expect(plan.json.failed.statement).toMatch(/UNIQUE/);
+    expect(plan.json.failed.line).toBeGreaterThan(0);
+    expect(plan.json.summary).toBeDefined();
+    expect(plan.json.persisted).toBe(false);
+  }, 60_000);
+
+  it('validate --against-db: raw SQL errors point at the schema item, nothing persisted', async () => {
+    const before = await catalogFingerprint();
+    const cases: Array<[string, string]> = [
+      [notesSchema(undefined, "broken: rpc({ returns: 'int', body: 'RETURN 1 +;' })"), 'rpcs.broken'],
+      [notesSchema("policy.custom('no_such_column = 1')"), 'notes.policies.select'],
+      [`import { trigger } from '${SRC_INDEX}';\n` + notesSchema().replace("primaryKey: 'id',", "primaryKey: 'id', triggers: [trigger.custom({ name: 'bad', events: ['before_insert'], functionBody: 'IF NEW.body THEN RETURN NEW' })],"), 'notes.triggers[0]'],
+    ];
+    for (const [schema, path] of cases) {
+      writeSchema(schema);
+      expect((await cli('validate')).code).toBe(0); // the static checks cannot see it
+      const res = await cli('validate', '--against-db');
+      expect(res.code).toBe(1);
+      expect(res.json.error.code).toBe('SCHEMA_VALIDATION_FAILED');
+      expect(res.json.issues[0]).toMatchObject({ severity: 'error', code: 'SQL_REJECTED', path });
+    }
+    expect(await catalogFingerprint()).toBe(before);
+  }, 90_000);
 });
+

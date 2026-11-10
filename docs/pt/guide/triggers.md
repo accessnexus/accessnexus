@@ -1,6 +1,6 @@
 # Triggers
 
-Triggers executam lógica dentro do Postgres quando uma linha é escrita. O AccessNexus traz presets para os casos comuns (timestamps, soft delete, log de auditoria, travas de coluna) e uma válvula de escape para PL/pgSQL customizado. Coloque-os no array `triggers` de uma tabela; o `generate` escreve um `<table>_triggers.sql` por tabela com as funções e os comandos `CREATE TRIGGER`.
+Triggers executam lógica dentro do Postgres quando uma linha é escrita. O AccessNexus traz presets para os casos comuns (timestamps, soft delete, log de auditoria, travas de coluna, guardas de tenant) e uma válvula de escape para PL/pgSQL customizado. Coloque-os no array `triggers` de uma tabela; o `generate` escreve um `<table>_triggers.sql` por tabela com as funções e os comandos `CREATE TRIGGER`.
 
 | Builder | Dispara | Roda como |
 | --- | --- | --- |
@@ -8,7 +8,11 @@ Triggers executam lógica dentro do Postgres quando uma linha é escrita. O Acce
 | `trigger.softDelete(column)` | `BEFORE DELETE` | Dono da função (`SECURITY DEFINER`) |
 | `trigger.auditLog({ table, columns? })` | `AFTER INSERT OR UPDATE OR DELETE` | Dono da função (`SECURITY DEFINER`) |
 | `trigger.lockColumns({ columns \| except, unless?, name? })` | `BEFORE UPDATE` | O usuário que escreve |
-| `trigger.custom({ name, events, functionBody, when?, forEach?, security? })` | Os eventos que você definir | O usuário que escreve, ou o dono com `security: 'definer'` |
+| `trigger.custom({ name, events, functionBody, when?, forEach?, security?, writes? })` | Os eventos que você definir | O usuário que escreve, ou o dono com `security: 'definer'` |
+| `trigger.keepAtLeastOne({ column, value, scope, parent?, name? })` | `BEFORE UPDATE OR DELETE` | Dono da função (`SECURITY DEFINER`) |
+| `trigger.sameTenant({ column, references, tenantColumn, referencesTenantColumn?, name? })` | `BEFORE INSERT OR UPDATE` | O usuário que escreve |
+| `trigger.memberOfTenant({ column, tenant, tenantColumn?, name? })` | `BEFORE INSERT OR UPDATE` | O usuário que escreve |
+| `trigger.onAuthUserCreated({ columns, name? })` | `AFTER INSERT` em `auth.users` | Dono da função (`SECURITY DEFINER`) |
 
 Toda função gerada tem `SET search_path = pg_catalog, public`. Os triggers se chamam `<prefix>_<table>_<name>` e suas funções acrescentam `_fn`, por exemplo `accessnexus_projects_updated_at` e `accessnexus_projects_updated_at_fn()`. O arquivo os substitui no lugar a cada push.
 
@@ -189,7 +193,7 @@ A função do trigger é `SECURITY DEFINER`, então ela escreve mesmo quando o `
 
 ## `trigger.lockColumns`
 
-Impede que usuários da API (`anon`, `authenticated`) alterem colunas com UPDATE. Ele dispara `BEFORE UPDATE`, compara `OLD` e `NEW` e lança SQLSTATE `42501` quando uma coluna travada muda.
+Impede que usuários da API (`anon`, `authenticated`) alterem colunas com UPDATE. Ele dispara `BEFORE UPDATE`, compara `OLD` e `NEW` e lança SQLSTATE `42501` quando uma coluna travada muda, uma vez por coluna: a mensagem é `<table>.<column> cannot be changed` e o HINT é `accessnexus:locked_column:<table>.<column>`, que o [`isLockedColumn(error)`](/pt/api/sdk#helpers) do SDK reconhece (uma negação do RLS não tem esse hint).
 
 | Opção | Descrição |
 | --- | --- |
@@ -213,10 +217,15 @@ export const freezeIdentity = trigger.lockColumns({ columns: ['created_by', 'org
 CREATE OR REPLACE FUNCTION accessnexus_projects_lock_columns_fn()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF current_user IN ('anon', 'authenticated')
-     AND (NEW.created_by IS DISTINCT FROM OLD.created_by OR NEW.org_id IS DISTINCT FROM OLD.org_id) THEN
-    RAISE EXCEPTION 'projects: created_by, org_id cannot be changed'
-      USING ERRCODE = '42501';
+  IF current_user IN ('anon', 'authenticated') THEN
+    IF NEW.created_by IS DISTINCT FROM OLD.created_by THEN
+      RAISE EXCEPTION '%', 'projects.' || 'created_by' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:projects.' || 'created_by';
+    END IF;
+    IF NEW.org_id IS DISTINCT FROM OLD.org_id THEN
+      RAISE EXCEPTION '%', 'projects.' || 'org_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:projects.' || 'org_id';
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -265,15 +274,25 @@ export default defineSchema({
 });
 ```
 
-A forma com `except` compara a linha inteira menos as colunas permitidas:
+A forma com `except` olha a linha inteira menos as colunas permitidas e encontra a primeira chave que mudou com `jsonb_each`, então o erro nomeia a coluna:
 
 ```sql
-IF current_user IN ('anon', 'authenticated')
-   AND NOT COALESCE((OLD.reporter_id = (SELECT auth.uid())), FALSE)
-   AND ((to_jsonb(NEW) - ARRAY['status']::text[]) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status']::text[])) THEN
-  RAISE EXCEPTION 'tickets: only status can be changed'
-    USING ERRCODE = '42501';
-END IF;
+DECLARE
+  locked_column text;
+BEGIN
+  IF current_user IN ('anon', 'authenticated')
+     AND NOT COALESCE((OLD.reporter_id = (SELECT auth.uid())), FALSE) THEN
+    SELECT n.key INTO locked_column
+      FROM jsonb_each(to_jsonb(NEW) - ARRAY['status']::text[]) AS n
+     WHERE n.value IS DISTINCT FROM (to_jsonb(OLD) -> n.key)
+     ORDER BY n.key LIMIT 1;
+    IF locked_column IS NOT NULL THEN
+      RAISE EXCEPTION '%', 'tickets.' || locked_column || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tickets.' || locked_column;
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
 ```
 
 `unless` é SQL cru executado como quem chamou. Escreva `(SELECT auth.uid())`, nunca um `auth.uid()` solto. Ele pode consultar a tabela de membros diretamente, por exemplo "o usuário é admin da org":
@@ -335,7 +354,7 @@ export const addCreator = trigger.custom({
 Um corpo definer pula todas as policies, então precisa decidir o que é permitido apenas a partir de `NEW`, `OLD` e `(SELECT auth.uid())`. Qualifique toda tabela com o schema (`public.team_members`). Prefira isso a uma regra de INSERT de "bootstrap" na tabela de membros ("quem criou pode se adicionar como owner"), que continua válida para sempre e deixa um criador removido voltar.
 :::
 
-Um trigger invoker é a escolha certa para proteções que devem respeitar o RLS. Por exemplo, um trigger `BEFORE INSERT OR UPDATE` que verifica se o projeto de uma tarefa pertence à mesma org: um projeto de outra org é invisível pelo RLS, então é reportado como um projeto que não existe. O padrão completo está no [Exemplos](/pt/guide/cookbook).
+Um trigger invoker é a escolha certa para proteções que devem respeitar o RLS. Por exemplo, um trigger `BEFORE INSERT OR UPDATE` que verifica se o projeto de uma tarefa pertence à mesma org: um projeto de outra org é invisível pelo RLS, então é reportado como um projeto que não existe. A versão pronta é o [`trigger.sameTenant`](/pt/api/trigger#sametenant), e os irmãos dele `memberOfTenant` (o responsável precisa ser membro), `keepAtLeastOne` (uma org sempre mantém um owner) e `onAuthUserCreated` (uma linha de profile por usuário novo) estão documentados na [API de trigger](/pt/api/trigger). O padrão completo está nos [Exemplos](/pt/guide/cookbook).
 
 ## Próximos passos {#next-steps}
 

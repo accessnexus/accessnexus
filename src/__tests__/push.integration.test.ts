@@ -381,9 +381,9 @@ export default defineSeed(schema, { profiles: [{ id: '${ALICE}', email: 'alice@e
     await asUser(CAROL, `INSERT INTO tasks (id, org_id, project_id, title, status, priority, assignee_id, reporter_id, position)
       VALUES ('${TASK_BOB}', '${ORG_A}', '${PROJECT}', 'For Bob', 'todo', 'low', '${BOB}', '${CAROL}', 3)`);
     expect((await asUser(BOB, `UPDATE tasks SET status = 'in_progress' WHERE id = '${TASK_BOB}'`)).rowCount).toBe(1);
-    expect(await rejected(BOB, `UPDATE tasks SET title = 'mine now' WHERE id = '${TASK_BOB}'`)).toMatch(/only status, position can be changed/);
-    expect(await rejected(BOB, `UPDATE tasks SET assignee_id = '${CAROL}' WHERE id = '${TASK_BOB}'`)).toMatch(/only status, position can be changed/);
-    expect(await rejected(CAROL, `UPDATE tasks SET reporter_id = '${ALICE}' WHERE id = '${TASK_BOB}'`)).toMatch(/reporter_id, org_id cannot be changed/);
+    expect(await rejected(BOB, `UPDATE tasks SET title = 'mine now' WHERE id = '${TASK_BOB}'`)).toMatch(/tasks.title cannot be changed/);
+    expect(await rejected(BOB, `UPDATE tasks SET assignee_id = '${CAROL}' WHERE id = '${TASK_BOB}'`)).toMatch(/tasks.assignee_id cannot be changed/);
+    expect(await rejected(CAROL, `UPDATE tasks SET reporter_id = '${ALICE}' WHERE id = '${TASK_BOB}'`)).toMatch(/tasks.reporter_id cannot be changed/);
     expect((await asUser(CAROL, `UPDATE tasks SET title = 'Renamed' WHERE id = '${TASK_BOB}'`)).rowCount).toBe(1);
 
     // A removed admin cannot rejoin by themselves.
@@ -436,7 +436,7 @@ export default defineSeed(schema, { profiles: [{ id: '${ALICE}', email: 'alice@e
     const TICKET = 'dddddddd-0000-0000-0000-00000000000d';
     await asUser(ALICE, `INSERT INTO tickets (id, org_id, reporter_id, assignee_id, title) VALUES ('${TICKET}', '${TEAM}', '${ALICE}', '${BOB}', 'T')`);
     expect((await asUser(BOB, `UPDATE tickets SET status = 'doing' WHERE id = '${TICKET}'`)).rowCount).toBe(1);
-    expect(await rejected(BOB, `UPDATE tickets SET title = 'mine' WHERE id = '${TICKET}'`)).toMatch(/only status can be changed/);
+    expect(await rejected(BOB, `UPDATE tickets SET title = 'mine' WHERE id = '${TICKET}'`)).toMatch(/tickets.title cannot be changed/);
     expect(await rejected(ALICE, `UPDATE tickets SET reporter_id = '${BOB}' WHERE id = '${TICKET}'`)).toMatch(/cannot be changed/);
     expect((await asUser(ALICE, `UPDATE tickets SET title = 'Renamed' WHERE id = '${TICKET}'`)).rowCount).toBe(1);
   }, 90_000);
@@ -475,7 +475,7 @@ export default defineSeed(schema, { profiles: [{ id: '${ALICE}', email: 'alice@e
     await resetDatabase();
     rmSync(join(cwd, 'generated'), { recursive: true, force: true });
     await admin.query(`INSERT INTO auth.users (id, email) VALUES ('${ALICE}', 'a@x.io'), ('${BOB}', 'b@x.io')`);
-    writeFileSync(join(cwd, 'accessnexus.schema.ts'), llmsRecipe('same_org_project'));
+    writeFileSync(join(cwd, 'accessnexus.schema.ts'), llmsRecipe("name: 'lock_tenant'"));
     expect((await cli('validate')).json.summary).toEqual({ errors: 0, warnings: 0 });
     expect((await cli('generate')).code).toBe(0);
     expect((await cli('push')).code).toBe(0);
@@ -486,9 +486,9 @@ export default defineSeed(schema, { profiles: [{ id: '${ALICE}', email: 'alice@e
       INSERT INTO org_members (org_id, user_id, role) VALUES ('${ORG_A}', '${ALICE}', 'admin'), ('${ORG_B}', '${BOB}', 'admin');
       INSERT INTO projects (id, org_id, name) VALUES ('${PA}', '${ORG_A}', 'PA'), ('${PB}', '${ORG_B}', 'PB');
     `);
-    expect(await rejected(ALICE, `INSERT INTO tasks (org_id, project_id, title) VALUES ('${ORG_A}', '${PB}', 'sneaky')`)).toMatch(/not found in org/);
+    expect(await rejected(ALICE, `INSERT INTO tasks (org_id, project_id, title) VALUES ('${ORG_A}', '${PB}', 'sneaky')`)).toMatch(/is not in org_id/);
     await asUser(ALICE, `INSERT INTO tasks (org_id, project_id, title) VALUES ('${ORG_A}', '${PA}', 'ok')`);
-    expect(await rejected(ALICE, `UPDATE tasks SET project_id = '${PB}'`)).toMatch(/not found in org|cannot be changed/);
+    expect(await rejected(ALICE, `UPDATE tasks SET project_id = '${PB}'`)).toMatch(/is not in org_id|cannot be changed/);
     expect((await asUser(BOB, 'SELECT * FROM tasks')).rowCount).toBe(0);
   }, 90_000);
 

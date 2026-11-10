@@ -44,10 +44,15 @@ CREATE TRIGGER accessnexus_tasks_audit_log
 CREATE OR REPLACE FUNCTION accessnexus_tasks_lock_identity_fn()
 RETURNS TRIGGER AS $$
 BEGIN
-  IF current_user IN ('anon', 'authenticated')
-     AND (NEW.reporter_id IS DISTINCT FROM OLD.reporter_id OR NEW.org_id IS DISTINCT FROM OLD.org_id) THEN
-    RAISE EXCEPTION 'tasks: reporter_id, org_id cannot be changed'
-      USING ERRCODE = '42501';
+  IF current_user IN ('anon', 'authenticated') THEN
+    IF NEW.reporter_id IS DISTINCT FROM OLD.reporter_id THEN
+      RAISE EXCEPTION '%', 'tasks.' || 'reporter_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || 'reporter_id';
+    END IF;
+    IF NEW.org_id IS DISTINCT FROM OLD.org_id THEN
+      RAISE EXCEPTION '%', 'tasks.' || 'org_id' || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || 'org_id';
+    END IF;
   END IF;
   RETURN NEW;
 END;
@@ -62,15 +67,21 @@ CREATE TRIGGER accessnexus_tasks_lock_identity
 
 CREATE OR REPLACE FUNCTION accessnexus_tasks_assignee_scope_fn()
 RETURNS TRIGGER AS $$
+DECLARE
+  locked_column text;
 BEGIN
-  IF current_user IN ('anon', 'authenticated')
-     AND NOT COALESCE((EXISTS (
+  IF current_user IN ('anon', 'authenticated') AND NOT COALESCE((EXISTS (
   SELECT 1 FROM org_members m
   WHERE m.org_id = OLD.org_id AND m.user_id = (SELECT auth.uid()) AND m.role IN ('admin', 'manager')
-)), FALSE)
-     AND ((to_jsonb(NEW) - ARRAY['status', 'position', 'updated_at']::text[]) IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['status', 'position', 'updated_at']::text[])) THEN
-    RAISE EXCEPTION 'tasks: only status, position can be changed'
-      USING ERRCODE = '42501';
+)), FALSE) THEN
+    SELECT n.key INTO locked_column
+      FROM jsonb_each(to_jsonb(NEW) - ARRAY['status', 'position', 'updated_at']::text[]) AS n
+     WHERE n.value IS DISTINCT FROM (to_jsonb(OLD) -> n.key)
+     ORDER BY n.key LIMIT 1;
+    IF locked_column IS NOT NULL THEN
+      RAISE EXCEPTION '%', 'tasks.' || locked_column || ' cannot be changed'
+        USING ERRCODE = '42501', HINT = 'accessnexus:locked_column:tasks.' || locked_column;
+    END IF;
   END IF;
   RETURN NEW;
 END;

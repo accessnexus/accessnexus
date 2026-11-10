@@ -8,3 +8,4 @@ export * from './rpc.js';
 export * from './seed.js';
 export * from './realtime.js';
 export * from './edge-function.js';
+export * from './enum.js';

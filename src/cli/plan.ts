@@ -43,6 +43,7 @@ export type RiskCode =
   | 'column_type_changed'
   | 'column_default_removed'
   | 'column_nullability_relaxed'
+  | 'column_nullability_tightened'
   | 'rls_disabled'
   | 'policy_dropped'
   | 'policy_roles_widened'
@@ -443,6 +444,9 @@ export function findRiskyChanges(changes: PlanChange[]): RiskyChange[] {
         add('column_default_removed', c, `column ${c.object} loses its default (${fmt(before.default)})`);
       }
       if (changed('notNull') && before.notNull === true) add('column_nullability_relaxed', c, `column ${c.object} becomes nullable`);
+      if (changed('notNull') && before.notNull !== true && after.notNull === true) {
+        add('column_nullability_tightened', c, `column ${c.object} becomes NOT NULL (fails on existing nulls; clients still writing null break)`);
+      }
     }
     if (c.kind === 'rls') {
       if (before.enabled === true && after.enabled !== true) add('rls_disabled', c, `row level security is disabled on ${c.object}`);
