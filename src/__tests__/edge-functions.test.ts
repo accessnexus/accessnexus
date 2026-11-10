@@ -149,7 +149,10 @@ export const b = stripeWebhook(async (input, _ctx, req) => {
     expect(results.flatMap((r) => r.messages.map((m) => `${r.filePath.split('/').slice(-2).join('/')}:${m.line} ${m.ruleId}: ${m.message}`))).toEqual([]);
   }, 60_000);
 
-  describe('at runtime with the real withSupabase', () => {
+  // @supabase/server requires Node >= 22 (its engines field; on Node 20 it cannot
+  // create the Supabase client). The wrappers themselves run on the Edge Runtime.
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  describe.skipIf(nodeMajor < 22)('at runtime with the real withSupabase', () => {
     let mod: any;
     const env = { SUPABASE_URL: 'http://127.0.0.1:54321', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test', SUPABASE_SECRET_KEY: 'sb_secret_test' };
     const saved: Record<string, string | undefined> = {};
