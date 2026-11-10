@@ -86,25 +86,25 @@ import { defineSchema, table, policy, rpc } from '${SRC_INDEX}';
 const own = policy.isOwner('owner_id');
 export default defineSchema({
   // Hidden from other users entirely.
-  notes: table({ columns: { id: 'uuid', owner_id: 'uuid', body: 'text' }, primaryKey: 'id',
+  sdk_notes: table({ columns: { id: 'uuid', owner_id: 'uuid', body: 'text' }, primaryKey: 'id',
     policies: { select: own, insert: own, update: own, delete: own } }),
   // Everyone reads; only the owner writes.
-  posts: table({ columns: { id: 'uuid', owner_id: 'uuid', title: 'text' }, primaryKey: 'id',
+  sdk_posts: table({ columns: { id: 'uuid', owner_id: 'uuid', title: 'text' }, primaryKey: 'id',
     policies: { select: policy.isAuthenticated(), insert: own, update: own, delete: own } }),
   // Soft delete: DELETE sets deleted_at.
-  docs: table({ columns: { id: 'uuid', owner_id: 'uuid', slug: 'text', deleted_at: 'timestamptz?' }, primaryKey: 'id',
+  sdk_docs: table({ columns: { id: 'uuid', owner_id: 'uuid', slug: 'text', deleted_at: 'timestamptz?' }, primaryKey: 'id',
     softDelete: 'deleted_at', policies: { select: policy.isAuthenticated(), insert: own, update: own, delete: own } }),
 }, {
   rpcs: {
-    my_notes: rpc({ returns: { setof: 'notes' }, language: 'sql', volatility: 'stable',
-      body: 'SELECT * FROM notes WHERE owner_id = (SELECT auth.uid());' }),
+    my_notes: rpc({ returns: { setof: 'sdk_notes' }, language: 'sql', volatility: 'stable',
+      body: 'SELECT * FROM sdk_notes WHERE owner_id = (SELECT auth.uid());' }),
   },
 });`);
     expect(await cli('generate', '--output', 'out')).toBe(0);
     expect(await cli('push', '--output', 'out')).toBe(0);
     await admin.query(`NOTIFY pgrst, 'reload schema'`);
     for (let i = 0; i < 50; i++) {
-      const res = await fetch(`${REST_URL}/notes`, { headers: { Authorization: `Bearer ${jwt(ALICE)}` } });
+      const res = await fetch(`${REST_URL}/sdk_notes`, { headers: { Authorization: `Bearer ${jwt(ALICE)}` } });
       if (res.ok) break;
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -121,11 +121,15 @@ export default defineSchema({
     await admin?.end();
   });
 
+  /** NOT_FOUND_OR_DENIED, with the whole response in the failure message. */
+  const expectDenied = (res: any) =>
+    expect(res?.error?.code, `expected NOT_FOUND_OR_DENIED, got ${JSON.stringify(res)}`).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
+
   const seed = async () => {
-    await admin.query('TRUNCATE notes, posts, docs');
-    await admin.query(`INSERT INTO notes (id, owner_id, body) VALUES ('${NOTE}', '${ALICE}', 'n')`);
-    await admin.query(`INSERT INTO posts (id, owner_id, title) VALUES ('${POST}', '${ALICE}', 'p')`);
-    await admin.query(`INSERT INTO docs (id, owner_id, slug) VALUES ('${DOC}', '${ALICE}', 'd')`);
+    await admin.query('TRUNCATE sdk_notes, sdk_posts, sdk_docs');
+    await admin.query(`INSERT INTO sdk_notes (id, owner_id, body) VALUES ('${NOTE}', '${ALICE}', 'n')`);
+    await admin.query(`INSERT INTO sdk_posts (id, owner_id, title) VALUES ('${POST}', '${ALICE}', 'p')`);
+    await admin.query(`INSERT INTO sdk_docs (id, owner_id, slug) VALUES ('${DOC}', '${ALICE}', 'd')`);
   };
   const exists = async (table: string, id: string, live = false) =>
     (await admin.query(`SELECT 1 FROM ${table} WHERE id = $1${live ? ' AND deleted_at IS NULL' : ''}`, [id])).rowCount === 1;
@@ -133,7 +137,7 @@ export default defineSchema({
   it('delete(id): denied or missing is NOT_FOUND_OR_DENIED, allowed is a clean success', async () => {
     await seed();
     const bob = clientAs(BOB);
-    for (const [table, id] of [['notes', NOTE], ['posts', POST]] as const) {
+    for (const [table, id] of [['sdk_notes', NOTE], ['sdk_posts', POST]] as const) {
       const denied = await bob[table].delete(id);
       expect(denied.error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
       expect(sdk.isNotFoundOrDenied(denied.error)).toBe(true);
@@ -141,52 +145,52 @@ export default defineSchema({
       expect(denied.error.details).toEqual({ table, method: 'delete', id });
       expect(await exists(table, id)).toBe(true);
     }
-    const missing = await clientAs(ALICE).notes.delete('dddddddd-0000-0000-0000-000000000009');
+    const missing = await clientAs(ALICE).sdk_notes.delete('dddddddd-0000-0000-0000-000000000009');
     expect(missing.error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
 
-    const ok = await clientAs(ALICE).notes.delete(NOTE);
+    const ok = await clientAs(ALICE).sdk_notes.delete(NOTE);
     expect(ok).toEqual({ data: null, error: null });
-    expect(await exists('notes', NOTE)).toBe(false);
+    expect(await exists('sdk_notes', NOTE)).toBe(false);
   });
 
   it('delete(id) on a soft-delete table: denied is reported, allowed soft-deletes', async () => {
     await seed();
-    const denied = await clientAs(BOB).docs.delete(DOC);
+    const denied = await clientAs(BOB).sdk_docs.delete(DOC);
     expect(denied.error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
-    expect(await exists('docs', DOC, true)).toBe(true);
-    const ok = await clientAs(ALICE).docs.delete(DOC);
+    expect(await exists('sdk_docs', DOC, true)).toBe(true);
+    const ok = await clientAs(ALICE).sdk_docs.delete(DOC);
     expect(ok.error).toBeNull();
-    expect(await exists('docs', DOC, true)).toBe(false);
-    expect(await exists('docs', DOC)).toBe(true); // soft-deleted, still in the table
-    const again = await clientAs(ALICE).docs.delete(DOC);
+    expect(await exists('sdk_docs', DOC, true)).toBe(false);
+    expect(await exists('sdk_docs', DOC)).toBe(true); // soft-deleted, still in the table
+    const again = await clientAs(ALICE).sdk_docs.delete(DOC);
     expect(again.error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
   });
 
   it('update / updateOne / deleteOne: no changed row is NOT_FOUND_OR_DENIED', async () => {
     await seed();
     const bob = clientAs(BOB);
-    expect((await bob.notes.update(NOTE, { body: 'x' })).error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
-    expect((await bob.posts.update(POST, { title: 'x' })).error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
-    expect((await bob.posts.updateOne({ id: POST }, { title: 'x' })).error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
-    expect((await bob.posts.deleteOne({ id: POST })).error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
-    expect((await bob.docs.deleteOne({ slug: 'd' })).error?.code).toBe('ACCESSNEXUS_NOT_FOUND_OR_DENIED');
-    expect((await admin.query('SELECT title FROM posts')).rows[0].title).toBe('p');
+    expectDenied(await bob.sdk_notes.update(NOTE, { body: 'x' }));
+    expectDenied(await bob.sdk_posts.update(POST, { title: 'x' }));
+    expectDenied(await bob.sdk_posts.updateOne({ id: POST }, { title: 'x' }));
+    expectDenied(await bob.sdk_posts.deleteOne({ id: POST }));
+    expectDenied(await bob.sdk_docs.deleteOne({ slug: 'd' }));
+    expect((await admin.query('SELECT title FROM sdk_posts')).rows[0].title).toBe('p');
 
     const alice = clientAs(ALICE);
-    const updated = await alice.notes.update(NOTE, { body: 'y' });
+    const updated = await alice.sdk_notes.update(NOTE, { body: 'y' });
     expect(updated.error).toBeNull();
     expect(updated.data).toMatchObject({ id: NOTE, body: 'y' });
-    expect((await alice.posts.updateOne({ id: POST }, { title: 'z' }, { columns: ['id', 'title'] })).data).toEqual({ id: POST, title: 'z' });
-    const soft = await alice.docs.deleteOne({ slug: 'd' }, { columns: ['id', 'slug'] });
+    expect((await alice.sdk_posts.updateOne({ id: POST }, { title: 'z' }, { columns: ['id', 'title'] })).data).toEqual({ id: POST, title: 'z' });
+    const soft = await alice.sdk_docs.deleteOne({ slug: 'd' }, { columns: ['id', 'slug'] });
     expect(soft).toEqual({ data: { id: DOC, slug: 'd' }, error: null });
-    expect(await exists('docs', DOC, true)).toBe(false);
+    expect(await exists('sdk_docs', DOC, true)).toBe(false);
     // Many-row writes keep returning [] when nothing matches.
-    expect(await bob.posts.updateMany({ owner_id: ALICE }, { title: 'x' })).toMatchObject({ data: [], error: null });
+    expect(await bob.sdk_posts.updateMany({ owner_id: ALICE }, { title: 'x' })).toMatchObject({ data: [], error: null });
   });
 
   it('an INSERT rejected by RLS is isAccessDenied (42501)', async () => {
     await seed();
-    const res = await clientAs(BOB).notes.create({ id: 'eeeeeeee-0000-0000-0000-000000000005', owner_id: ALICE, body: 'x' });
+    const res = await clientAs(BOB).sdk_notes.create({ id: 'eeeeeeee-0000-0000-0000-000000000005', owner_id: ALICE, body: 'x' });
     expect(res.error?.code).toBe('42501');
     expect(sdk.isAccessDenied(res.error)).toBe(true);
     expect(sdk.isNotFoundOrDenied(res.error)).toBe(false);
