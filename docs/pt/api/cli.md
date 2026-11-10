@@ -255,7 +255,7 @@ npx accessnexus migration discard --target staging
 npx accessnexus migration amend --target staging --json   # descarta + generate
 ```
 
-O resultado JSON tem `discarded` (o arquivo da migration), `restoredTo` (a migration anterior, ou `null` quando o snapshot foi removido e o próximo `generate` grava um novo `__init`), `checkedDatabase` (URL com a senha ocultada, ou `null` com `--force`) `refreshed` / `stale` (no `discard`: os arquivos derivados de SDK e SQL que ele reescreveu porque o schema já bate com o estado restaurado, ou os que ainda carregam a mudança descartada — reverta o schema e rode `generate`) e `regenerated`: `null` no `discard`; no `amend`, a migration que o `generate` gravou (`null` quando o schema bate com o estado restaurado). O `amend` também devolve `generate` (o resultado completo do `generate`).
+O resultado JSON tem `discarded` (o arquivo da migration), `restoredTo` (a migration anterior, ou `null` quando o snapshot foi removido e o próximo `generate` grava um novo `__init`), `checkedDatabase` (URL com a senha ocultada, ou `null` com `--force`) `refreshed` / `stale` (no `discard`: os arquivos derivados de SDK e SQL que ele reescreveu porque o schema já bate com o estado restaurado, ou os que mudaram junto com a migration descartada e ainda a carregam — reverta o schema e rode `generate`) e `regenerated`: `null` no `discard`; no `amend`, a migration que o `generate` gravou (`null` quando o schema bate com o estado restaurado). O `amend` também devolve `generate` (o resultado completo do `generate`).
 
 ### migration data {#migration-data}
 

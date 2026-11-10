@@ -57,6 +57,8 @@ interface MigrationSnapshotV3 {
   readonly schemaHash: string;
   readonly schemaState: SchemaState;
   readonly lastMigrationFile: string;
+  /** Derived files (SDK, policies, ...) that changed together with this migration. */
+  readonly derivedChanged?: readonly string[];
   /**
    * The states before the current one, oldest first (one per earlier migration),
    * so `migration discard` can restore the previous state. Absent in snapshots
@@ -68,6 +70,7 @@ interface MigrationSnapshotV3 {
 /** The schema state right after one migration. */
 interface SnapshotState {
   readonly lastMigrationFile: string;
+  readonly derivedChanged?: readonly string[];
   readonly definitionHash: string;
   readonly schemaHash: string;
   readonly schemaState: SchemaState;
@@ -135,6 +138,7 @@ export function resolveVersionedMigrations(
   const history: SnapshotState[] = snapshot.version === 3
     ? [...(snapshot.history ?? []), {
         lastMigrationFile: snapshot.lastMigrationFile,
+        ...(snapshot.derivedChanged ? { derivedChanged: snapshot.derivedChanged } : {}),
         definitionHash: snapshot.definitionHash,
         schemaHash: snapshot.schemaHash,
         schemaState: snapshot.schemaState,
@@ -1016,13 +1020,14 @@ export function lastSnapshotMigration(outputBase: string): string | null {
  * so the next generate diffs from there. The caller checks it was never applied.
  * Throws when the snapshot cannot be restored (written before history existed).
  */
-export function discardLastMigration(outputBase: string): { discarded: string; restoredTo: string | null } {
+export function discardLastMigration(outputBase: string): { discarded: string; restoredTo: string | null; derivedChanged: string[] | null } {
   const snapshotPath = resolve(outputBase, '.snapshot.json');
   const snapshot = readMigrationSnapshot(snapshotPath);
   if (!snapshot || snapshot.version !== 3) {
     throw new Error('NO_SNAPSHOT');
   }
   const discarded = snapshot.lastMigrationFile;
+  const derivedChanged = snapshot.derivedChanged ? [...snapshot.derivedChanged] : null;
   const history = [...(snapshot.history ?? [])];
   const previous = history.pop();
   const isInit = /__init\.sql$/.test(discarded);
@@ -1033,14 +1038,14 @@ export function discardLastMigration(outputBase: string): { discarded: string; r
   if (existsSync(migrationPath)) unlinkSync(migrationPath);
   if (!previous) {
     unlinkSync(snapshotPath);
-    return { discarded, restoredTo: null };
+    return { discarded, restoredTo: null, derivedChanged };
   }
   writeFileSync(snapshotPath, stringifySnapshot({
     version: 3,
     ...previous,
     ...(history.length > 0 ? { history } : {}),
   }));
-  return { discarded, restoredTo: previous.lastMigrationFile };
+  return { discarded, restoredTo: previous.lastMigrationFile, derivedChanged };
 }
 
 /** Does `schema` generate exactly the state the migration snapshot records (no pending DDL)? */

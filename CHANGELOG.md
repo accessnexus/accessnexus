@@ -4,6 +4,14 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.4-next] - 2026-11-10
+
+### Fixed
+
+- `migration discard`: `stale` lists only the derived files that changed together with the
+  discarded migration, not every derived file. The snapshot of each new migration records them
+  as `derivedChanged`. Older snapshots still list every derived file.
+
 ## [0.4.3-next] - 2026-11-10
 
 Third round of the field report.

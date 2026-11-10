@@ -369,8 +369,11 @@ async function runMigrationDiscard(opts: ParsedFlags, regenerate: boolean): Prom
   }
 
   let restoredTo: string | null;
+  let derivedChanged: string[] | null = null;
   try {
-    restoredTo = discardLastMigration(outputBase).restoredTo;
+    const discardResult = discardLastMigration(outputBase);
+    restoredTo = discardResult.restoredTo;
+    derivedChanged = discardResult.derivedChanged;
   } catch (err) {
     if ((err as Error).message === 'HISTORY_MISSING') {
       throw new CliError('MIGRATION_HISTORY_MISSING', `The snapshot has no record of the state before ${display}`, {
@@ -402,7 +405,10 @@ async function runMigrationDiscard(opts: ParsedFlags, regenerate: boolean): Prom
       log(`  ${paint.green('✓')} The schema matches the restored state: ${written.length > 0 ? `refreshed ${written.length} derived file(s)` : 'derived files already match'}.\n`);
       return { ...result, regenerated: null, refreshed: written, stale: [] };
     }
-    const stale = derived.flatMap((group) => group.files).filter((file) => existsSync(file.absolutePath)).map((file) => file.displayPath);
+    // Only the files that changed together with the discarded migration (recorded in its
+    // snapshot); snapshots written before that record list every derived file.
+    const existing = derived.flatMap((group) => group.files).filter((file) => existsSync(file.absolutePath)).map((file) => file.displayPath);
+    const stale = derivedChanged ? existing.filter((path) => derivedChanged!.includes(path)) : existing;
     log(`  ${paint.yellow('!')} The schema still contains the discarded change, and so do the SDK and SQL files generated from it.`);
     log(`  ${paint.gray('Revert the change in the schema, then run `npx accessnexus generate` (or `migration amend` to regenerate the migration too).')}\n`);
     return {
@@ -2555,6 +2561,7 @@ function collectGeneratedOutputs(schema: SchemaDef, adapter: SupabaseAdapter, co
     }
   }
 
+  recordDerivedChanges(groups);
   return groups;
 }
 
@@ -3006,4 +3013,28 @@ async function waitForStableConnection(url: string, name: string): Promise<void>
 function pendingMigrationName(display: string, absolute: string): string {
   if (existsSync(absolute)) return display;
   return display.replace(/(^|\/)\d{14}__([^/]+\.sql)$/, '$1<pending>__$2');
+}
+
+/**
+ * When this generate writes a new migration, note in its snapshot which derived
+ * files (SDK, policies, triggers, RPCs, functions) change together with it, so
+ * `migration discard` can name exactly those as stale.
+ */
+function recordDerivedChanges(groups: GeneratedGroup[]): void {
+  const migrations = groups.find((group) => group.category === 'migrations');
+  const snapshot = migrations?.files.find((file) => file.absolutePath.endsWith('.snapshot.json'));
+  const newMigration = migrations?.files.some((file) => file.absolutePath.endsWith('.sql') && !existsSync(file.absolutePath));
+  if (!snapshot || !newMigration) return;
+  const derivedChanged = groups
+    .filter((group) => group.category !== 'migrations')
+    .flatMap((group) => group.files)
+    .filter((file) => {
+      const existing = existsSync(file.absolutePath) ? readFileSync(file.absolutePath, 'utf-8') : undefined;
+      return existing === undefined || stripVolatileHeader(existing) !== stripVolatileHeader(file.content);
+    })
+    .map((file) => file.displayPath)
+    .sort();
+  const data = JSON.parse(snapshot.content) as Record<string, unknown>;
+  data.derivedChanged = derivedChanged;
+  (snapshot as { content: string }).content = `${JSON.stringify(data, null, 2)}\n`;
 }

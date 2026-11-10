@@ -114,7 +114,8 @@ describe('migration discard (no database)', () => {
     expect((await cli('generate')).code).toBe(0);
     const ahead = await cli('migration', 'discard', '--force');
     expect(ahead.json.refreshed).toEqual([]);
-    expect(ahead.json.stale).toContain('generated/sdk/types.ts');
+    // Only what changed together with the discarded migration, not every derived file.
+    expect(ahead.json.stale).toEqual(['generated/sdk/types.ts']);
     expect(ahead.json.hint).toMatch(/revert it and run/);
     writeSchema();
     expect((await cli('generate')).code).toBe(0);
