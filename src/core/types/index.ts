@@ -7,3 +7,4 @@ export * from './triggers.js';
 export * from './rpc.js';
 export * from './seed.js';
 export * from './realtime.js';
+export * from './edge-function.js';

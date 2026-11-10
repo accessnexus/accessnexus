@@ -177,6 +177,10 @@ O `validate` não consegue provar que uma policy expressa o que você quis dizer
 
 Uma tabela com `realtime: true` entrega uma mudança só aos assinantes cuja policy de SELECT mostra a linha. As regras de canal viram policies de RLS em `realtime.messages`; com `table`, entrar também exige que o usuário consiga dar SELECT na linha que o tópico nomeia, checado como esse usuário. Um tópico malformado é negado, nunca vira erro. O `push` só remove policies de canal com nomes `<prefix>_rt_` próprios dele. Veja [Realtime](/pt/guide/realtime).
 
+### Edge Functions checam quem chama primeiro {#edge-functions-check-the-caller-first}
+
+Cada função declarada roda atrás do `withSupabase` (`@supabase/server`): uma requisição sem a credencial que o `auth` dela exige recebe `401` antes de o seu código rodar, e o `verify_jwt` continua ligado, a menos que a função aceite `'none'` (o `validate` avisa `EDGE_FUNCTION_PUBLIC`). O corpo JSON é validado contra `input` antes de o handler vê-lo; `ctx.supabase` roda como quem chama, então o RLS continua decidindo. Exceções inesperadas respondem um `500` genérico. Veja [Edge Functions](/pt/guide/edge-functions).
+
 ## O que o AccessNexus não protege {#what-accessnexus-does-not-protect}
 
 ::: warning Fora do alcance do gerador
@@ -190,6 +194,7 @@ Uma tabela com `realtime: true` entrega uma mudança só aos assinantes cuja pol
 - **Linhas com soft delete.** Elas continuam visíveis pelo RLS; só o SDK as filtra. Adicione `deleted_at IS NULL` ao `select` se leituras diretas pela API não devem vê-las.
 - **Deletes no Realtime.** O Supabase não aplica RLS a eventos DELETE: todo assinante de uma tabela publicada os recebe, só com a primary key. Não codifique segredos em primary keys de tabelas publicadas.
 - **Canais públicos do Realtime.** Policies em `realtime.messages` só valem para canais privados (os `channels.*` do SDK são privados). Desative o acesso público nas configurações de Realtime do projeto para que clients não possam entrar num tópico como público.
+- **Código de Edge Function que você escreve.** `ctx.supabaseAdmin` ignora o RLS: quando um handler o usa, filtrar por `ctx.userClaims` é com você. Funções com `auth: 'none'` precisam autenticar a requisição por conta própria (por exemplo, uma assinatura de webhook).
 :::
 
 ## Veja também {#related}
@@ -197,6 +202,7 @@ Uma tabela com `realtime: true` entrega uma mudança só aos assinantes cuja pol
 - [Policies](/pt/guide/policies) e [Permissões](/pt/guide/permissions)
 - [RPCs](/pt/guide/rpcs): checando quem chama em código definer
 - [Realtime](/pt/guide/realtime): publication e autorização de canais
+- [Edge Functions](/pt/guide/edge-functions): handlers tipados e validados
 - [Exemplos](/pt/guide/cookbook): as regras acima, aplicadas
 - [Projetos existentes](/pt/guide/existing-project): como as policies importadas continuam fail-closed
 - [Solução de problemas](/pt/guide/troubleshooting)

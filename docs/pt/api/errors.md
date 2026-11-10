@@ -207,3 +207,13 @@ As RPCs também produzem `INVALID_IDENTIFIER` (nome ou nome de argumento), `UNKN
 | `CHANNEL_CLOSED` | warning | `channels.<name>` | O canal não tem regra de receive nem de send. | Adicione regras, ou remova o canal. |
 
 Os canais também produzem `INVALID_IDENTIFIER` (nome fora de snake_case ou com mais de 40 caracteres), `UNKNOWN_TABLE` (`table`), `INVALID_POLICY_RULE`, `EMPTY_COMBINATOR` e `UNWRAPPED_AUTH_CALL` (`policy.custom`).
+
+### Edge Functions {#edge-functions}
+
+| Código | Severidade | Path | Significado | Correção |
+| --- | --- | --- | --- | --- |
+| `INVALID_EDGE_FUNCTION` | error | `functions...` | `functions` não é um objeto; um nome não é feito de letras minúsculas/dígitos unidos por `-` ou `_` (ou tem mais de 63 caracteres); dois nomes dão o mesmo nome camelCase no SDK; opção desconhecida; `auth` não é `'user'`, `'publishable'`, `'secret'`, `'none'` nem um array não vazio deles com `'none'` por último; `input` / `output` não é um objeto (ou, em `output`, um tipo ou `'void'`). | Corrija a opção citada na mensagem. |
+| `EDGE_FUNCTION_PUBLIC` | warning | `functions.<name>.auth` | A função aceita chamadas sem nenhuma credencial (`verify_jwt = false`). | Mantenha para webhooks que verificam uma assinatura; caso contrário use `'user'` ou `'secret'`. |
+| `TABLE_NAME_CLASH` | error | `functions` ou `channels` | Uma tabela tem o mesmo nome de `client.functions` / `client.channels` do SDK, que o schema também declara. | Renomeie a tabela. |
+
+Nomes de campo são checados como `INVALID_IDENTIFIER` e tipos de campo / de saída como `UNKNOWN_COLUMN_TYPE` (`varchar(n)` é aceito).

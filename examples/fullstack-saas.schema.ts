@@ -2,7 +2,7 @@
 // AccessNexus - Full Example Schema
 // Project Management SaaS (multi-tenant)
 // Demonstrates ALL features: policies, permissions,
-// triggers, RPCs, seed, soft delete, enums, refs, Realtime
+// triggers, RPCs, seed, soft delete, enums, refs, Realtime, Edge Functions
 //
 // In your project, import from 'accessnexus' instead of '../src/index.js':
 //   import { defineSchema, table, policy, ... } from 'accessnexus';
@@ -12,6 +12,7 @@ import {
   channel,
   definePermissions,
   defineSchema,
+  edgeFunction,
   policy,
   rpc,
   table,
@@ -526,6 +527,20 @@ const schema = defineSchema({
       table: 'organizations',
       broadcast: { receive: true, send: policy.hasRole('admin') },
     }),
+  },
+
+  // ============================================
+  // 5. Edge Functions (typed, validated handlers + client.functions.*)
+  // ============================================
+  functions: {
+    // Called by signed-in members; ctx.supabase runs as the caller (RLS applies).
+    'invite-member': edgeFunction({
+      auth: 'user',
+      input: { org_id: 'uuid', email: 'text', role: "enum('admin','manager','member')", message: 'text?' },
+      output: { invitation_id: 'uuid' },
+    }),
+    // Called by a scheduler / your backend with the project's secret key, never by browsers.
+    'send-digest': edgeFunction({ auth: 'secret', input: { org_id: 'uuid' }, output: 'void' }),
   },
 });
 

@@ -341,7 +341,13 @@ writes are `TO public` only for an explicit `policy.public()`.
   presence: { ... } })` turns Broadcast/Presence rules into RLS policies on `realtime.messages`
   (with `table`, only users who can read that row may join) and adds `db.channels.<name>(id)`
   (a private supabase-js channel). See the [Realtime guide](https://accessnexus.github.io/accessnexus/guide/realtime).
-- **`defineConfig`** (`accessnexus.config.ts`) — `schema`, `seed`, `output.{dir,migrations,policies,triggers,rpcs,sdk}`, `adapter` (default `supabase`), `adapterOptions`, `naming.policyPrefix` (default `accessnexus`), `generate.{sqlOnly,sdkOnly}`, `targets` (for `--target`).
+- **Edge Functions** — `defineSchema(tables, { functions: { 'invite-member': edgeFunction({ auth:
+  'user', input: { email: 'text' }, output: { invitation_id: 'uuid' } }) } })` generates a typed
+  wrapper on `withSupabase` (`@supabase/server`) that checks credentials, validates the JSON body
+  and hands your handler an RLS-scoped client, scaffolds `supabase/functions/<name>/index.ts` once,
+  sets `verify_jwt` in `supabase/config.toml`, and adds `db.functions.inviteMember(input)`.
+  See the [Edge Functions guide](https://accessnexus.github.io/accessnexus/guide/edge-functions).
+- **`defineConfig`** (`accessnexus.config.ts`) — `schema`, `seed`, `output.{dir,migrations,policies,triggers,rpcs,sdk,functions}`, `adapter` (default `supabase`), `adapterOptions`, `naming.policyPrefix` (default `accessnexus`), `generate.{sqlOnly,sdkOnly}`, `targets` (for `--target`).
 - **`defineSeed`** — manual `defineSeed(schema, data)` or Database-mode `defineSeed<DB>(data)`.
   Users referenced through `auth.users` FKs are created with a random password
   (`ACCESSNEXUS_SEED_PASSWORD` to choose one locally); hosted Supabase needs `--allow-remote-seed`.

@@ -4,6 +4,39 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-11-10
+
+### Added
+
+- Supabase Edge Functions, from the schema:
+  - `edgeFunction({ auth, input, output })` and `defineSchema(tables, { functions })` declare each
+    function by name (`'invite-member'`). `auth` is `'user'` (default), `'publishable'`,
+    `'secret'`, `'none'` or an array of them (the `withSupabase` modes of `@supabase/server`).
+    `input` / `output` use column types (`'uuid'`, `'text?'`, `"enum('a','b')"`,
+    `'varchar(20)'`, ...).
+  - `generate` writes `supabase/functions/_shared/accessnexus.ts`, which is derived. Each
+    function gets a `<camelName>(handler)` wrapper on `withSupabase`. The wrapper rejects callers
+    without the required credential and answers CORS. It requires POST and validates the JSON body
+    field by field (`400 invalid_input` with `issues`) before calling `handler(input, ctx, req)`,
+    where `ctx.supabase` runs as the caller under RLS. It maps the return value to JSON (`204` when
+    nothing is returned), `FunctionError` to its status, and any other exception to a generic `500`.
+    Without `input`, the raw body is left to the handler, for webhook signatures.
+  - `generate` also scaffolds `supabase/functions/<name>/index.ts` once, when the file is missing.
+    Generated files may now be marked `overwrite: false`: created when missing, never compared or
+    replaced after.
+  - `supabase/config.toml`, when it exists, gets a managed block of
+    `[functions.<name>] verify_jwt = ...`. It is `false` only when `auth` accepts `'none'`. Tables
+    the user already set outside the block are left alone, with a note in the block.
+  - New config option `output.functions` (default `./supabase/functions`) and new output category
+    `functions`.
+  - SDK: `client.functions.<camelName>(input, { headers?, region? })` calls
+    `supabase.functions.invoke` with POST, with typed input and output. New exported types
+    `<Name>Input`, `<Name>Output` and `FunctionInvokeOptions`. React Query adds
+    `q.functions.<name>.query(input)` / `.mutation()`.
+  - `validate`: `INVALID_EDGE_FUNCTION` and `TABLE_NAME_CLASH` (errors), and
+    `EDGE_FUNCTION_PUBLIC` (warning). `validate --json` adds `functions`.
+- Exported types `EdgeFunctionAuth`, `EdgeFunctionDef` and `EdgeFunctionFields`.
+
 ## [0.3.0] - 2026-11-10
 
 ### Added

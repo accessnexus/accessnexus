@@ -177,6 +177,10 @@ The complete list, with fixes, is in [Troubleshooting](/guide/troubleshooting#sc
 
 A table with `realtime: true` delivers a change only to subscribers whose SELECT policy shows the row. Channel rules become RLS policies on `realtime.messages`; with `table`, joining also requires that the user can SELECT the row the topic names, checked as that user. A malformed topic is denied, never an error. `push` only drops channel policies with its own `<prefix>_rt_` names. See [Realtime](/guide/realtime).
 
+### Edge Functions check the caller first
+
+Each declared function runs behind `withSupabase` (`@supabase/server`): a request without the credential its `auth` requires gets `401` before your code runs, and `verify_jwt` stays on unless the function accepts `'none'` (`validate` warns `EDGE_FUNCTION_PUBLIC`). The JSON body is validated against `input` before the handler sees it; `ctx.supabase` runs as the caller, so RLS still decides. Unexpected exceptions answer a generic `500`. See [Edge Functions](/guide/edge-functions).
+
 ## What AccessNexus does not protect
 
 ::: warning Outside the generator's reach
@@ -189,6 +193,7 @@ A table with `realtime: true` delivers a change only to subscribers whose SELECT
 - **Supabase's default grants.** Tables and invoker RPCs keep Supabase's default grants (`anon` and `authenticated` can call them); RLS is what protects the rows inside.
 - **Soft-deleted rows.** They stay visible through RLS; only the SDK filters them. Add `deleted_at IS NULL` to `select` if raw API reads must not see them.
 - **Realtime deletes.** Supabase does not apply RLS to DELETE events: every subscriber of a published table receives them, with the primary key only. Do not encode secrets in primary keys of published tables.
+- **Edge Function code you write.** `ctx.supabaseAdmin` bypasses RLS: when a handler uses it, filtering by `ctx.userClaims` is your job. Functions with `auth: 'none'` must authenticate the request themselves (for example a webhook signature).
 - **Public Realtime channels.** Policies on `realtime.messages` only apply to private channels (the SDK's `channels.*` are private). Turn off public access in the project's Realtime settings so clients cannot join a topic as public.
 :::
 
@@ -197,6 +202,7 @@ A table with `realtime: true` delivers a change only to subscribers whose SELECT
 - [Policies](/guide/policies) and [Permissions](/guide/permissions)
 - [RPCs](/guide/rpcs): checking the caller in definer code
 - [Realtime](/guide/realtime): publication and channel authorization
+- [Edge Functions](/guide/edge-functions): typed, validated handlers
 - [Examples](/guide/cookbook): the rules above, applied
 - [Existing projects](/guide/existing-project): how imported policies are kept fail-closed
 - [Troubleshooting](/guide/troubleshooting)

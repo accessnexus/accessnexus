@@ -231,6 +231,18 @@ room.on('broadcast', { event: 'cursor' }, ({ payload }) => draw(payload)).subscr
 `change` is `RealtimeChange<Row>`: `{ eventType, new, old, schema, table, commit_timestamp, errors }`, where `new` is the row on INSERT/UPDATE (empty on DELETE) and `old` holds the primary key (RLS tables send no more). `client.channels.<name>(param)` returns `ChannelOf<TClient>`: the `RealtimeChannel` type of the Supabase client you passed in.
 
 
+## Edge Functions
+
+Functions declared with [`edgeFunction()`](/api/edge-functions) appear under `client.functions`, camelCased (`invite-member` → `inviteMember`). See the [Edge Functions guide](/guide/edge-functions).
+
+```ts
+const { data, error } = await db.functions.inviteMember({ org_id: orgId, email, role: 'member' });
+// data: InviteMemberOutput | null; on failure: await error.context.json() → { error: { code, message, issues? } }
+```
+
+Each call is `supabase.functions.invoke('<name>', { body: input, method: 'POST', headers?, region? })`, so the signed-in user's JWT goes along. `client.ts` exports `<Name>Input`, `<Name>Output` and `FunctionInvokeOptions`.
+
+
 ## TanStack Query (React Query)
 
 With `adapterOptions: { reactQuery: true }`, `generate` also writes `react-query.ts` next to `client.ts`: query keys, `queryOptions` for every read and mutation options for every write and RPC, wrapping the generated client. It needs `@tanstack/react-query` v5 in your app (`npm i @tanstack/react-query`); AccessNexus itself does not depend on it. The file is the same in manual and Database mode.
@@ -256,6 +268,7 @@ export function Tasks({ projectId }: { projectId: string }) {
 | `q.<table>.findMany / findOne / findById(...)` | `queryOptions({ queryKey, queryFn })` | Same arguments and generics as the client (`columns`, `include` narrow `data`). Works with `useQuery`, `useSuspenseQuery`, `prefetchQuery`, `getQueryData(...queryKey)`. |
 | `q.<table>.create / update / delete / updateOne / updateMany / deleteOne / deleteMany()` | `{ mutationKey, mutationFn, onSuccess }` | Variables: `create(row)`, `update({ id, data })`, `delete(id)`, `updateOne/updateMany({ filter, data })`, `deleteOne/deleteMany(filter)`. The empty-filter guard of the client still throws. |
 | `q.rpc.<name>.query(args)` / `q.rpc.<name>.mutation()` | query / mutation options | Use `query` for reads, `mutation` for writes (it invalidates every AccessNexus query). |
+| `q.functions.<name>.query(input)` / `q.functions.<name>.mutation()` | query / mutation options | Edge Functions; the mutation invalidates every AccessNexus query. |
 | `q.<table>.invalidateOnChange({ event?, filter? })` | `() => void` | Only on `realtime: true` tables: subscribes and invalidates the table (and the tables that embed it) on every change. Needs `queryClient`. Use in an effect: `useEffect(() => q.tasks.invalidateOnChange(), [])`. |
 | `accessNexusKeys` | key factory | `accessNexusKeys.<table>.all` = `['accessnexus', '<table>']`; `list`, `one`, `byId` and `rpc.<name>` below it. |
 

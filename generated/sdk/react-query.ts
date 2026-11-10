@@ -8,7 +8,7 @@ import { queryOptions, type QueryClient } from '@tanstack/react-query';
 import type { AccessNexusClient, AccessNexusProvider, ColumnsOf, OrganizationsInclude, OrgMembersInclude, ProjectsInclude, TasksInclude, CommentsInclude, InvitationsInclude } from './client.js';
 
 type Client = AccessNexusClient;
-type TableKey = Exclude<keyof Client, 'auth' | 'rpc' | 'channels'>;
+type TableKey = Exclude<keyof Client, 'auth' | 'rpc' | 'channels' | 'functions'>;
 type FilterOf<K extends TableKey> = NonNullable<Parameters<Client[K]['findMany']>[0]>;
 type CreateOf<K extends TableKey> = Parameters<Client[K]['create']>[0];
 type UpdateOf<K extends TableKey> = Parameters<Client[K]['update']>[1];
@@ -88,6 +88,11 @@ export const accessNexusKeys = {
     get_org_dashboard: (args?: unknown) => ['accessnexus', 'rpc', 'get_org_dashboard', args ?? {}] as const,
     accept_invitation: (args?: unknown) => ['accessnexus', 'rpc', 'accept_invitation', args ?? {}] as const,
     search_tasks: (args?: unknown) => ['accessnexus', 'rpc', 'search_tasks', args ?? {}] as const,
+  },
+  functions: {
+    all: ['accessnexus', 'functions'] as const,
+    inviteMember: (input?: unknown) => ['accessnexus', 'functions', 'invite-member', input ?? {}] as const,
+    sendDigest: (input?: unknown) => ['accessnexus', 'functions', 'send-digest', input ?? {}] as const,
   },
 };
 
@@ -598,6 +603,34 @@ export function createAccessNexusQueries<TClient extends AccessNexusProvider>(
         mutation: () => ({
           mutationKey: [...accessNexusKeys.rpc.all, 'search_tasks'] as const,
           mutationFn: (args: Parameters<Client['rpc']['search_tasks']>[0]) => unwrap(client.rpc.search_tasks(args)),
+          onSuccess: invalidate(accessNexusKeys.all),
+        }),
+      },
+    },
+
+    // Each Edge Function as a query and as a mutation (invalidates every query).
+    functions: {
+      inviteMember: {
+        query: (...args: Parameters<Client['functions']['inviteMember']>) =>
+          queryOptions({
+            queryKey: accessNexusKeys.functions.inviteMember(args[0]),
+            queryFn: () => unwrap(client.functions.inviteMember(...args)),
+          }),
+        mutation: () => ({
+          mutationKey: [...accessNexusKeys.functions.all, 'invite-member'] as const,
+          mutationFn: (input: Parameters<Client['functions']['inviteMember']>[0]) => unwrap(client.functions.inviteMember(input)),
+          onSuccess: invalidate(accessNexusKeys.all),
+        }),
+      },
+      sendDigest: {
+        query: (...args: Parameters<Client['functions']['sendDigest']>) =>
+          queryOptions({
+            queryKey: accessNexusKeys.functions.sendDigest(args[0]),
+            queryFn: () => unwrap(client.functions.sendDigest(...args)),
+          }),
+        mutation: () => ({
+          mutationKey: [...accessNexusKeys.functions.all, 'send-digest'] as const,
+          mutationFn: (input: Parameters<Client['functions']['sendDigest']>[0]) => unwrap(client.functions.sendDigest(input)),
           onSuccess: invalidate(accessNexusKeys.all),
         }),
       },

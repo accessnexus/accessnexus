@@ -282,7 +282,7 @@ interface ErrorResult {
   version: string;
   error: { code: string; message: string; hint?: string; stack?: string /* --verbose */ };
   // SCHEMA_VALIDATION_FAILED adds: schemaPath, issues (errors and warnings), summary { errors, warnings }
-  //   (validate also adds mode, tables, rpcs, channels)
+  //   (validate also adds mode, tables, rpcs, channels, functions)
   [partial: string]: unknown;
 }
 
@@ -308,6 +308,7 @@ interface ValidateResult {
   }>;
   rpcs: string[];
   channels: string[];                                     // defineSchema(..., { channels })
+  functions: string[];                                    // defineSchema(..., { functions })
   issues: SchemaIssue[];                                  // warnings only
   summary: { errors: number; warnings: number };
 }
@@ -318,7 +319,7 @@ interface GenerateResult {
   mode: 'manual' | 'database';
   files: Array<{
     path: string;
-    category: 'migrations' | 'policies' | 'triggers' | 'rpcs' | 'sdk';
+    category: 'migrations' | 'policies' | 'triggers' | 'rpcs' | 'sdk' | 'functions';
     status: 'created' | 'updated' | 'unchanged';
   }>;
   destructive: DestructiveStatement[];                    // in migrations written by this run

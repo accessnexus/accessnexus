@@ -66,6 +66,8 @@ empty folder `init --yes` first creates a minimal `package.json` (`"type": "modu
 - `generated/migrations/` — `<timestamp>__init.sql`, `<timestamp>__changes.sql`, `.snapshot.json`.
 - `generated/policies/<table>_rls.sql` (+ `generated/policies/realtime.sql` when the schema uses
   Realtime), `generated/triggers/<table>_triggers.sql`, `generated/rpcs/rpcs.sql`.
+- `supabase/functions/_shared/accessnexus.ts` (derived) and `supabase/functions/<name>/index.ts`
+  (scaffolded once, then user code) when the schema declares Edge Functions.
 - `generated/sdk/` (or `output.sdk`) — `types.ts` + `client.ts` (derived, never edit).
 - The client wrapper `init` writes next to them (`index.ts`, or `server.ts` + `browser.ts`
   on Next.js) is YOUR file: `generate` never touches it; edit env var names freely.
@@ -535,6 +537,61 @@ exactly ONE column (Realtime limit): `{ project_id: id }` (eq), `{ status: ['a',
 `init --db-url` imports published tables as `realtime: true` and lists (does not import)
 existing `realtime.messages` policies.
 
+## Edge Functions (typed, validated handlers)
+
+`defineSchema(tables, { functions: { '<name>': edgeFunction({ auth, input, output }) } })`.
+`generate` writes (folder `output.functions`, default `./supabase/functions`):
+- `_shared/accessnexus.ts` (DERIVED — never edit): per function `<Name>Input`, `<Name>Output` and a
+  wrapper `<camelName>(handler)` built on `withSupabase` from `npm:@supabase/server@1`: it rejects
+  callers without the credential `auth` requires (401), answers CORS, requires POST + a JSON object
+  of exactly the `input` fields (400 `invalid_json` / `invalid_input` with `issues[]`), then calls
+  `handler(input, ctx, req)`. `ctx.supabase` runs AS THE CALLER (RLS applies); `ctx.supabaseAdmin`
+  bypasses RLS (filter by `ctx.userClaims` yourself). Return the output (JSON; nothing → 204) or a
+  `Response`; `throw new FunctionError(status, code, message)`; other exceptions → 500 with a
+  generic message.
+- `<name>/index.ts` scaffold, written ONCE when missing (answers 501); then it is the user's code.
+- `supabase/config.toml` (only if it exists): managed block `[functions.<name>] verify_jwt = ...`
+  (`false` only when `auth` accepts `'none'`); the rest of the file is untouched.
+Deploy with `supabase functions deploy` (push never deploys).
+- `auth`: `'user'` (default; signed-in JWT), `'publishable'`, `'secret'` (servers/cron), `'none'`
+  (anyone — webhooks verifying their own signature; `validate` warns `EDGE_FUNCTION_PUBLIC`), or an
+  array (`'none'` last).
+- `input`: field → column type (`'uuid'`, `'text?'`, `"enum('a','b')"`, `'varchar(20)'`, `'jsonb'`,
+  `'int[]'`, ...; `?` = optional/nullable). `{}` = empty body. OMITTED = body left unread for the
+  handler (`input` is undefined; read `await req.text()`, e.g. webhook signatures).
+- `output`: fields, one column type, or `'void'`; omitted = unknown.
+- Names: lowercase letters/digits joined by `-` or `_` (`invite-member`); SDK/wrapper name is
+  camelCase (`inviteMember`).
+
+```ts
+import { defineSchema, edgeFunction, policy, table } from 'accessnexus';
+
+export default defineSchema({
+  invitations: table({
+    columns: { id: 'uuid', org_id: 'uuid', email: 'text' },
+    primaryKey: 'id',
+    policies: { select: policy.isAuthenticated(), insert: policy.isAuthenticated() },
+  }),
+}, {
+  functions: {
+    'invite-member': edgeFunction({
+      auth: 'user',
+      input: { org_id: 'uuid', email: 'text', role: "enum('admin','member')", message: 'text?' },
+      output: { invitation_id: 'uuid' },
+    }),
+    'stripe-webhook': edgeFunction({ auth: 'none', output: 'void' }), // reads the raw body itself
+  },
+});
+```
+
+Implement `supabase/functions/invite-member/index.ts`:
+`export default { fetch: inviteMember(async (input, ctx) => { ...; return { invitation_id } }) }`
+(import `{ FunctionError, inviteMember } from '../_shared/accessnexus.ts'`).
+SDK: `db.functions.inviteMember(input, { headers?, region? }?)` → `{ data: Output | null, error }`
+via `supabase.functions.invoke(name, { body, method: 'POST' })` (sends the user's JWT); on failure
+`await error.context.json()` is `{ error: { code, message, issues? } }`. React Query:
+`q.functions.<name>.query(input)` / `.mutation()` (invalidates every query).
+
 ## defineSeed
 
 ```ts
@@ -568,6 +625,7 @@ export default defineConfig({
     dir: './generated',                 // base for the folders below
     migrations: './supabase/migrations',
     sdk: './src/lib/accessnexus',           // where the app imports the client from
+    functions: './supabase/functions',  // Edge Functions (default; deployed by the Supabase CLI)
   },
   naming: { policyPrefix: 'app' },      // policy names: <prefix>_<table>_<operation>
   generate: { sqlOnly: false, sdkOnly: false },
@@ -617,7 +675,8 @@ real DELETE; on soft-delete tables the trigger sets the column instead, so the D
 decides), `updateOne(filter, patch, { columns? })`, `updateMany(filter, patch, { columns? })`,
 `deleteOne(filter, { columns? })`, `deleteMany(filter, { columns? })`, plus
 `rpc.<name>(args)` and `auth`. Results are `{ data, error }` like supabase-js. Realtime tables
-also get `subscribe(...)` and declared channels `channels.<name>(param)` (see Realtime above).
+also get `subscribe(...)` and declared channels `channels.<name>(param)` (see Realtime above);
+declared Edge Functions are `functions.<camelName>(input)` (see Edge Functions above).
 - `updateOne` = `.update(patch).match(filter).select(columns).maybeSingle()`: one round trip,
   `Row | null` (null when no visible row matches; more than one match is PGRST116 and nothing
   is written) — update by any unique column (`{ slug }`). `updateMany` returns `Row[]`.
@@ -830,6 +889,7 @@ export interface ValidateResult {
   tables: Array<{ name: string; columns: number; primaryKey: string | null; rls: boolean; policies: string[]; triggers: Array<{ kind: string; name: string | null }>; realtime: boolean | null }>;
   rpcs: string[];
   channels: string[];
+  functions: string[];
   issues: SchemaIssue[]; // warnings only (errors make ok=false)
   summary: { errors: number; warnings: number };
 }
@@ -845,7 +905,7 @@ export interface GenerateResult {
   ok: true; command: 'generate'; version: string;
   schemaPath: string;
   mode: 'manual' | 'database';
-  files: Array<{ path: string; category: 'migrations' | 'policies' | 'triggers' | 'rpcs' | 'sdk'; status: 'created' | 'updated' | 'unchanged' }>;
+  files: Array<{ path: string; category: 'migrations' | 'policies' | 'triggers' | 'rpcs' | 'sdk' | 'functions'; status: 'created' | 'updated' | 'unchanged' }>;
   destructive: DestructiveStatement[]; // in migrations written by this run
   summary: { created: number; updated: number; unchanged: number; files: number; tables: number };
   warnings: SchemaIssue[];
@@ -1404,6 +1464,10 @@ export default defineSchema({
   table without select policy: nobody receives), `REALTIME_RLS_DISABLED` (everyone receives
   every row), `REALTIME_REPLICA_FULL_WITH_RLS`, `CHANNEL_TABLE_NOT_READABLE` (nobody can
   join), `CHANNEL_PUBLIC_SEND`, `CHANNEL_CLOSED` (no rule).
+  Edge Functions: errors `INVALID_EDGE_FUNCTION` (name, unknown option, bad `auth`, `input`/`output`
+  shape, two names with the same camelCase), `TABLE_NAME_CLASH` (a table named `functions` or
+  `channels` next to declared functions/channels); field types are `UNKNOWN_COLUMN_TYPE`; warning
+  `EDGE_FUNCTION_PUBLIC` (`auth` accepts `'none'`).
 - `SCHEMA_LOAD_FAILED` / `CONFIG_LOAD_FAILED` / `SEED_LOAD_FAILED` — the file threw while
   running or imports a package that is not installed; fix the named file/import.
 - `MODULE_SYNTAX_ERROR` — TypeScript/syntax error at the location shown. `TS_LOADER_MISSING`
@@ -1460,6 +1524,8 @@ export default defineSchema({
 ## Limits (v0.3.0)
 
 - Only the Supabase adapter exists. Database mode does not generate DDL migrations.
+- Edge Functions: push does not deploy them (`supabase functions deploy`); inputs are POST JSON
+  only; outputs are typed, not validated at runtime; a removed function keeps its folder.
 - Realtime: Postgres Changes filters take one column; DELETE events are not RLS-filtered
   and `old` is the primary key only; channel topics have at most one trailing parameter;
   Broadcast payloads are untyped; channel policies apply to private channels only (turn off

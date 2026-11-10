@@ -116,6 +116,7 @@ export default defineConfig({
 | `output.triggers` | `string` | `'{dir}/triggers'` | Arquivos `<table>_triggers.sql`. |
 | `output.rpcs` | `string` | `'{dir}/rpcs'` | `rpcs.sql`. |
 | `output.sdk` | `string` | `'{dir}/sdk'` | `types.ts` e `client.ts`. |
+| `output.functions` | `string` | `'./supabase/functions'` | [Edge Functions](/pt/guide/edge-functions): `_shared/accessnexus.ts` e os scaffolds `<name>/index.ts`. Fora de `dir`, para que o Supabase CLI os faça deploy; o `config.toml` é lido da pasta pai. |
 | `adapter` | `string` | `'supabase'` | Só existe `'supabase'` (caso contrário, `ADAPTER_UNSUPPORTED`). |
 | `adapterOptions` | `Record<string, unknown>` | `undefined` | Repassado ao adapter; veja abaixo. |
 | `naming.policyPrefix` | `string` | `'accessnexus'` | Prefixo dos nomes de policies, helpers e triggers. `--prefix` sobrescreve. |
@@ -124,7 +125,7 @@ export default defineConfig({
 | `targets` | `Record<string, AccessNexusTarget>` | `undefined` | Bancos nomeados para `push` / `seed --target <name>`. |
 | `adapters` | `Array<string \| AccessNexusTarget>` | `undefined` | Vários adapters para escolher com `--adapter <name>`. Normalmente omitido. |
 
-`--output <dir>` coloca todas as categorias dentro de `<dir>` e ignora todos os caminhos de pasta `output.*` da config.
+`--output <dir>` coloca todas as categorias dentro de `<dir>` (as Edge Functions em `<dir>/functions`) e ignora todos os caminhos de pasta `output.*` da config.
 
 ```ts
 interface AccessNexusTarget {
@@ -164,7 +165,7 @@ type ResolvedConfig = {
   schema: string;
   seed: string;
   adapter: string;
-  output: { dir: string; migrations: string; policies: string; triggers: string; rpcs: string; sdk: string };
+  output: { dir: string; migrations: string; policies: string; triggers: string; rpcs: string; sdk: string; functions: string };
   adapterOptions?: Record<string, unknown>;
   targets?: Record<string, AccessNexusTarget>;
   adapters?: Array<string | AccessNexusTarget>;

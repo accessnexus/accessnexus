@@ -609,6 +609,7 @@ describe('summarizeSchema', () => {
     });
     expect(summary.tables.find((t) => t.name === 'tasks')?.realtime).toBe(true);
     expect(summary.channels).toEqual(['project_room', 'org_announcements']);
+    expect(summary.functions).toEqual(['invite-member', 'send-digest']);
     // Explicit names let an agent tell two triggers of the same kind apart
     expect(summary.tables.find((t) => t.name === 'tasks')?.triggers).toContainEqual({ kind: 'lock_columns', name: 'assignee_scope' });
     expect(summary.rpcs).toEqual(['get_org_dashboard', 'accept_invitation', 'search_tasks']);

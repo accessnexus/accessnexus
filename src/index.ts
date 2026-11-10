@@ -8,6 +8,7 @@ export { definePermissions } from './core/permissions/index.js';
 export { policy } from './core/policy/index.js';
 export { rpc } from './core/rpc/index.js';
 export { channel } from './core/realtime/index.js';
+export { edgeFunction } from './core/functions/index.js';
 export { defineConfig, defineSchema, table } from './core/schema/index.js';
 export type { DefineConfigOptions, AccessNexusTarget, ResolvedConfig } from './core/schema/builders.js';
 export { defineSeed } from './core/seed/builders.js';
@@ -22,6 +23,8 @@ export type {
   PolicyOperation, PolicyRule, PublicSchema, RowOf,
   // Realtime types
   ChannelAccess, ChannelDef, ChannelRule, TableRealtime,
+  // Edge Function types
+  EdgeFunctionAuth, EdgeFunctionDef, EdgeFunctionFields,
   // RPC types
   RpcDef,
   RpcLanguage, RpcReturnType, RpcTableReturn, RpcSetofReturn, RpcSecurity, RpcVolatility, ScalarType, SchemaDef, SeedSqlOptions, SoftDeleteTrigger, LockColumnsTrigger,

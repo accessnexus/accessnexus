@@ -39,7 +39,7 @@ The hard problem this repo solves is **correct RLS**: the generated SQL must be 
 performant. Treat the RLS/permission generators as the crown jewels.
 
 Public runtime API (from `src/index.ts`): `defineSchema`, `table`, `policy`, `definePermissions`,
-`trigger`, `rpc`, `channel`, `defineSeed`, `defineConfig`, `SupabaseAdapter`. Two schema modes: **manual**
+`trigger`, `rpc`, `channel`, `edgeFunction`, `defineSeed`, `defineConfig`, `SupabaseAdapter`. Two schema modes: **manual**
 (explicit `columns`) and **Database mode** (columns inferred from a Supabase `Database` type —
 detected when no table declares `columns`).
 
@@ -116,7 +116,10 @@ ACCESSNEXUS_TEST_DB_URL=postgres://postgres:postgres@127.0.0.1:55439/postgres np
   - `definePermissions` write pins (`pinOwnerOnCreate`, `pinTenant`) stay on by default;
   - Realtime channel policies on `realtime.messages` (`<prefix>_rt_*`) keep the topic match, the
     `(SELECT auth.uid())` wrap and, with `table`, the row check run as the user (the table's RLS
-    decides); push only drops policies with its own `<prefix>_rt_` names.
+    decides); push only drops policies with its own `<prefix>_rt_` names;
+  - Edge Function wrappers keep `withSupabase` checking credentials before the handler,
+    `verify_jwt = true` unless `auth` accepts `'none'`, input validation before the handler,
+    and a generic 500 (no internal error text) for unexpected exceptions.
 - **Regression guard:** never emit a bare `auth.uid()` / `auth.jwt()` in policy SQL — always
   `(SELECT auth.uid())` (`wrapAuthCall` in the adapter; `UNWRAPPED_AUTH_CALL` warns on custom SQL
   and RPC bodies).

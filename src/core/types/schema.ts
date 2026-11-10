@@ -130,6 +130,8 @@ export interface AccessNexusConfig {
     rpcs?: string;
     /** Where to write typed SDK files (default: '{dir}/sdk') */
     sdk?: string;
+    /** Supabase Edge Functions folder (default: './supabase/functions') */
+    functions?: string;
   };
 
   /** Which adapter to use */

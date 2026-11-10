@@ -58,6 +58,7 @@ type AccessNexusTransport = {
   rpc(name: string, args: object): QueryBuilder;
   channel?(name: string, options?: object): RealtimeChannelLike;
   removeChannel?(channel: RealtimeChannelLike): unknown;
+  functions?: { invoke(name: string, options: object): PromiseLike<unknown> };
 };
 
 /**
@@ -70,6 +71,7 @@ export type AccessNexusProvider = {
   rpc(name: string, args?: object): unknown;
   channel?(name: string, options?: object): unknown;
   removeChannel?(channel: never): unknown;
+  functions?: unknown;
 };
 
 function realtimeTransport(provider: AccessNexusTransport, what: string): Required<Pick<AccessNexusTransport, 'channel' | 'removeChannel'>> {
@@ -157,6 +159,32 @@ export type ChannelOf<TClient extends AccessNexusProvider> =
 function openChannel(provider: AccessNexusTransport, topic: string): RealtimeChannelLike {
   // Private: Realtime checks the realtime.messages policies on join, send and receive.
   return realtimeTransport(provider, `channel ${topic}`).channel(topic, { config: { private: true } });
+}
+
+/** Options of `client.functions.*`: extra headers, or a region (e.g. 'us-east-1'). */
+export type FunctionInvokeOptions = { headers?: Record<string, string>; region?: string };
+
+/** Edge Function `invite-member`. */
+export type InviteMemberInput = {
+  org_id: string;
+  email: string;
+  role: 'admin' | 'manager' | 'member';
+  message?: string | null;
+};
+export type InviteMemberOutput = {
+  invitation_id: string;
+};
+/** Edge Function `send-digest`. */
+export type SendDigestInput = {
+  org_id: string;
+};
+export type SendDigestOutput = void;
+
+function invokeFunction(provider: AccessNexusTransport, name: string, body: unknown, options?: FunctionInvokeOptions): PromiseLike<unknown> {
+  if (!provider.functions || typeof provider.functions.invoke !== 'function') {
+    throw new Error(`[AccessNexus] functions.${name} needs a Supabase client with Edge Functions (functions.invoke)`);
+  }
+  return provider.functions.invoke(name, { ...options, body, method: 'POST' });
 }
 
 function selectClause(
@@ -910,6 +938,16 @@ export function createAccessNexusClient<TClient extends AccessNexusProvider>(pro
         openChannel(provider, 'project:' + id) as ChannelOf<TClient>,
       org_announcements: (id: string) =>
         openChannel(provider, 'org:' + id) as ChannelOf<TClient>,
+    },
+
+    // Edge Functions declared in the schema (POST, JSON). Errors come back in
+    // `error` (supabase-js FunctionsHttpError: `await error.context.json()` is
+    // `{ error: { code, message, issues? } }`).
+    functions: {
+      inviteMember: (input: InviteMemberInput, options?: FunctionInvokeOptions) =>
+        invokeFunction(provider, 'invite-member', input, options) as unknown as QueryResult<InviteMemberOutput>,
+      sendDigest: (input: SendDigestInput, options?: FunctionInvokeOptions) =>
+        invokeFunction(provider, 'send-digest', input, options) as unknown as QueryResult<SendDigestOutput>,
     },
 
   };

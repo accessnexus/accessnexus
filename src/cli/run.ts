@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFile
 import { createHash } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { SupabaseAdapter } from '../adapters/supabase/adapter.js';
+import { EDGE_FUNCTIONS_TOML_BEGIN, EDGE_FUNCTIONS_TOML_END, SupabaseAdapter } from '../adapters/supabase/adapter.js';
 import { defineConfig, type ResolvedConfig } from '../core/schema/builders.js';
 import type { GeneratedOutput, SchemaDef } from '../core/types/index.js';
 import { GLOBAL_FLAGS, closest, formatFlags, parseFlags, type FlagSpecs, type ParsedFlags } from './args.js';
@@ -657,6 +657,9 @@ async function loadConfigWithSource(cliOpts: ParsedFlags): Promise<LoadedConfig>
   // per-folder paths (which defineConfig always fills in) must not win over it.
   const folder = (key: 'migrations' | 'policies' | 'triggers' | 'rpcs' | 'sdk'): string | undefined =>
     cliOutput ? undefined : fileConfig?.output?.[key];
+  // Edge Functions default to ./supabase/functions (where the Supabase CLI deploys
+  // from), not under output.dir; --output still puts them under that directory.
+  const functionsFolder = cliOutput ? `${cliOutput}/functions` : fileConfig?.output?.functions;
 
   const config = defineConfig({
     schema: explicitSchema || DEFAULT_SCHEMA_PATH,
@@ -668,6 +671,7 @@ async function loadConfigWithSource(cliOpts: ParsedFlags): Promise<LoadedConfig>
       triggers: folder('triggers'),
       rpcs: folder('rpcs'),
       sdk: folder('sdk'),
+      functions: functionsFolder,
     },
     adapter: fileConfig?.adapter,
     adapterOptions: fileConfig?.adapterOptions,
@@ -696,6 +700,7 @@ async function runGenerate(opts: ParsedFlags): Promise<CommandResult> {
   log(`  Triggers:   ${config.output.triggers}`);
   log(`  RPCs:       ${config.output.rpcs}`);
   log(`  SDK:        ${config.output.sdk}`);
+  log(`  Functions:  ${config.output.functions}`);
   log(`  Prefix:     ${config.naming.policyPrefix}`);
   log('');
 
@@ -926,6 +931,7 @@ async function runValidate(opts: ParsedFlags): Promise<CommandResult> {
   }
   if (summary.rpcs.length > 0) log(`\n  RPCs: ${summary.rpcs.join(', ')}`);
   if (summary.channels.length > 0) log(`\n  Channels: ${summary.channels.join(', ')}`);
+  if (summary.functions.length > 0) log(`\n  Edge Functions: ${summary.functions.join(', ')}`);
   log('');
 
   return {
@@ -2192,7 +2198,7 @@ async function runSeed(opts: ParsedFlags): Promise<CommandResult> {
 
 // ---- Generation helpers ----
 
-type OutputCategory = 'migrations' | 'policies' | 'triggers' | 'rpcs' | 'sdk';
+type OutputCategory = 'migrations' | 'policies' | 'triggers' | 'rpcs' | 'sdk' | 'functions';
 
 type GeneratedGroup = {
   title: string;
@@ -2256,6 +2262,28 @@ function collectGeneratedOutputs(schema: SchemaDef, adapter: SupabaseAdapter, co
       // index.ts) — never report those as "removed".
       scope: { baseDir: config.output.sdk, allowedExtensions: ['.ts'], trackRemovals: false },
     });
+
+    const functions = adapter.generateEdgeFunctions(schema);
+    if (functions.length > 0) {
+      groups.push({
+        title: 'Edge Functions',
+        category: 'functions',
+        outputBase: config.output.functions,
+        files: toExpectedFiles(config.output.functions, functions),
+        // Function folders are the user's code: only the files we write are compared.
+        scope: { baseDir: config.output.functions, allowedExtensions: ['.ts'], trackRemovals: false },
+      });
+      const toml = edgeFunctionsConfigToml(adapter, schema, config.output.functions);
+      if (toml) {
+        groups.push({
+          title: 'Supabase config',
+          category: 'functions',
+          outputBase: dirname(toml.absolutePath),
+          files: [toml],
+          scope: { baseDir: dirname(toml.absolutePath), allowedExtensions: ['.toml'], trackRemovals: false },
+        });
+      }
+    }
   }
 
   return groups;
@@ -2306,7 +2334,8 @@ function reportDestructive(statements: DestructiveStatement[], label: string): v
 }
 
 function toExpectedFiles(outputBase: string, files: GeneratedOutput[]): ExpectedFile[] {
-  return files.map((file) => {
+  // `overwrite: false` (scaffolds): created when missing, never compared or replaced after.
+  return files.filter((file) => file.overwrite !== false || !existsSync(resolve(outputBase, file.path))).map((file) => {
     const absolutePath = resolve(outputBase, file.path);
     const displayPath = relativePathFromCwd(absolutePath);
     return {
@@ -2325,4 +2354,45 @@ function relativePathFromCwd(absolutePath: string): string {
 function prettyPath(absolutePath: string): string {
   const rel = relativePathFromCwd(absolutePath);
   return rel === '' || rel.startsWith('..') ? absolutePath : rel;
+}
+
+/**
+ * `supabase/config.toml` (next to the functions folder) with the AccessNexus
+ * block of `[functions.<name>] verify_jwt = ...` tables replaced. Only when the
+ * file exists (`supabase init` creates it). A `[functions.<name>]` table the
+ * user wrote outside the block is left alone (Supabase would reject a duplicate),
+ * with a note in the block.
+ */
+function edgeFunctionsConfigToml(adapter: SupabaseAdapter, schema: SchemaDef, functionsDir: string): ExpectedFile | null {
+  const entries = adapter.edgeFunctionsConfigToml(schema);
+  if (!entries) return null;
+  const absolutePath = resolve(functionsDir, '..', 'config.toml');
+  if (!existsSync(absolutePath)) return null;
+  const original = readFileSync(absolutePath, 'utf-8');
+  const begin = original.indexOf(EDGE_FUNCTIONS_TOML_BEGIN);
+  const endMarker = begin === -1 ? -1 : original.indexOf(EDGE_FUNCTIONS_TOML_END, begin);
+  const outside = begin === -1 || endMarker === -1
+    ? original
+    : original.slice(0, begin) + original.slice(endMarker + EDGE_FUNCTIONS_TOML_END.length);
+
+  const block: string[] = [EDGE_FUNCTIONS_TOML_BEGIN];
+  for (const { name, verifyJwt } of entries) {
+    const header = new RegExp(`^\\s*\\[functions\\.(?:${name}|"${name}")\\]\\s*$`, 'm');
+    if (header.test(outside)) {
+      block.push(`# ${name}: [functions.${name}] is already set above; set verify_jwt = ${verifyJwt} there.`);
+      continue;
+    }
+    block.push(`[functions.${name}]`, `verify_jwt = ${verifyJwt}`, '');
+  }
+  if (block[block.length - 1] === '') block.pop();
+  block.push(EDGE_FUNCTIONS_TOML_END);
+  const blockText = block.join('\n');
+
+  let content: string;
+  if (begin !== -1 && endMarker !== -1) {
+    content = original.slice(0, begin) + blockText + original.slice(endMarker + EDGE_FUNCTIONS_TOML_END.length);
+  } else {
+    content = `${original.replace(/\s*$/, '')}\n\n${blockText}\n`;
+  }
+  return { absolutePath, displayPath: relativePathFromCwd(absolutePath), content };
 }

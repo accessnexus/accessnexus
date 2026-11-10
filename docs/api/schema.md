@@ -17,6 +17,7 @@ function defineSchema<DB extends SupabaseDatabase>(
 interface SchemaOptions {
   rpcs?: Record<string, RpcDef>;
   channels?: Record<string, ChannelDef>;
+  functions?: Record<string, EdgeFunctionDef>;
 }
 ```
 
@@ -25,6 +26,7 @@ interface SchemaOptions {
 | `tables` | `Record<string, TableDef>` or `SupabaseSchemaInput<DB>` | required | Table name to table definition. Names must be lowercase snake_case. |
 | `options.rpcs` | `Record<string, RpcDef>` | `undefined` | Postgres functions built with [`rpc()`](/api/rpc). Stored as a non-enumerable `__rpcs` property, so `Object.keys(schema)` lists only tables. |
 | `options.channels` | `Record<string, ChannelDef>` | `undefined` | Private Realtime channels (Broadcast / Presence) built with [`channel()`](/api/realtime#channel); names are lowercase snake_case. Stored as a non-enumerable `__channels` property. `{}` removes every channel policy on the next push. |
+| `options.functions` | `Record<string, EdgeFunctionDef>` | `undefined` | Supabase Edge Functions built with [`edgeFunction()`](/api/edge-functions), keyed by function name (`'invite-member'`). Stored as a non-enumerable `__functions` property. |
 
 The schema file must `export default` the result. The CLI loads it with esbuild, so it may import sibling files.
 

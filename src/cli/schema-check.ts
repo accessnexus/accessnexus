@@ -105,6 +105,8 @@ export interface SchemaSummary {
   rpcs: string[];
   /** Channel names declared in defineSchema(..., { channels }). */
   channels: string[];
+  /** Edge Function names declared in defineSchema(..., { functions }). */
+  functions: string[];
 }
 
 interface Ctx {
@@ -165,6 +167,7 @@ export function summarizeSchema(schema: Record<string, any>): SchemaSummary {
     })),
     rpcs: Object.keys(((schema as any).__rpcs as Record<string, unknown> | undefined) ?? {}),
     channels: Object.keys(((schema as any).__channels as Record<string, unknown> | undefined) ?? {}),
+    functions: Object.keys(((schema as any).__functions as Record<string, unknown> | undefined) ?? {}),
   };
 }
 
@@ -196,6 +199,8 @@ export function checkSchema(schema: unknown): SchemaIssue[] {
   if (rawRpcs) Object.defineProperty(record, '__rpcs', { value: rawRpcs, enumerable: false });
   const rawChannels = (schema as any).__channels;
   if (rawChannels) Object.defineProperty(record, '__channels', { value: rawChannels, enumerable: false });
+  const rawFunctions = (schema as any).__functions;
+  if (rawFunctions) Object.defineProperty(record, '__functions', { value: rawFunctions, enumerable: false });
   const entries = Object.entries(record);
   if (entries.length === 0) {
     issues.push({
@@ -236,6 +241,32 @@ export function checkSchema(schema: unknown): SchemaIssue[] {
   } else {
     for (const [name, def] of Object.entries(channels ?? {})) {
       checkChannel(ctx, name, def);
+    }
+  }
+
+  const functions = (record as any).__functions as Record<string, any> | undefined;
+  if (functions !== undefined && (typeof functions !== 'object' || functions === null || Array.isArray(functions))) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_EDGE_FUNCTION',
+      path: 'functions',
+      message: 'functions must be an object of edgeFunction() definitions',
+      hint: "defineSchema(tables, { functions: { 'invite-member': edgeFunction({ auth: 'user', input: { email: 'text' } }) } })",
+    });
+  } else if (functions !== undefined) {
+    checkEdgeFunctions(ctx, functions);
+  }
+
+  // The SDK exposes channels / functions next to the tables: a table with the same name would be shadowed.
+  for (const [key, used] of [['channels', channels !== undefined], ['functions', functions !== undefined]] as const) {
+    if (used && key in record) {
+      push(ctx, {
+        severity: 'error',
+        code: 'TABLE_NAME_CLASH',
+        path: key,
+        message: `Table "${key}" clashes with client.${key} (the schema declares ${key})`,
+        hint: `Rename the table (e.g. app_${key}).`,
+      });
     }
   }
 
@@ -1712,5 +1743,114 @@ function checkChannelRule(ctx: Ctx, path: string, rule: any, param: string | und
       break;
     default:
       break;
+  }
+}
+
+// ---- Edge Functions ----
+
+const EDGE_FUNCTION_NAME = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/;
+const EDGE_FUNCTION_KEYS = ['auth', 'input', 'output'];
+const EDGE_AUTH_MODES = new Set(['user', 'publishable', 'secret', 'none']);
+
+function checkEdgeFunctions(ctx: Ctx, functions: Record<string, any>): void {
+  const identifiers = new Map<string, string>();
+  for (const [name, def] of Object.entries(functions)) {
+    const path = `functions.${name}`;
+    if (!EDGE_FUNCTION_NAME.test(name) || name.length > 63) {
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_EDGE_FUNCTION',
+        path,
+        message: `Edge Function name "${name}" must be lowercase letters and digits joined by - or _ (at most 63 characters)`,
+        hint: "Supabase recommends hyphens: 'invite-member'.",
+      });
+    } else {
+      const camel = name.replace(/[-_]+([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+      const other = identifiers.get(camel);
+      if (other) {
+        push(ctx, {
+          severity: 'error',
+          code: 'INVALID_EDGE_FUNCTION',
+          path,
+          message: `Edge Functions "${other}" and "${name}" both become client.functions.${camel}`,
+          hint: 'Rename one of them.',
+        });
+      }
+      identifiers.set(camel, name);
+    }
+    if (!def || typeof def !== 'object' || Array.isArray(def)) {
+      push(ctx, { severity: 'error', code: 'INVALID_EDGE_FUNCTION', path, message: 'Edge Functions are built with edgeFunction({ auth, input, output })' });
+      continue;
+    }
+    for (const key of Object.keys(def)) {
+      if (EDGE_FUNCTION_KEYS.includes(key)) continue;
+      const suggestion = closest(key, EDGE_FUNCTION_KEYS);
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_EDGE_FUNCTION',
+        path: `${path}.${key}`,
+        message: `Unknown Edge Function option "${key}"; it would be ignored`,
+        hint: suggestion ? `Did you mean "${suggestion}"? Options: ${EDGE_FUNCTION_KEYS.join(', ')}.` : `Options: ${EDGE_FUNCTION_KEYS.join(', ')}.`,
+      });
+    }
+
+    const auth = def.auth === undefined ? ['user'] : typeof def.auth === 'string' ? [def.auth] : def.auth;
+    const authOk = Array.isArray(auth) && auth.length > 0
+      && auth.every((a: unknown) => typeof a === 'string' && EDGE_AUTH_MODES.has(a))
+      && new Set(auth).size === auth.length
+      && (!auth.includes('none') || auth[auth.length - 1] === 'none');
+    if (!authOk) {
+      push(ctx, {
+        severity: 'error',
+        code: 'INVALID_EDGE_FUNCTION',
+        path: `${path}.auth`,
+        message: `auth must be 'user', 'publishable', 'secret', 'none' or a non-empty array of them ('none' last), got ${JSON.stringify(def.auth)}`,
+      });
+    } else if (auth.includes('none')) {
+      push(ctx, {
+        severity: 'warning',
+        code: 'EDGE_FUNCTION_PUBLIC',
+        path: `${path}.auth`,
+        message: `Edge Function "${name}" accepts calls without any credential (verify_jwt = false)`,
+        hint: "Keep auth: 'none' for webhooks that verify their own signature; otherwise use 'user' or 'secret'.",
+      });
+    }
+
+    checkEdgeFields(ctx, `${path}.input`, def.input, false);
+    if (typeof def.output === 'string') {
+      if (def.output !== 'void' && !isValidType(def.output)) {
+        push(ctx, { severity: 'error', code: 'UNKNOWN_COLUMN_TYPE', path: `${path}.output`, message: `Unknown output type "${def.output}"`, hint: "Use a column type ('jsonb', 'uuid', ...), 'void', or an object of fields." });
+      }
+    } else {
+      checkEdgeFields(ctx, `${path}.output`, def.output, true);
+    }
+  }
+}
+
+function checkEdgeFields(ctx: Ctx, path: string, fields: unknown, isOutput: boolean): void {
+  if (fields === undefined) return;
+  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
+    push(ctx, {
+      severity: 'error',
+      code: 'INVALID_EDGE_FUNCTION',
+      path,
+      message: `${isOutput ? 'output' : 'input'} must be an object of field → column type${isOutput ? ", a column type or 'void'" : ''}`,
+      hint: "input: { email: 'text', role: \"enum('admin','member')\", note: 'text?' }",
+    });
+    return;
+  }
+  for (const [field, type] of Object.entries(fields as Record<string, unknown>)) {
+    if (!IDENTIFIER.test(field)) {
+      push(ctx, { severity: 'error', code: 'INVALID_IDENTIFIER', path: `${path}.${field}`, message: `Field "${field}" is not lowercase snake_case` });
+    }
+    if (typeof type !== 'string' || !(isValidType(type) || /^varchar\(\d+\)$/.test(baseOf(type)))) {
+      push(ctx, {
+        severity: 'error',
+        code: 'UNKNOWN_COLUMN_TYPE',
+        path: `${path}.${field}`,
+        message: `Unknown field type ${JSON.stringify(type)}`,
+        hint: `Use one of: ${[...SCALAR_TYPES].join(', ')}, "enum('a','b')", varchar(n), numeric(p,s); add ? for optional.`,
+      });
+    }
   }
 }

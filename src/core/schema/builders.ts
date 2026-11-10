@@ -6,6 +6,7 @@
 import { withExpandedPolicies } from '../policy/expand.js';
 import type { ColumnInput } from '../types/columns.js';
 import type { ChannelDef } from '../types/realtime.js';
+import type { EdgeFunctionDef } from '../types/edge-function.js';
 import type { RpcDef } from '../types/rpc.js';
 import type { SchemaDef, TableDef } from '../types/schema.js';
 import type { SupabaseDatabase, SupabaseSchemaInput } from '../types/supabase.js';
@@ -22,6 +23,12 @@ export interface SchemaOptions {
    * typed `client.channels.<name>(param)` accessors.
    */
   channels?: Record<string, ChannelDef>;
+  /**
+   * Supabase Edge Functions built with `edgeFunction()`, keyed by function name
+   * (`'invite-member'`). Generates typed, validated handlers and
+   * `client.functions.<camelName>(input)`.
+   */
+  functions?: Record<string, EdgeFunctionDef>;
 }
 
 /**
@@ -126,6 +133,15 @@ export function defineSchema(tables: Record<string, any>, options?: SchemaOption
   if (options?.channels) {
     Object.defineProperty(result, '__channels', {
       value: options.channels,
+      enumerable: false,
+      writable: false,
+      configurable: false,
+    });
+  }
+
+  if (options?.functions) {
+    Object.defineProperty(result, '__functions', {
+      value: options.functions,
       enumerable: false,
       writable: false,
       configurable: false,
@@ -282,6 +298,12 @@ export interface DefineConfigOptions {
     rpcs?: string;
     /** Typed SDK files (default: '{dir}/sdk') */
     sdk?: string;
+    /**
+     * Supabase Edge Functions folder (default: './supabase/functions', where the
+     * Supabase CLI deploys from). `supabase/config.toml` next to it gets the
+     * `verify_jwt` settings.
+     */
+    functions?: string;
   };
 
   /** Which adapter to use (default: 'supabase') */
@@ -383,6 +405,7 @@ export function defineConfig(options: DefineConfigOptions): ResolvedConfig {
       triggers: options.output?.triggers ?? `${dir}/triggers`,
       rpcs: options.output?.rpcs ?? `${dir}/rpcs`,
       sdk: options.output?.sdk ?? `${dir}/sdk`,
+      functions: options.output?.functions ?? './supabase/functions',
     },
     adapter: options.adapter ?? 'supabase',
     adapterOptions: options.adapterOptions,

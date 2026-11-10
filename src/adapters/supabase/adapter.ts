@@ -7,6 +7,7 @@ import { baseType, isNullable, normalizeColumn } from '../../core/types/columns.
 import { primaryKeyColumns, singlePrimaryKey } from '../../core/types/schema.js';
 import type { RpcArg, RpcSetofReturn, RpcTableReturn } from '../../core/types/rpc.js';
 import type { ChannelDef, ChannelRule } from '../../core/types/realtime.js';
+import type { EdgeFunctionAuth, EdgeFunctionDef } from '../../core/types/edge-function.js';
 import type {
   Adapter,
   GeneratedOutput,
@@ -1384,6 +1385,7 @@ export class SupabaseAdapter implements Adapter {
     const channels = Object.entries(((schema as any).__channels as Record<string, ChannelDef> | undefined) ?? {});
     const realtimeTables = Object.entries(schema).filter(([, def]) => !!def.realtime).map(([name]) => name);
     const usesRealtime = realtimeTables.length > 0 || channels.length > 0;
+    const edgeFunctions = Object.entries(edgeFunctionsOf(schema) ?? {});
 
     lines.push(
       `type Tables = Database['public']['Tables'];`,
@@ -1443,6 +1445,9 @@ export class SupabaseAdapter implements Adapter {
         `  channel?(name: string, options?: object): RealtimeChannelLike;`,
         `  removeChannel?(channel: RealtimeChannelLike): unknown;`,
       ] : []),
+      ...(edgeFunctions.length > 0 ? [
+        `  functions?: { invoke(name: string, options: object): PromiseLike<unknown> };`,
+      ] : []),
       `};`,
       '',
       `/**`,
@@ -1457,9 +1462,11 @@ export class SupabaseAdapter implements Adapter {
         `  channel?(name: string, options?: object): unknown;`,
         `  removeChannel?(channel: never): unknown;`,
       ] : []),
+      ...(edgeFunctions.length > 0 ? [`  functions?: unknown;`] : []),
       `};`,
       '',
       ...(usesRealtime ? this.realtimeClientHelpers(realtimeTables.length > 0, channels.length > 0) : []),
+      ...(edgeFunctions.length > 0 ? this.edgeFunctionClientHelpers(edgeFunctions) : []),
       `function selectClause(`,
       `  columns: readonly string[] | undefined,`,
       `  joins?: Record<string, string>,`,
@@ -1669,6 +1676,23 @@ export class SupabaseAdapter implements Adapter {
       lines.push('');
     }
 
+    if (edgeFunctions.length > 0) {
+      lines.push(`    // Edge Functions declared in the schema (POST, JSON). Errors come back in`);
+      lines.push(`    // \`error\` (supabase-js FunctionsHttpError: \`await error.context.json()\` is`);
+      lines.push(`    // \`{ error: { code, message, issues? } }\`).`);
+      lines.push(`    functions: {`);
+      for (const [name, def] of edgeFunctions) {
+        const fn = edgeFunctionIdentifier(name);
+        const type = edgeFunctionTypeName(name);
+        const noInput = Object.keys(def.input ?? {}).length === 0;
+        const param = def.input === undefined ? `input?: ${type}Input` : `input: ${type}Input${noInput ? ' = {}' : ''}`;
+        lines.push(`      ${fn}: (${param}, options?: FunctionInvokeOptions) =>`);
+        lines.push(`        invokeFunction(provider, ${quoteTsString(name)}, input, options) as unknown as QueryResult<${type}Output>,`);
+      }
+      lines.push(`    },`);
+      lines.push('');
+    }
+
     lines.push(`  };`);
     lines.push(`}`);
     lines.push('');
@@ -1678,6 +1702,35 @@ export class SupabaseAdapter implements Adapter {
     lines.push(` */`);
     lines.push(`export type AccessNexusClient<TClient extends AccessNexusProvider = AccessNexusProvider> =`);
     lines.push(`  ReturnType<typeof createAccessNexusClient<TClient>>;`);
+  }
+
+  /** Edge Function input/output types and the invoke helper of the generated client. */
+  private edgeFunctionClientHelpers(functions: Array<[string, EdgeFunctionDef]>): string[] {
+    const types: string[] = [];
+    for (const [name, def] of functions) {
+      types.push(`/** Edge Function \`${name}\`. */`);
+      types.push(...this.edgeFunctionTypes(def, edgeFunctionTypeName(name), 'FunctionJson', 'client'));
+    }
+    const out: string[] = [
+      ...(types.some((line) => line.includes('FunctionJson'))
+        ? [`type FunctionJson = string | number | boolean | null | { [key: string]: FunctionJson | undefined } | FunctionJson[];`]
+        : []),
+      `/** Options of \`client.functions.*\`: extra headers, or a region (e.g. 'us-east-1'). */`,
+      `export type FunctionInvokeOptions = { headers?: Record<string, string>; region?: string };`,
+      '',
+      ...types,
+    ];
+    out.push(
+      '',
+      `function invokeFunction(provider: AccessNexusTransport, name: string, body: unknown, options?: FunctionInvokeOptions): PromiseLike<unknown> {`,
+      `  if (!provider.functions || typeof provider.functions.invoke !== 'function') {`,
+      `    throw new Error(\`[AccessNexus] functions.\${name} needs a Supabase client with Edge Functions (functions.invoke)\`);`,
+      `  }`,
+      `  return provider.functions.invoke(name, { ...options, body, method: 'POST' });`,
+      `}`,
+      '',
+    );
+    return out;
   }
 
   /** Shared Realtime types and runtime helpers of the generated client. */
@@ -2439,6 +2492,243 @@ export class SupabaseAdapter implements Adapter {
     return lines.join('\n');
   }
 
+  // ---- Edge Functions ----
+
+  /**
+   * Edge Function files, relative to the functions folder (default
+   * `supabase/functions`): `_shared/accessnexus.ts` (typed, validated wrappers
+   * around `withSupabase` from `@supabase/server`; derived) and one
+   * `<name>/index.ts` scaffold per function (`overwrite: false`: written only
+   * when missing, then yours). Empty when the schema declares no `functions`.
+   */
+  generateEdgeFunctions(schema: SchemaDef): GeneratedOutput[] {
+    const functions = edgeFunctionsOf(schema);
+    if (functions === undefined) return [];
+    const entries = Object.entries(functions);
+    const L: string[] = [
+      '// ============================================',
+      '// AccessNexus: Auto-generated Edge Function wrappers',
+      '// DO NOT EDIT — regenerate with `npx accessnexus generate`',
+      '// Runs on Supabase Edge Functions (Deno) with @supabase/server.',
+      '// ============================================',
+      '',
+      `import { withSupabase, type SupabaseContext } from 'npm:@supabase/server@1';`,
+      '',
+      `export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];`,
+      '',
+      `/** Throw from a handler to answer with this HTTP status and \`{ error: { code, message } }\`. */`,
+      `export class FunctionError extends Error {`,
+      `  constructor(readonly status: number, readonly code: string, message: string) {`,
+      `    super(message);`,
+      `    this.name = 'FunctionError';`,
+      `  }`,
+      `}`,
+      '',
+      `/** What a handler receives besides its input: the @supabase/server context. */`,
+      `export type FunctionContext = SupabaseContext;`,
+      `type Handler<I, O> = (input: I, ctx: FunctionContext, req: Request) => O | Response | Promise<O | Response>;`,
+      `type Field = { type: string; optional: boolean; values?: readonly string[]; maxLength?: number };`,
+      `type Issue = { field: string; message: string };`,
+      '',
+      `const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;`,
+      `const DATE = /^\\d{4}-\\d{2}-\\d{2}$/;`,
+      `const TIME = /^\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?$/;`,
+      '',
+      `function validValue(field: Field, value: unknown): boolean {`,
+      `  switch (field.type) {`,
+      `    case 'uuid': return typeof value === 'string' && UUID.test(value);`,
+      `    case 'text': return typeof value === 'string';`,
+      `    case 'varchar': return typeof value === 'string' && (field.maxLength === undefined || value.length <= field.maxLength);`,
+      `    case 'int': case 'smallint': case 'bigint': case 'serial': return Number.isSafeInteger(value);`,
+      `    case 'float': case 'decimal': case 'numeric': return typeof value === 'number' && Number.isFinite(value);`,
+      `    case 'boolean': return typeof value === 'boolean';`,
+      `    case 'json': case 'jsonb': return value !== undefined;`,
+      `    case 'date': return typeof value === 'string' && DATE.test(value) && !Number.isNaN(Date.parse(value));`,
+      `    case 'timestamp': case 'timestamptz': return typeof value === 'string' && !Number.isNaN(Date.parse(value));`,
+      `    case 'time': return typeof value === 'string' && TIME.test(value);`,
+      `    case 'enum': return typeof value === 'string' && (field.values ?? []).includes(value);`,
+      `    case 'text[]': return Array.isArray(value) && value.every((v) => typeof v === 'string');`,
+      `    case 'int[]': return Array.isArray(value) && value.every((v) => Number.isSafeInteger(v));`,
+      `    case 'uuid[]': return Array.isArray(value) && value.every((v) => typeof v === 'string' && UUID.test(v));`,
+      `    default: return false;`,
+      `  }`,
+      `}`,
+      '',
+      `function validate(spec: Record<string, Field>, body: unknown): Issue[] {`,
+      `  if (body === null || typeof body !== 'object' || Array.isArray(body)) {`,
+      `    return [{ field: '(body)', message: 'expected a JSON object' }];`,
+      `  }`,
+      `  const issues: Issue[] = [];`,
+      `  const record = body as Record<string, unknown>;`,
+      `  for (const key of Object.keys(record)) {`,
+      `    if (!Object.hasOwn(spec, key)) issues.push({ field: key, message: 'unknown field' });`,
+      `  }`,
+      `  for (const [key, field] of Object.entries(spec)) {`,
+      `    const value = record[key];`,
+      `    if (value === undefined || value === null) {`,
+      `      if (!field.optional) issues.push({ field: key, message: value === null ? 'must not be null' : 'is required' });`,
+      `      continue;`,
+      `    }`,
+      `    if (!validValue(field, value)) {`,
+      `      issues.push({ field: key, message: field.values ? \`must be one of: \${field.values.join(', ')}\` : \`must be \${field.type}\` });`,
+      `    }`,
+      `  }`,
+      `  return issues;`,
+      `}`,
+      '',
+      `function errorResponse(status: number, code: string, message: string, extra: Record<string, unknown> = {}): Response {`,
+      `  return Response.json({ error: { code, message, ...extra } }, { status });`,
+      `}`,
+      '',
+      `// With an input spec: POST + JSON body, validated before the handler runs.`,
+      `// Without one (\`input\` omitted): the body is left unread for the handler (e.g. a`,
+      `// webhook verifying a signature over the raw body), and \`input\` is undefined.`,
+      `async function run<I, O>(req: Request, ctx: FunctionContext, spec: Record<string, Field> | null, handler: Handler<I, O>): Promise<Response> {`,
+      `  let body: unknown = undefined;`,
+      `  if (spec) {`,
+      `    if (req.method !== 'POST') return errorResponse(405, 'method_not_allowed', 'Use POST with a JSON body');`,
+      `    const text = await req.text();`,
+      `    body = {};`,
+      `    if (text.trim() !== '') {`,
+      `      try {`,
+      `        body = JSON.parse(text);`,
+      `      } catch {`,
+      `        return errorResponse(400, 'invalid_json', 'The request body is not valid JSON');`,
+      `      }`,
+      `    }`,
+      `    const issues = validate(spec, body);`,
+      `    if (issues.length > 0) return errorResponse(400, 'invalid_input', 'The request body does not match the function input', { issues });`,
+      `  }`,
+      `  try {`,
+      `    const result = await handler(body as I, ctx, req);`,
+      `    if (result instanceof Response) return result;`,
+      `    return result === undefined ? new Response(null, { status: 204 }) : Response.json(result);`,
+      `  } catch (err) {`,
+      `    if (err instanceof FunctionError) return errorResponse(err.status, err.code, err.message);`,
+      `    console.error(err);`,
+      `    return errorResponse(500, 'internal_error', 'Internal error');`,
+      `  }`,
+      `}`,
+      '',
+    ];
+    const outputs: GeneratedOutput[] = [];
+    for (const [name, def] of entries) {
+      const fn = edgeFunctionIdentifier(name);
+      const type = edgeFunctionTypeName(name);
+      const auth = edgeFunctionAuthList(def);
+      const authLiteral = auth.length === 1 ? quoteTsString(auth[0]) : `[${auth.map(quoteTsString).join(', ')}]`;
+      const specConst = `${name.replace(/[-]/g, '_').toUpperCase()}_INPUT`;
+      L.push(`// ---- ${name} ----`);
+      L.push('');
+      L.push(...this.edgeFunctionTypes(def, type, 'Json', 'server'));
+      const fields = Object.entries(def.input ?? {});
+      if (def.input === undefined) {
+        L.push(`const ${specConst} = null;`);
+      } else if (fields.length === 0) {
+        L.push(`const ${specConst}: Record<string, Field> = {};`);
+      } else {
+        L.push(`const ${specConst}: Record<string, Field> = {`);
+        for (const [field, colType] of fields) {
+          L.push(`  ${field}: ${edgeFieldSpec(colType)},`);
+        }
+        L.push(`};`);
+      }
+      L.push('');
+      L.push(`/**`);
+      L.push(def.input === undefined
+        ? ` * \`${name}\` (auth: ${auth.join(', ')}). No input spec: the body is left for you to read`
+        : ` * \`${name}\` (auth: ${auth.join(', ')}). Validates the JSON body as ${type}Input,`);
+      L.push(` * then calls \`handler(input, ctx, req)\`: \`ctx.supabase\` runs as the caller (RLS),`);
+      L.push(` * \`ctx.supabaseAdmin\` bypasses RLS. Return ${type}Output (or a Response), or throw FunctionError.`);
+      L.push(` */`);
+      L.push(`export function ${fn}(handler: Handler<${type}Input, ${type}Output>): (req: Request) => Promise<Response> {`);
+      L.push(`  return withSupabase({ auth: ${authLiteral} }, (req, ctx) => run(req, ctx, ${specConst}, handler));`);
+      L.push(`}`);
+      L.push('');
+
+      const userOnly = auth.every((a) => a === 'user');
+      outputs.push({
+        path: `${name}/index.ts`,
+        overwrite: false,
+        content: [
+          `// Edge Function \`${name}\`: scaffolded once by AccessNexus — this file is yours.`,
+          `// The wrapper from _shared/accessnexus.ts (regenerated from the schema) checks auth`,
+          `// (${auth.join(', ')}), answers CORS, and validates the JSON body before calling you.`,
+          `// ctx.supabase runs as the caller, so RLS applies.${userOnly ? '' : ' Without a user (publishable/secret/none) it has no user.'}`,
+          `// ctx.supabaseAdmin bypasses RLS: filter by ctx.userClaims yourself if you use it.`,
+          ...(def.input === undefined
+            ? [`// No input spec: read the body yourself (await req.text()), e.g. to verify a webhook signature.`]
+            : []),
+          `import { FunctionError, ${fn} } from '../_shared/accessnexus.ts';`,
+          '',
+          `export default {`,
+          `  // Handler: (input, ctx, req) => output. Return the output, or throw FunctionError.`,
+          `  fetch: ${fn}(async () => {`,
+          `    throw new FunctionError(501, 'not_implemented', '${name} is not implemented yet');`,
+          `  }),`,
+          `};`,
+          '',
+        ].join('\n'),
+      });
+    }
+    return [{ path: '_shared/accessnexus.ts', content: `${L.join('\n').trimEnd()}\n` }, ...outputs];
+  }
+
+  /**
+   * The `[functions.<name>]` tables AccessNexus manages in `supabase/config.toml`
+   * (`verify_jwt = false` only for functions that accept `auth: 'none'`). `null`
+   * when the schema declares no `functions`.
+   */
+  edgeFunctionsConfigToml(schema: SchemaDef): Array<{ name: string; verifyJwt: boolean }> | null {
+    const functions = edgeFunctionsOf(schema);
+    if (functions === undefined) return null;
+    return Object.entries(functions).map(([name, def]) => ({
+      name,
+      verifyJwt: !edgeFunctionAuthList(def).includes('none'),
+    }));
+  }
+
+  /**
+   * `<Type>Input` / `<Type>Output` declarations of one Edge Function. Without an
+   * input spec the server handler gets `undefined` (it reads the request) and the
+   * client may send any JSON.
+   */
+  private edgeFunctionTypes(def: EdgeFunctionDef, type: string, json: string, side: 'server' | 'client'): string[] {
+    const field = (colType: string) => this.edgeFieldTS(colType, json);
+    const out: string[] = [];
+    const input = Object.entries(def.input ?? {});
+    if (def.input === undefined) {
+      out.push(`export type ${type}Input = ${side === 'server' ? 'undefined' : `${json} | undefined`};`);
+    } else if (input.length === 0) {
+      out.push(`export type ${type}Input = Record<string, never>;`);
+    } else {
+      out.push(`export type ${type}Input = {`);
+      for (const [name, colType] of input) {
+        const optional = colType.endsWith('?');
+        out.push(`  ${name}${optional ? '?' : ''}: ${field(colType)};`);
+      }
+      out.push(`};`);
+    }
+    if (def.output === undefined) {
+      out.push(`export type ${type}Output = unknown;`);
+    } else if (typeof def.output === 'string') {
+      out.push(`export type ${type}Output = ${def.output === 'void' ? 'void' : field(def.output)};`);
+    } else {
+      out.push(`export type ${type}Output = {`);
+      for (const [name, colType] of Object.entries(def.output)) {
+        out.push(`  ${name}: ${field(colType)};`);
+      }
+      out.push(`};`);
+    }
+    return out;
+  }
+
+  private edgeFieldTS(colType: string, json: string): string {
+    const base = colType.endsWith('?') ? colType.slice(0, -1) : colType;
+    if (/^varchar\(\d+\)$/.test(base)) return colType.endsWith('?') ? 'string | null' : 'string';
+    return this.columnTypeToTS(colType).replace(/\bJson\b/g, json);
+  }
+
   // ---- TanStack Query helpers (adapterOptions.reactQuery) ----
 
   /**
@@ -2451,6 +2741,7 @@ export class SupabaseAdapter implements Adapter {
     const rpcs = (schema as any).__rpcs as Record<string, RpcDef> | undefined;
     const rpcNames = rpcs ? Object.keys(rpcs) : [];
     const tables = Object.keys(schema);
+    const edgeFns = Object.entries(edgeFunctionsOf(schema) ?? {});
 
     // Tables whose queries may embed `table` through `include` (they reference it).
     const embeddedIn = new Map<string, string[]>();
@@ -2477,7 +2768,7 @@ export class SupabaseAdapter implements Adapter {
       `import type { AccessNexusClient, AccessNexusProvider, ColumnsOf${includeTypes.map((t) => `, ${t}`).join('')} } from './client.js';`,
       '',
       `type Client = AccessNexusClient;`,
-      `type TableKey = Exclude<keyof Client, 'auth' | 'rpc' | 'channels'>;`,
+      `type TableKey = Exclude<keyof Client, 'auth' | 'rpc' | 'channels' | 'functions'>;`,
       `type FilterOf<K extends TableKey> = NonNullable<Parameters<Client[K]['findMany']>[0]>;`,
       `type CreateOf<K extends TableKey> = Parameters<Client[K]['create']>[0];`,
       `type UpdateOf<K extends TableKey> = Parameters<Client[K]['update']>[1];`,
@@ -2519,6 +2810,13 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`  rpc: {`, `    all: ['accessnexus', 'rpc'] as const,`);
       for (const name of rpcNames) {
         lines.push(`    ${name}: (args?: unknown) => ['accessnexus', 'rpc', '${name}', args ?? {}] as const,`);
+      }
+      lines.push(`  },`);
+    }
+    if (edgeFns.length > 0) {
+      lines.push(`  functions: {`, `    all: ['accessnexus', 'functions'] as const,`);
+      for (const [name] of edgeFns) {
+        lines.push(`    ${edgeFunctionIdentifier(name)}: (input?: unknown) => ['accessnexus', 'functions', ${quoteTsString(name)}, input ?? {}] as const,`);
       }
       lines.push(`  },`);
     }
@@ -2656,6 +2954,30 @@ export class SupabaseAdapter implements Adapter {
       lines.push(`    },`, '');
     }
 
+    if (edgeFns.length > 0) {
+      lines.push(`    // Each Edge Function as a query and as a mutation (invalidates every query).`);
+      lines.push(`    functions: {`);
+      for (const [name] of edgeFns) {
+        const fn = edgeFunctionIdentifier(name);
+        const params = `Parameters<Client['functions']['${fn}']>`;
+        lines.push(
+          `      ${fn}: {`,
+          `        query: (...args: ${params}) =>`,
+          `          queryOptions({`,
+          `            queryKey: accessNexusKeys.functions.${fn}(args[0]),`,
+          `            queryFn: () => unwrap(client.functions.${fn}(...args)),`,
+          `          }),`,
+          `        mutation: () => ({`,
+          `          mutationKey: [...accessNexusKeys.functions.all, ${quoteTsString(name)}] as const,`,
+          `          mutationFn: (input: ${params}[0]) => unwrap(client.functions.${fn}(input)),`,
+          `          onSuccess: invalidate(accessNexusKeys.all),`,
+          `        }),`,
+          `      },`,
+        );
+      }
+      lines.push(`    },`, '');
+    }
+
     lines.push(
       `  };`,
       `}`,
@@ -2722,3 +3044,49 @@ const JS_RESERVED = new Set([
   'while', 'with', 'yield', 'let', 'static', 'implements', 'interface', 'package', 'private', 'protected',
   'public', 'await', 'arguments', 'eval',
 ]);
+
+/** `defineSchema(..., { functions })`, or undefined when not declared. */
+function edgeFunctionsOf(schema: SchemaDef): Record<string, EdgeFunctionDef> | undefined {
+  return (schema as any).__functions as Record<string, EdgeFunctionDef> | undefined;
+}
+
+/** Allowed auth modes of an Edge Function (default `['user']`). */
+export function edgeFunctionAuthList(def: EdgeFunctionDef): EdgeFunctionAuth[] {
+  if (def.auth === undefined) return ['user'];
+  return typeof def.auth === 'string' ? [def.auth] : [...def.auth];
+}
+
+/** `'invite-member'` → `inviteMember` (a reserved word gets a `Function` suffix). */
+export function edgeFunctionIdentifier(name: string): string {
+  const camel = name.replace(/[-_]+([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+  return JS_RESERVED.has(camel) ? `${camel}Function` : camel;
+}
+
+/** `'invite-member'` → `InviteMember` (prefix of the Input/Output types). */
+function edgeFunctionTypeName(name: string): string {
+  const camel = name.replace(/[-_]+([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+  return camel.charAt(0).toUpperCase() + camel.slice(1);
+}
+
+/** Runtime validation spec of one input field (a TS object literal). */
+function edgeFieldSpec(colType: string): string {
+  const optional = colType.endsWith('?');
+  const base = optional ? colType.slice(0, -1) : colType;
+  const parts: string[] = [];
+  const enumMatch = /^enum\((.*)\)$/.exec(base);
+  const varchar = /^varchar\((\d+)\)$/.exec(base);
+  if (enumMatch) {
+    const values = [...enumMatch[1].matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replaceAll("''", "'"));
+    parts.push(`type: 'enum'`, `optional: ${optional}`, `values: [${values.map(quoteTsString).join(', ')}]`);
+  } else if (varchar) {
+    parts.push(`type: 'varchar'`, `optional: ${optional}`, `maxLength: ${varchar[1]}`);
+  } else {
+    const type = /^numeric\(\d+(,\d+)?\)$/.test(base) ? 'numeric' : base;
+    parts.push(`type: ${quoteTsString(type)}`, `optional: ${optional}`);
+  }
+  return `{ ${parts.join(', ')} }`;
+}
+
+/** The managed block of `supabase/config.toml` (empty list → markers only). */
+export const EDGE_FUNCTIONS_TOML_BEGIN = '# >>> accessnexus functions (generated — edit the schema, not this block)';
+export const EDGE_FUNCTIONS_TOML_END = '# <<< accessnexus functions';
