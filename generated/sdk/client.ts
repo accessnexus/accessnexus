@@ -80,7 +80,7 @@ function selectClause(
 type OrganizationsRelations = {
   'owner': RowOf<'profiles'>;
 };
-type OrganizationsInclude = Partial<Record<keyof OrganizationsRelations, true>>;
+export type OrganizationsInclude = Partial<Record<keyof OrganizationsRelations, true>>;
 type OrganizationsWithInclude<TInclude extends OrganizationsInclude | undefined, TRow = RowOf<'organizations'>> =
   TRow
   & (TInclude extends { 'owner': true } ? { 'owner': OrganizationsRelations['owner'] | null } : unknown)
@@ -94,7 +94,7 @@ type OrgMembersRelations = {
   'user': RowOf<'profiles'>;
   'invited_by': RowOf<'profiles'>;
 };
-type OrgMembersInclude = Partial<Record<keyof OrgMembersRelations, true>>;
+export type OrgMembersInclude = Partial<Record<keyof OrgMembersRelations, true>>;
 type OrgMembersWithInclude<TInclude extends OrgMembersInclude | undefined, TRow = RowOf<'org_members'>> =
   TRow
   & (TInclude extends { 'org': true } ? { 'org': OrgMembersRelations['org'] | null } : unknown)
@@ -111,7 +111,7 @@ type ProjectsRelations = {
   'org': RowOf<'organizations'>;
   'created_by': RowOf<'profiles'>;
 };
-type ProjectsInclude = Partial<Record<keyof ProjectsRelations, true>>;
+export type ProjectsInclude = Partial<Record<keyof ProjectsRelations, true>>;
 type ProjectsWithInclude<TInclude extends ProjectsInclude | undefined, TRow = RowOf<'projects'>> =
   TRow
   & (TInclude extends { 'org': true } ? { 'org': ProjectsRelations['org'] | null } : unknown)
@@ -128,7 +128,7 @@ type TasksRelations = {
   'assignee': RowOf<'profiles'>;
   'reporter': RowOf<'profiles'>;
 };
-type TasksInclude = Partial<Record<keyof TasksRelations, true>>;
+export type TasksInclude = Partial<Record<keyof TasksRelations, true>>;
 type TasksWithInclude<TInclude extends TasksInclude | undefined, TRow = RowOf<'tasks'>> =
   TRow
   & (TInclude extends { 'org': true } ? { 'org': TasksRelations['org'] | null } : unknown)
@@ -148,7 +148,7 @@ type CommentsRelations = {
   'task': RowOf<'tasks'>;
   'author': RowOf<'profiles'>;
 };
-type CommentsInclude = Partial<Record<keyof CommentsRelations, true>>;
+export type CommentsInclude = Partial<Record<keyof CommentsRelations, true>>;
 type CommentsWithInclude<TInclude extends CommentsInclude | undefined, TRow = RowOf<'comments'>> =
   TRow
   & (TInclude extends { 'org': true } ? { 'org': CommentsRelations['org'] | null } : unknown)
@@ -165,7 +165,7 @@ type InvitationsRelations = {
   'org': RowOf<'organizations'>;
   'invited_by': RowOf<'profiles'>;
 };
-type InvitationsInclude = Partial<Record<keyof InvitationsRelations, true>>;
+export type InvitationsInclude = Partial<Record<keyof InvitationsRelations, true>>;
 type InvitationsWithInclude<TInclude extends InvitationsInclude | undefined, TRow = RowOf<'invitations'>> =
   TRow
   & (TInclude extends { 'org': true } ? { 'org': InvitationsRelations['org'] | null } : unknown)

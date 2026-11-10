@@ -508,6 +508,7 @@ export default defineConfig({
   adapterOptions: {
     dbUrlEnv: 'SUPABASE_DB_URL',        // env var push/seed read the DB URL from
     deterministic: true,                // omit the "Generated at" header line
+    reactQuery: true,                   // also emit <sdk>/react-query.ts (TanStack Query v5)
     uuidGeneration: 'v7',               // time-ordered uuid PKs via public.accessnexus_uuidv7()
   },
   targets: {                            // push/seed --target <name>
@@ -535,7 +536,7 @@ const policies = adapter.generatePolicies(schema);   // <table>_rls.sql
 const triggers = adapter.generateTriggers(schema);   // <table>_triggers.sql
 const migration = adapter.generateMigrations(schema); // 001_initial.sql (full DDL)
 const rpcs = adapter.generateRpcs(schema);           // rpcs.sql
-const sdk = adapter.generateClient(schema);          // types.ts + client.ts
+const sdk = adapter.generateClient(schema);          // types.ts + client.ts (+ react-query.ts)
 
 export const files = [...policies, ...triggers, ...migration, ...rpcs, ...sdk].map((f) => f.path);
 ```
@@ -590,6 +591,35 @@ export async function example(userId: string) {
   const { data: stats } = await db.rpc.get_org_dashboard({ p_org_id: 'some-org-id' });
   return { me, owner, projects, renamed, stats };
 }
+```
+
+### TanStack Query helpers (adapterOptions.reactQuery: true)
+
+`generate` also writes `<sdk>/react-query.ts` (needs `@tanstack/react-query` v5 in the app;
+same file in manual and Database mode). `createAccessNexusQueries(client, { queryClient? })`:
+- `q.<table>.findMany|findOne|findById(...)` → `queryOptions({ queryKey, queryFn })`, same
+  args/generics as the client (`columns`/`include` narrow `data`). Use with `useQuery`,
+  `useSuspenseQuery`, `prefetchQuery`, `getQueryData(opts.queryKey)`.
+- `q.<table>.create|update|delete|updateOne|updateMany|deleteOne|deleteMany()` → mutation
+  options. Variables: `create(row)`, `update({ id, data })`, `delete(id)`,
+  `updateOne|updateMany({ filter, data })`, `deleteOne|deleteMany(filter)`.
+- `q.rpc.<name>.query(args)` (read) / `q.rpc.<name>.mutation()` (write).
+- `queryFn`/`mutationFn` throw the Supabase error object as-is (PostgrestError: `code`,
+  `message`); lists resolve to `[]`, findOne/findById to `null` when no visible row.
+- With `queryClient`, mutations invalidate on success: the table + tables that embed it via
+  `include`; RPC mutations invalidate everything (`accessNexusKeys.all` = `['accessnexus']`).
+  Without it, nothing is invalidated. Keys: `accessNexusKeys.<table>.all|list|one|byId`.
+- Extend by spreading: `useQuery({ ...q.tasks.findById(id), enabled: !!id })`. A spread
+  `onSuccess` replaces the generated invalidation.
+
+```tsx
+import { QueryClient, useMutation, useQuery } from '@tanstack/react-query';
+import { createAccessNexusQueries } from './generated/sdk/react-query.js';
+import { accessnexus } from './generated/sdk/index.js';
+
+const q = createAccessNexusQueries(accessnexus, { queryClient: new QueryClient() });
+const tasks = useQuery(q.tasks.findMany({ project_id: projectId }, { include: { project: true } }));
+const create = useMutation(q.tasks.create());
 ```
 
 ## CLI reference

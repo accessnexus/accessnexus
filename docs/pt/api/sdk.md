@@ -9,8 +9,9 @@ Um wrapper tipado sobre um client do supabase-js, gerado em `output.sdk` (padrã
 | Manual | `types.ts` | `Json`; por tabela: `<Table>` (linha), `<Table>Create`, `<Table>Update`; e uma interface `Database` no formato do Supabase, incluindo `Functions` para cada RPC. |
 | Manual | `client.ts` | `createAccessNexusClient`, `AccessNexusClient`, `AccessNexusProvider`, `ColumnsOf`, `SelectedRow`; reexporta `Json`. Importa de `./types.js`. |
 | Database | `client.ts` | `createAccessNexusClient`, `AccessNexusClient`, `AccessNexusProvider`, `ColumnsOf`, `SelectedRow`. Importa `Database` de `adapterOptions.databaseTypes` (padrão `'./database.types'`, relativo à pasta do SDK). |
+| Ambos, com `adapterOptions.reactQuery: true` | `react-query.ts` | `createAccessNexusQueries`, `AccessNexusQueries`, `accessNexusKeys`. Helpers do TanStack Query v5 sobre o client; veja [TanStack Query](#tanstack-query-react-query). |
 
-`<Table>` é o nome da tabela em PascalCase (`org_members` vira `OrgMembers`). Os dois arquivos são derivados: nunca edite, gere de novo.
+`<Table>` é o nome da tabela em PascalCase (`org_members` vira `OrgMembers`). Esses arquivos são derivados: nunca edite, gere de novo.
 
 O `accessnexus init` também escreve ao lado deles um wrapper que cria o client do Supabase e exporta uma instância pronta: `index.ts` (exporta `accessnexus`) ou, no Next.js, `browser.ts` (exporta `accessnexus`) e `server.ts` (exporta `createServerAccessNexus()`). Esse wrapper é seu; o `generate` nunca mexe nele.
 
@@ -206,6 +207,38 @@ export async function dashboard(orgId: string) {
 ## auth
 
 `client.auth` é o objeto `auth` do provider, repassado sem alterações (`db.auth.signInWithPassword(...)`, `db.auth.signInWithOAuth(...)`, `db.auth.getUser()`, ...). O tipo dele é `TClient['auth']`, o próprio tipo de `auth` do provider (`SupabaseAuthClient` para um client do supabase-js ou do @supabase/ssr).
+
+## TanStack Query (React Query) {#tanstack-query-react-query}
+
+Com `adapterOptions: { reactQuery: true }`, o `generate` também escreve `react-query.ts` ao lado do `client.ts`: query keys, `queryOptions` para cada leitura e opções de mutation para cada escrita e RPC, encapsulando o client gerado. Ele precisa do `@tanstack/react-query` v5 no seu app (`npm i @tanstack/react-query`); o AccessNexus em si não depende dele. O arquivo é o mesmo no modo manual e no Database mode.
+
+```tsx
+import { QueryClient, useMutation, useQuery } from '@tanstack/react-query';
+import { createAccessNexusQueries } from './generated/sdk/react-query.js';
+import { accessnexus } from './generated/sdk/index.js'; // seu wrapper do init
+
+export const queryClient = new QueryClient();
+export const q = createAccessNexusQueries(accessnexus, { queryClient });
+
+export function Tasks({ projectId }: { projectId: string }) {
+  const tasks = useQuery(q.tasks.findMany({ project_id: projectId }, { columns: ['id', 'title'] }));
+  const create = useMutation(q.tasks.create()); // invalida tasks (e tabelas que embutem tasks)
+  // tasks.data: Pick<Tasks, 'id' | 'title'>[] | undefined
+  return null;
+}
+```
+
+| Helper | Retorna | Observações |
+| --- | --- | --- |
+| `q.<table>.findMany / findOne / findById(...)` | `queryOptions({ queryKey, queryFn })` | Mesmos argumentos e generics do client (`columns` e `include` restringem `data`). Funciona com `useQuery`, `useSuspenseQuery`, `prefetchQuery`, `getQueryData(...queryKey)`. |
+| `q.<table>.create / update / delete / updateOne / updateMany / deleteOne / deleteMany()` | `{ mutationKey, mutationFn, onSuccess }` | Variáveis: `create(row)`, `update({ id, data })`, `delete(id)`, `updateOne/updateMany({ filter, data })`, `deleteOne/deleteMany(filter)`. A proteção de filtro vazio do client continua lançando erro. |
+| `q.rpc.<name>.query(args)` / `q.rpc.<name>.mutation()` | opções de query / mutation | Use `query` para leituras e `mutation` para escritas (ela invalida todas as queries do AccessNexus). |
+| `accessNexusKeys` | fábrica de keys | `accessNexusKeys.<table>.all` = `['accessnexus', '<table>']`; `list`, `one`, `byId` e `rpc.<name>` abaixo dela. |
+
+- O `queryFn` transforma `{ data, error }` em valor ou rejeição: o `error` é lançado como veio (o `PostgrestError` do Supabase, com `code` / `message` / `details`). Listas resolvem para `[]` em vez de `null`; `findOne` / `findById` resolvem para `null` quando nenhuma linha visível bate.
+- Passe `queryClient` para ter invalidação: no sucesso, uma escrita invalida a própria tabela e toda tabela cujas queries podem embuti-la via `include`; uma mutation de RPC invalida todas as queries do AccessNexus. Sem `queryClient`, nada é invalidado.
+- Acrescente suas opções com spread: `useQuery({ ...q.tasks.findById(id), enabled: !!id })`, `useMutation({ ...q.tasks.update(), onError })`. Um `onSuccess` seu substitui o gerado; nesse caso chame `queryClient.invalidateQueries({ queryKey: accessNexusKeys.tasks.all })` você mesmo.
+- O RLS continua valendo: as queries rodam como o usuário do client Supabase encapsulado. No servidor, crie um `QueryClient` por request.
 
 ## Dicas de tipagem {#typing-tips}
 

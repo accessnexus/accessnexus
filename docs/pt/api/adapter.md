@@ -25,6 +25,7 @@ new SupabaseAdapter(options?: SupabaseAdapterOptions)
 | `uuidGeneration` | `'v4' \| 'v7'` | `'v4'` | Padrão para primary keys `uuid` sem `default`: `gen_random_uuid()` ou `public.accessnexus_uuidv7()`. Com `'v7'`, a migration também define `public.accessnexus_uuidv7()` (UUIDv7 da RFC 9562; EXECUTE revogado de `PUBLIC` e `anon`, concedido a `authenticated` e `service_role`, e a `anon` só quando uma tabela v7 aceita inserts anônimos). |
 | `databaseTypes` | `string` | `'./database.types'` | Só no Database mode: caminho de import do arquivo `database.types` do Supabase, relativo à pasta de saída do SDK. |
 | `deterministic` | `boolean` | `false` | Omite a linha de cabeçalho `-- Generated at: <timestamp>`. |
+| `reactQuery` | `boolean` | `false` | `generateClient` também retorna `react-query.ts`: helpers do TanStack Query v5 sobre o client (veja [SDK gerado](/pt/api/sdk#tanstack-query-react-query)). |
 
 ::: warning
 `forceRLS: false` deixa o dono da tabela ignorar todas as policies. Mantenha o padrão.

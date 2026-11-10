@@ -129,6 +129,14 @@ export interface SupabaseAdapterOptions {
    * @default false
    */
   deterministic?: boolean;
+  /**
+   * Also emit `react-query.ts` in the SDK folder: TanStack Query v5
+   * (`@tanstack/react-query`) query keys, `queryOptions` for every read and
+   * mutation options for every write and RPC, wrapping the generated client.
+   *
+   * @default false
+   */
+  reactQuery?: boolean;
 }
 
 /**
@@ -164,6 +172,7 @@ export class SupabaseAdapter implements Adapter {
       forceRLS: options.forceRLS ?? true,
       uuidGeneration: options.uuidGeneration ?? 'v4',
       deterministic: options.deterministic ?? false,
+      reactQuery: options.reactQuery ?? false,
       databaseTypes: options.databaseTypes,
     };
   }
@@ -196,18 +205,16 @@ export class SupabaseAdapter implements Adapter {
       (t) => Object.keys(t.columns).length === 0
     );
 
-    if (isDatabaseMode) {
-      return this.generateDatabaseModeClient(schema);
+    const files: GeneratedOutput[] = isDatabaseMode
+      ? this.generateDatabaseModeClient(schema)
+      : [
+          { path: 'types.ts', content: this.generateTypeInterfaces(schema) },
+          { path: 'client.ts', content: this.generateClientCode(schema) },
+        ];
+    if (this.options.reactQuery) {
+      files.push({ path: 'react-query.ts', content: this.generateReactQueryCode(schema) });
     }
-
-    // Original manual mode
-    const interfaces = this.generateTypeInterfaces(schema);
-    const client = this.generateClientCode(schema);
-
-    return [
-      { path: 'types.ts', content: interfaces },
-      { path: 'client.ts', content: client },
-    ];
+    return files;
   }
 
   /** Full DDL (`001_initial.sql`): enums, tables, FKs, indexes. Empty in Database mode. */
@@ -1291,7 +1298,7 @@ export class SupabaseAdapter implements Adapter {
         lines.push(`  '${relation.alias}': RowOf<'${relation.targetTable}'>;`);
       }
       lines.push(`};`);
-      lines.push(`type ${includeTypeName} = Partial<Record<keyof ${relTypeName}, true>>;`);
+      lines.push(`export type ${includeTypeName} = Partial<Record<keyof ${relTypeName}, true>>;`);
       lines.push(`type ${withIncludeTypeName}<TInclude extends ${includeTypeName} | undefined, TRow = RowOf<'${tableName}'>> =`);
       lines.push(`  TRow`);
       for (const relation of relations) {
@@ -2103,6 +2110,220 @@ export class SupabaseAdapter implements Adapter {
     lines.push(`import type { Database, ${typeImports.join(', ')} } from './types.js';`);
     lines.push(`export type { Json } from './types.js';`);
     this.emitClientBody(schema, lines, 'manual');
+    return lines.join('\n');
+  }
+
+  // ---- TanStack Query helpers (adapterOptions.reactQuery) ----
+
+  /**
+   * `react-query.ts`: query keys, `queryOptions` for every read and mutation
+   * options for every write/RPC, all wrapping the generated client. Types are
+   * taken from `client.ts` (`Parameters<...>` and the client's own generics),
+   * so the file is identical in manual and Database mode.
+   */
+  private generateReactQueryCode(schema: SchemaDef): string {
+    const rpcs = (schema as any).__rpcs as Record<string, RpcDef> | undefined;
+    const rpcNames = rpcs ? Object.keys(rpcs) : [];
+    const tables = Object.keys(schema);
+
+    // Tables whose queries may embed `table` through `include` (they reference it).
+    const embeddedIn = new Map<string, string[]>();
+    for (const tableName of tables) {
+      for (const relation of this.getTableRelations(schema, tableName)) {
+        const list = embeddedIn.get(relation.targetTable) ?? [];
+        if (!list.includes(tableName) && relation.targetTable !== tableName) list.push(tableName);
+        embeddedIn.set(relation.targetTable, list);
+      }
+    }
+
+    const includeTypes = tables
+      .filter((t) => this.getTableRelations(schema, t).length > 0)
+      .map((t) => `${this.toPascalCase(t)}Include`);
+
+    const lines: string[] = [
+      '// ============================================',
+      '// AccessNexus: Auto-generated TanStack Query helpers',
+      '// Requires @tanstack/react-query v5',
+      '// DO NOT EDIT — regenerate with `npx accessnexus generate`',
+      '// ============================================',
+      '',
+      `import { queryOptions, type QueryClient } from '@tanstack/react-query';`,
+      `import type { AccessNexusClient, AccessNexusProvider, ColumnsOf${includeTypes.map((t) => `, ${t}`).join('')} } from './client.js';`,
+      '',
+      `type Client = AccessNexusClient;`,
+      `type TableKey = Exclude<keyof Client, 'auth' | 'rpc'>;`,
+      `type FilterOf<K extends TableKey> = NonNullable<Parameters<Client[K]['findMany']>[0]>;`,
+      `type CreateOf<K extends TableKey> = Parameters<Client[K]['create']>[0];`,
+      `type UpdateOf<K extends TableKey> = Parameters<Client[K]['update']>[1];`,
+      `type Result<T> = PromiseLike<{ data: T | null; error: unknown }>;`,
+      '',
+      `// Supabase reports failures in \`error\`; TanStack Query needs a rejection.`,
+      `// The thrown value is the Supabase error itself (PostgrestError: code, message, details).`,
+      `async function unwrap<T>(result: Result<T>): Promise<T | null> {`,
+      `  const { data, error } = await result;`,
+      `  if (error) throw error;`,
+      `  return data;`,
+      `}`,
+      `async function unwrapList<T>(result: Result<T[]>): Promise<T[]> {`,
+      `  return (await unwrap(result)) ?? [];`,
+      `}`,
+      `async function unwrapRow<T>(result: Result<T>): Promise<T> {`,
+      `  // create/update use .single(): no row is reported as an error, never as null.`,
+      `  return (await unwrap(result)) as T;`,
+      `}`,
+      '',
+      `/**`,
+      ` * Query keys of the helpers below. Every key starts with \`['accessnexus', <table>]\`,`,
+      ` * so \`invalidateQueries({ queryKey: accessNexusKeys.<table>.all })\` refreshes a table.`,
+      ` */`,
+      `export const accessNexusKeys = {`,
+      `  all: ['accessnexus'] as const,`,
+    ];
+    for (const t of tables) {
+      lines.push(
+        `  ${t}: {`,
+        `    all: ['accessnexus', '${t}'] as const,`,
+        `    list: (filter?: unknown, options?: unknown) => ['accessnexus', '${t}', 'list', { filter: filter ?? {}, options: options ?? {} }] as const,`,
+        `    one: (filter: unknown, options?: unknown) => ['accessnexus', '${t}', 'one', { filter, options: options ?? {} }] as const,`,
+        `    byId: (id: string, options?: unknown) => ['accessnexus', '${t}', 'byId', id, options ?? {}] as const,`,
+        `  },`,
+      );
+    }
+    if (rpcNames.length > 0) {
+      lines.push(`  rpc: {`, `    all: ['accessnexus', 'rpc'] as const,`);
+      for (const name of rpcNames) {
+        lines.push(`    ${name}: (args?: unknown) => ['accessnexus', 'rpc', '${name}', args ?? {}] as const,`);
+      }
+      lines.push(`  },`);
+    }
+    lines.push(
+      `};`,
+      '',
+      `export interface AccessNexusQueriesOptions {`,
+      `  /**`,
+      `   * When set, each mutation invalidates on success the queries it can change:`,
+      `   * its table, the tables that embed it via \`include\`, and every query for an RPC`,
+      `   * mutation. Without it, mutations invalidate nothing.`,
+      `   */`,
+      `  queryClient?: QueryClient;`,
+      `}`,
+      '',
+      `/**`,
+      ` * TanStack Query v5 helpers over a client from \`createAccessNexusClient\`:`,
+      ` * reads return \`queryOptions\` (\`useQuery(q.tasks.findMany({ project_id }))\`),`,
+      ` * writes return mutation options (\`useMutation(q.tasks.create())\`). Spread to add`,
+      ` * your own options: \`useQuery({ ...q.tasks.findById(id), enabled: !!id })\`.`,
+      ` */`,
+      `export function createAccessNexusQueries<TClient extends AccessNexusProvider>(`,
+      `  client: AccessNexusClient<TClient>,`,
+      `  { queryClient }: AccessNexusQueriesOptions = {},`,
+      `) {`,
+      `  const invalidate = (...keys: ReadonlyArray<readonly unknown[]>) => async () => {`,
+      `    if (!queryClient) return;`,
+      `    await Promise.all(keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })));`,
+      `  };`,
+      `  return {`,
+    );
+
+    for (const t of tables) {
+      const hasRel = this.getTableRelations(schema, t).length > 0;
+      const inc = `${this.toPascalCase(t)}Include`;
+      const generics = hasRel
+        ? `<TColumns extends ColumnsOf<'${t}'> | undefined = undefined, TInclude extends ${inc} | undefined = undefined>`
+        : `<TColumns extends ColumnsOf<'${t}'> | undefined = undefined>`;
+      const optionsType = hasRel ? `{ columns?: TColumns; include?: TInclude }` : `{ columns?: TColumns }`;
+      const typeArgs = hasRel ? `<TColumns, TInclude>` : `<TColumns>`;
+      const affected = [t, ...(embeddedIn.get(t) ?? [])].map((x) => `accessNexusKeys.${x}.all`).join(', ');
+      const keys = `accessNexusKeys.${t}`;
+      lines.push(
+        `    ${t}: {`,
+        `      findMany: ${generics}(filter?: FilterOf<'${t}'>, options?: ${optionsType}) =>`,
+        `        queryOptions({`,
+        `          queryKey: ${keys}.list(filter, options),`,
+        `          queryFn: () => unwrapList(client.${t}.findMany${typeArgs}(filter, options)),`,
+        `        }),`,
+        `      findOne: ${generics}(filter: FilterOf<'${t}'>, options?: ${optionsType}) =>`,
+        `        queryOptions({`,
+        `          queryKey: ${keys}.one(filter, options),`,
+        `          queryFn: () => unwrap(client.${t}.findOne${typeArgs}(filter, options)),`,
+        `        }),`,
+        `      findById: ${generics}(id: string, options?: ${optionsType}) =>`,
+        `        queryOptions({`,
+        `          queryKey: ${keys}.byId(id, options),`,
+        `          queryFn: () => unwrap(client.${t}.findById${typeArgs}(id, options)),`,
+        `        }),`,
+        `      create: () => ({`,
+        `        mutationKey: [...${keys}.all, 'create'] as const,`,
+        `        mutationFn: (data: CreateOf<'${t}'>) => unwrapRow(client.${t}.create(data)),`,
+        `        onSuccess: invalidate(${affected}),`,
+        `      }),`,
+        `      update: () => ({`,
+        `        mutationKey: [...${keys}.all, 'update'] as const,`,
+        `        mutationFn: ({ id, data }: { id: string; data: UpdateOf<'${t}'> }) => unwrapRow(client.${t}.update(id, data)),`,
+        `        onSuccess: invalidate(${affected}),`,
+        `      }),`,
+        `      delete: () => ({`,
+        `        mutationKey: [...${keys}.all, 'delete'] as const,`,
+        `        mutationFn: async (id: string) => { await unwrap(client.${t}.delete(id)); },`,
+        `        onSuccess: invalidate(${affected}),`,
+        `      }),`,
+        `      // Filtered writes: an empty filter throws before any request (see client.ts).`,
+        `      updateOne: () => ({`,
+        `        mutationKey: [...${keys}.all, 'updateOne'] as const,`,
+        `        mutationFn: ({ filter, data }: { filter: FilterOf<'${t}'>; data: UpdateOf<'${t}'> }) => unwrap(client.${t}.updateOne(filter, data)),`,
+        `        onSuccess: invalidate(${affected}),`,
+        `      }),`,
+        `      updateMany: () => ({`,
+        `        mutationKey: [...${keys}.all, 'updateMany'] as const,`,
+        `        mutationFn: ({ filter, data }: { filter: FilterOf<'${t}'>; data: UpdateOf<'${t}'> }) => unwrapList(client.${t}.updateMany(filter, data)),`,
+        `        onSuccess: invalidate(${affected}),`,
+        `      }),`,
+        `      deleteOne: () => ({`,
+        `        mutationKey: [...${keys}.all, 'deleteOne'] as const,`,
+        `        mutationFn: (filter: FilterOf<'${t}'>) => unwrap(client.${t}.deleteOne(filter)),`,
+        `        onSuccess: invalidate(${affected}),`,
+        `      }),`,
+        `      deleteMany: () => ({`,
+        `        mutationKey: [...${keys}.all, 'deleteMany'] as const,`,
+        `        mutationFn: (filter: FilterOf<'${t}'>) => unwrapList(client.${t}.deleteMany(filter)),`,
+        `        onSuccess: invalidate(${affected}),`,
+        `      }),`,
+        `    },`,
+        '',
+      );
+    }
+
+    if (rpcNames.length > 0) {
+      lines.push(`    // Each RPC as a query (reads) and as a mutation (writes; invalidates every query).`);
+      lines.push(`    rpc: {`);
+      for (const name of rpcNames) {
+        const params = `Parameters<Client['rpc']['${name}']>`;
+        lines.push(
+          `      ${name}: {`,
+          `        query: (...args: ${params}) =>`,
+          `          queryOptions({`,
+          `            queryKey: accessNexusKeys.rpc.${name}(args[0]),`,
+          `            queryFn: () => unwrap(client.rpc.${name}(...args)),`,
+          `          }),`,
+          `        mutation: () => ({`,
+          `          mutationKey: [...accessNexusKeys.rpc.all, '${name}'] as const,`,
+          `          mutationFn: (args: ${params}[0]) => unwrap(client.rpc.${name}(args)),`,
+          `          onSuccess: invalidate(accessNexusKeys.all),`,
+          `        }),`,
+          `      },`,
+        );
+      }
+      lines.push(`    },`, '');
+    }
+
+    lines.push(
+      `  };`,
+      `}`,
+      '',
+      `/** Type of the helpers returned by \`createAccessNexusQueries\`. */`,
+      `export type AccessNexusQueries = ReturnType<typeof createAccessNexusQueries>;`,
+      '',
+    );
     return lines.join('\n');
   }
 

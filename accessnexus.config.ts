@@ -7,5 +7,6 @@ export default defineConfig({
     adapterOptions: {
         dbUrlEnv: 'SUPABASE_DB_URL',
         deterministic: true,
+        reactQuery: true,
     },
 });

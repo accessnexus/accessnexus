@@ -238,6 +238,17 @@ to `select` if raw API reads must not see them).
 unique `slug`) and return the written rows; the filter must name at least one column (type
 error and runtime error otherwise), so a typo never updates or deletes the whole table.
 
+**TanStack Query.** Set `adapterOptions: { reactQuery: true }` and `generate` also writes
+`react-query.ts`: `createAccessNexusQueries(db, { queryClient })` returns `queryOptions` for
+every read and mutation options for every write and RPC, with query keys and invalidation
+(needs `@tanstack/react-query` v5 in your app):
+
+```tsx
+const q = createAccessNexusQueries(db, { queryClient });
+const posts = useQuery(q.posts.findMany({ status: 'draft' }, { columns: ['id', 'title'] }));
+const publish = useMutation(q.posts.update()); // publish.mutate({ id, data: { status: 'published' } })
+```
+
 ## Centralized RBAC (multi-tenant)
 
 Define roles and tenant once, then attach per table:

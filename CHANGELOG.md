@@ -4,6 +4,28 @@ All notable changes to `accessnexus` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-10
+
+### Added
+
+- TanStack Query (React Query) support: `adapterOptions: { reactQuery: true }` makes
+  `generate` also write `<sdk>/react-query.ts` (same file in manual and Database mode; needs
+  `@tanstack/react-query` v5 in the app, AccessNexus does not depend on it).
+  `createAccessNexusQueries(client, { queryClient? })` returns `queryOptions` for
+  `findMany` / `findOne` / `findById` on every table (same arguments and generics as the
+  client, so `columns` / `include` narrow `data`), mutation options for `create`, `update`,
+  `delete`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`, and
+  `rpc.<name>.query(args)` / `rpc.<name>.mutation()` for every RPC. `queryFn` / `mutationFn`
+  throw the Supabase error as-is; lists resolve to `[]`. With `queryClient`, a write
+  invalidates its table and the tables that embed it through `include`, and an RPC mutation
+  invalidates every AccessNexus query. Keys come from the exported `accessNexusKeys`
+  (`['accessnexus', <table>, ...]`).
+- `SupabaseAdapterOptions.reactQuery` (default `false`).
+
+### Changed
+
+- Generated `client.ts` now exports the `<Table>Include` types (additive).
+
 ## [0.1.6] - 2026-10-30
 
 ### Added

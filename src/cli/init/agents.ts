@@ -38,7 +38,7 @@ Read it before changing anything database-related.
 Rules:
 - \`${schemaPath}\` is the single source of truth. Never write SQL migrations or RLS
   policies by hand, and never edit generated files (\`${generatedDir}/\`, \`${sdkPath}/client.ts\`,
-  \`${sdkPath}/types.ts\`) — change the schema and regenerate. The client wrapper(s) init wrote
+  \`${sdkPath}/types.ts\`, \`${sdkPath}/react-query.ts\`) — change the schema and regenerate. The client wrapper(s) init wrote
   in \`${sdkPath}/\` (index.ts, or server.ts/browser.ts) are yours: edit env var names freely.
 - After every schema change run, in order:
   1. \`npx accessnexus validate --json\` — fix every issue with severity "error"
