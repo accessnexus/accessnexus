@@ -55,7 +55,7 @@ Without a TTY, every command runs non-interactively. The only command that asks 
 {
   "ok": false,
   "command": "init",
-  "version": "0.4.1-next",
+  "version": "0.4.2-next",
   "error": {
     "code": "INIT_NOT_INTERACTIVE",
     "message": "init asks questions, but there is no terminal to answer them (stdin is not a TTY)",
@@ -80,7 +80,7 @@ npx accessnexus validate --json
 {
   "ok": true,
   "command": "validate",
-  "version": "0.4.1-next",
+  "version": "0.4.2-next",
   "schemaPath": "./accessnexus.schema.ts",
   "mode": "manual",
   "tables": [
